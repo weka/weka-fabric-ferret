@@ -1287,8 +1287,8 @@ main() {
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
 
-    WORK=$(mktemp -d /tmp/fs_work.XXXXXX)
-    SOCKET_DIR=$(mktemp -d /tmp/fs_ssh.XXXXXX)
+    WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
+    SOCKET_DIR=$(mktemp -d /tmp/ff_ssh.XXXXXX)
     COLLECT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dp_validation_XXXXXX")
     RAW_DIR=$COLLECT_DIR/raw_per_host; mkdir -p "$RAW_DIR" "$WORK/disc" "$WORK/sweep"
     SI=$COLLECT_DIR/sysinfo
@@ -1903,7 +1903,7 @@ START_TS=$(date -u +%Y%m%dT%H%M%SZ)
 # bare `wait` also waits for a process substitution, which never exits while main runs.
 # tee ignores INT/TERM/HUP (Ctrl-C, group kill, dropped session) so cleanup can still write.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
-    FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/fs_runlog.XXXXXX") || exit 2
+    FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/ff_runlog.XXXXXX") || exit 2
     STATE_FILE=$FF_RUNLOG.state
     trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
     { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; exec tee -a "$FF_RUNLOG" >&2 3>&- ); rc=${PIPESTATUS[0]}; } 3>&1
