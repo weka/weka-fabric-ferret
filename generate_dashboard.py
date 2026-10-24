@@ -6,7 +6,8 @@ Parses the .tgz archive (older runs: .tar.gz) produced by fabric_ferret.sh
 and generates a self-contained interactive HTML dashboard.
 
 Usage: python3 generate_dashboard.py <run>.tgz|<run>.tar.gz [output.html]   (default: <run>.html next to the archive)
-FF_SPINES, FF_SPINE_LINKS, FF_SPINE_GBPS in the environment declare the leaf-spine uplinks for a run that did not.
+FF_SPINES, FF_SPINE_LINKS, FF_SPINE_GBPS in the environment declare the leaf-spine uplinks for a run that did not
+(FF_CLIENT_SPINE_LINKS, FF_CLIENT_SPINE_GBPS: the client leaves').
 """
 
 import re
@@ -53,11 +54,24 @@ def generate_html(data, output_path):
         return rt.get(data.get('ip_rail', {}).get(ip), data['tiers'])[k]
     def tpath(r, k):
         return min(tip(r['src'], k), tip(r['dst'], k))
-    badge_tiers = {r: {k: rt.get(r, data['tiers'])[k] for k in ('G', 'F', 'S')} for r in ('A', 'B')}
-    badge_tiers['X'] = {k: min(badge_tiers['A'][k], badge_tiers['B'][k]) for k in ('G', 'F', 'S')}
+    rails = data.get('rails', ['A', 'B'])
+    badge_tiers = {r: {k: rt.get(r, data['tiers'])[k] for k in ('G', 'F', 'S')} for r in rails}
+    badge_tiers['X'] = {k: min(badge_tiers[r][k] for r in rails) for k in ('G', 'F', 'S')}
     rr = data.get('rail_rate', {})
-    rail_note = (f" | rails differ: A {rr['A']}G, B {rr['B']}G (tables judge each IP by its rail; charts use {L}G)"
-                 if rr and rr.get('A') != rr.get('B') else '')
+    rail_note = (f" | rails differ: {', '.join(f'{r} {rr[r]}G' for r in rails)} (tables judge each IP by its rail; charts use {L}G)"
+                 if len(set(rr.values())) > 1 else '')
+    # run endpoints: A/B on a two-rail page as before; with 1 or 3+ rails those letters would read as rails
+    ep = (('Host A', 'IP A', 'Dev A', 'Host B', 'IP B', 'Dev B') if rails == ['A', 'B'] else
+          ('Sender', 'Sender IP', 'Sender dev', 'Receiver', 'Receiver IP', 'Receiver dev'))
+    # per-host table head, built once for the static page and the JS that redraws it; Cross only with 2+ rails
+    xab = '&lt;-&gt;'.join(rails)
+    host_head = ('<th>#</th><th>Host</th><th>Status<small>worst of ' + ', '.join(rails + ['Cross'] * (len(rails) > 1))
+                 + ' (means)</small></th><th>Gbps<small>'
+                 + (f"avg of NIC {', '.join(rails[:-1])} &amp; {rails[-1]} medians" if len(rails) > 1 else f'NIC {rails[0]} median')
+                 + '</small></th><th>Retrans<small>total TCP retransmits</small></th>'
+                 + ''.join(f'<th>IP {x}</th><th>Dev {x}</th><th>{x} Median<small>median Gbps across NIC {x} tests</small></th>'
+                           f'<th>{x} Retrans<small>total retransmits, NIC {x}</small></th>' for x in rails)
+                 + (f'<th>Cross Median<small>median Gbps across {xab} tests (a path, not a NIC)</small></th>' if len(rails) > 1 else ''))
     at_l = f'{L}G' if not rail_note else 'rail speed'
     label = data['metadata'].get('label', 'Fabric')
     speeds = sorted([r['gbps'] for r in results]) if results else []
@@ -219,9 +233,32 @@ def generate_html(data, output_path):
         })
     # Hosts — group by host, each host has 2 NICs
     host_nics = defaultdict(list)  # host -> [{nic, ip, switch, port, avg_gbps}]
+    cnic = {n['ip']: n for n in (data.get('clients') or {}).get('nics', [])}
     for l in data['lldp_info']:
-        avg = ip_avgs.get(l['ip'], 0)
+        avg = cnic[l['ip']]['avg'] if l['ip'] in cnic else ip_avgs.get(l['ip'], 0)
         host_nics[l['host']].append({**l, 'avg_gbps': round(avg, 1)})
+
+    # clients: own node type, colored by their judged status (a client line is not the rail line)
+    ccol = {'OK': '#4ecca3', 'SLOW': '#ffc107', 'CRITICAL': '#e94560'}
+    for host in [h for h, ns in host_nics.items() if all(n['ip'] in cnic for n in ns)]:
+        nics = host_nics.pop(host)
+        st = max((cnic[n['ip']]['status'] for n in nics), key=lambda s: {'OK': 0, 'SLOW': 1, 'CRITICAL': 2}.get(s, 3))
+        avg = sum(n['avg_gbps'] for n in nics) / len(nics)
+        topo_nodes[host] = {
+            'id': host, 'label': host, 'group': 'client', 'level': 2,
+            'color': {'background': ccol.get(st, '#666666'), 'border': '#ffffff'},
+            'title': f'<b>{host}</b> (client, {st}, avg {avg:.0f} Gbps)' + ''.join(
+                f"<br>{n['nic']}: {n['ip']} → {n.get('port_desc','')} @ {n['avg_gbps']} Gbps ({cnic[n['ip']]['status']})" for n in nics),
+            'hostAvg': round(avg, 1), 'isDown': st not in ccol,
+        }
+        for n in nics:
+            if n.get('switch', '') in topo_nodes and n['switch'] != 'unknown':
+                topo_edges.append({
+                    'from': host, 'to': n['switch'],
+                    'color': {'color': ccol.get(cnic[n['ip']]['status'], '#666666'), 'highlight': '#ffffff'}, 'dashes': [6, 4],
+                    'title': f"{n['ip']} via {n.get('port_desc','')} — {n['avg_gbps']} Gbps",
+                    'width': max(1, n['avg_gbps'] / (L / 4)),
+                })
 
     for host, nics in host_nics.items():
         host_avg = sum(n['avg_gbps'] for n in nics) / len(nics) if nics else 0
@@ -251,6 +288,7 @@ def generate_html(data, output_path):
                     'width': max(1, n['avg_gbps'] / (L / 4)),
                 })
 
+    leg_clients = ' &nbsp; Clients: <b id="legClients">0</b>' if cnic else ''
     topo_nodes_json = json.dumps(list(topo_nodes.values()))
     topo_edges_json = json.dumps(topo_edges)
 
@@ -278,7 +316,10 @@ def generate_html(data, output_path):
                  'lldp_wrong_rail': "Cabled to the other rail's switch", 'mtu_mismatch': 'MTU differs on a rail',
                  'gateway_FAIL': 'Rail gateway not answering', 'gateway_MTU': 'Rail gateway answers small pings only',
                  'mesh_unreachable': 'Rail IP unreachable in the mesh',
-                 'mesh_no_replies': 'Rail IP gets no replies in the mesh'}
+                 'mesh_no_replies': 'Rail IP gets no replies in the mesh',
+                 'client_route_undeclared': 'Client reaches a backend by an undeclared NIC',
+                 'shared_leaf': 'Leaf shared by clients and backends (judged as a backend leaf)',
+                 'client_mtu_mismatch': 'Client MTU differs from the backends'}
         rows = ''.join(f"<tr><td>{escape(kinds.get(a[1], a[1]) if len(a) > 1 else '')}</td><td>{escape(a[0])}</td>"
                        f"<td>{escape(a[2] if len(a) > 2 else '')}</td></tr>" for a in data.get('anomalies', []))
         bad = len(data.get('anomalies', []))
@@ -326,7 +367,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         compare_html = f"""<div class="card mb-3"><div class="card-header">Compared with the run of {escape(cmp_['old_ts'])} ({escape(cmp_['old_label'])}):
 <b>{len(cmp_['changes'])}</b> NIC changes, {len(cmp_['down_added'])} newly down IPs, {len(cmp_['down_cleared'])} recovered</div>
 <div class="card-body" style="max-height:360px; overflow-y:auto;">{downs}
-<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Per rail NIC (host + NIC), since pairings differ between runs. Throughput is compared per direction (sent, received); a drop seen only as received usually follows a drop on the sending NIC listed with it. Changes of 10% or more are listed; a lifetime counter that went down was reset (reboot or driver reload).</p>
+<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Per rail NIC (host + NIC), since pairings differ between runs. Throughput is compared per direction (sent, received); a drop seen only as received usually follows a drop on the sending NIC listed with it. Changes of 10% or more are listed; a lifetime counter that went down was reset (reboot or driver reload).{' A client NIC: sent = its runs to the backends, received = from them.' if data.get('clients') else ''}</p>
 {'<p class="text-success mb-0">No NIC-level changes.</p>' if not rows else f'<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>NIC</th><th>What</th><th>Before</th><th>Now</th></tr></thead><tbody>{rows}</tbody></table>'}</div></div>"""
 
     no_drops_msg = ('<p class="text-warning mb-0">Drop counters were not read on this run: unknown, not zero.</p>'
@@ -457,7 +498,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     </span>
 </div>
 {problems_html}
-{uplinks_html}
+{_clients_html(data)}{uplinks_html}
 {host_rx_html}
 {compare_html}
 {preflight_html}
@@ -596,7 +637,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Bottom 50 Individual Test Results<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('bottomTable','bottom_50.csv')">Download CSV</button></div>
             <div class="card-body">
                 <table class="table table-striped table-hover table-sm" id="bottomTable">
-                <thead><tr><th>#</th><th>Host A</th><th>IP A</th><th>Host B</th><th>IP B</th><th>Gbps<small>expected {L}</small></th><th>Retrans<small>ideal 0</small></th><th>GBytes</th></tr></thead>
+                <thead><tr><th>#</th><th>{ep[0]}</th><th>{ep[1]}</th><th>{ep[3]}</th><th>{ep[4]}</th><th>Gbps<small>expected {L}</small></th><th>Retrans<small>ideal 0</small></th><th>GBytes</th></tr></thead>
                 <tbody>
                 {''.join(f"<tr><td></td><td>{h(r['src'])}</td><td>{r['src']}</td><td>{h(r['dst'])}</td><td>{r['dst']}</td><td><span class='badge {'badge-ok' if r['gbps']>=tpath(r, 'G') else 'badge-func' if r['gbps']>=tpath(r, 'F') else 'badge-slow' if r['gbps']>=tpath(r, 'S') else 'badge-down'}'>{r['gbps']}</span></td><td>{'<span class=badge-down>' + str(r.get('retransmits',0)) + '</span>' if r.get('retransmits',0) > 0 else '0'}</td><td>{r['gbytes']}</td></tr>" for r in bottom_50)}
                 </tbody></table>
@@ -691,7 +732,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <!-- Legend overlay — top-left of map, hover to expand -->
             <div id="topoLegend" style="position:absolute; top:10px; left:10px; background:rgba(15,52,96,0.95); padding:8px 12px; border-radius:6px; font-size:0.8rem; color:#e0e0e0; line-height:1.7; z-index:10; min-width:160px; cursor:default;">
                 <div style="font-weight:600; margin-bottom:4px; color:#4ecca3;">Displayed</div>
-                <div>Backends: <b id="legHosts">0</b> &nbsp; Links: <b id="legLinks">0</b> &nbsp; Switches: <b id="legSwitches">0</b></div>
+                <div>Backends: <b id="legHosts">0</b>{leg_clients} &nbsp; Links: <b id="legLinks">0</b> &nbsp; Switches: <b id="legSwitches">0</b></div>
                 <!-- Hover detail -->
                 <div id="topoLegendDetail" style="display:none; margin-top:6px; border-top:1px solid rgba(78,204,163,0.3); padding-top:6px;">
                     <table style="width:100%; font-size:0.78rem; color:#ccc;">
@@ -752,7 +793,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         </div>
         <div class="card-body">
             <table class="table table-sm table-striped table-hover" id="allResultsTable">
-            <thead><tr><th>#</th><th>Host</th><th>Status<small>worst of A, B, Cross (means)</small></th><th>Gbps<small>avg of NIC A &amp; B medians</small></th><th>Retrans<small>total TCP retransmits</small></th><th>IP A</th><th>Dev A</th><th>A Median<small>median Gbps across NIC A tests</small></th><th>A Retrans<small>total retransmits, NIC A</small></th><th>IP B</th><th>Dev B</th><th>B Median<small>median Gbps across NIC B tests</small></th><th>B Retrans<small>total retransmits, NIC B</small></th><th>Cross Median<small>median Gbps across A&lt;-&gt;B tests (a path, not a NIC)</small></th></tr></thead>
+            <thead><tr>{host_head}</tr></thead>
             <tbody></tbody></table>
         </div>
     </div>
@@ -902,21 +943,24 @@ $(document).ready(function() {{
     // Pre-compute per-host summary: one row per host with median per NIC
     // Rail per IP from rails.txt; archives without it (older collector) fall back to odd third octet = rail A
     var ipRail = {json.dumps(data.get('ip_rail', {}))};
-    function isNicA(ip) {{ if (ipRail[ip]) return ipRail[ip] === 'A'; var parts = ip.split('.'); return parseInt(parts[2]) % 2 === 1; }}
-    // a cross-rail run measures a path, not either NIC: kept out of the A/B medians, shown as its own column
-    function isCross(r) {{ return isNicA(r.src) !== isNicA(r.dst); }}
+    var rails = {json.dumps(rails)};
+    var clientIps = new Set({json.dumps(sorted(data.get('client_ips', [])))});
+    function railOf(ip) {{ if (ipRail[ip]) return ipRail[ip]; if (rails.length !== 2) return rails[0]; var parts = ip.split('.'); return parseInt(parts[2]) % 2 === 1 ? 'A' : 'B'; }}
+    // a cross-rail run measures a path, not either NIC: kept out of the per-rail medians, shown as its own column
+    function isCross(r) {{ return railOf(r.src) !== railOf(r.dst); }}
     var railTiers = {json.dumps(badge_tiers)};
     function railBadge(v, rl) {{ var t = railTiers[rl]; return v >= t.G ? 'badge-ok' : v >= t.F ? 'badge-func' : v >= t.S ? 'badge-slow' : 'badge-down'; }}
     var downIps = new Set({json.dumps(data['down_ips'])});
 
-    // Build per-host data: map all known IPs (from LLDP/driver) to hosts, include down NICs as 0
+    // Build per-host data: map all known IPs (from LLDP/driver) to hosts, include down NICs as 0; clients have their own card
     var perHost = {{}};
+    function newHost(h) {{ var o = {{ host: h, r: {{}}, xGbps: [], xRetr: 0, xGB: 0 }}; rails.forEach(function(x) {{ o.r[x] = {{ ip: '', g: [], retr: 0, gb: 0 }}; }}); return o; }}
     // First, seed every host's NIC IPs from the ip->host map
     Object.keys(ipHost).forEach(function(ip) {{
+        if (clientIps.has(ip)) return;
         var h = ipHost[ip];
-        if (!perHost[h]) perHost[h] = {{ host: h, ipA: '', ipB: '', aGbps: [], bGbps: [], xGbps: [], aRetr: 0, bRetr: 0, xRetr: 0, aGB: 0, bGB: 0, xGB: 0 }};
-        if (isNicA(ip)) perHost[h].ipA = ip;
-        else perHost[h].ipB = ip;
+        if (!perHost[h]) perHost[h] = newHost(h);
+        if (perHost[h].r[railOf(ip)]) perHost[h].r[railOf(ip)].ip = ip;
     }});
     // Then attribute test results to hosts
     allData.forEach(function(r) {{
@@ -925,35 +969,36 @@ $(document).ready(function() {{
         var x = isCross(r);
         [r.src, r.dst].forEach(function(ip) {{
             var h = ipHost[ip] || ip;
-            if (!perHost[h]) perHost[h] = {{ host: h, ipA: '', ipB: '', aGbps: [], bGbps: [], xGbps: [], aRetr: 0, bRetr: 0, xRetr: 0, aGB: 0, bGB: 0, xGB: 0 }};
+            if (!perHost[h]) perHost[h] = newHost(h);
+            var n = perHost[h].r[railOf(ip)];
             if (x) {{ perHost[h].xGbps.push(r.gbps); perHost[h].xRetr += retr; perHost[h].xGB += gb; }}
-            else if (isNicA(ip)) {{ perHost[h].aGbps.push(r.gbps); perHost[h].aRetr += retr; perHost[h].aGB += gb; }}
-            else {{ perHost[h].bGbps.push(r.gbps); perHost[h].bRetr += retr; perHost[h].bGB += gb; }}
+            else if (n) {{ n.g.push(r.gbps); n.retr += retr; n.gb += gb; }}
         }});
     }});
     // Status, as in the collector summary: the worst column, each its mean judged at its rail's cut-offs (Cross at
-    // the slower rail's); (cross) = only Cross is that bad; (1rail) = a rail without same-rail runs.
+    // the slowest rail's); (cross) = only Cross is that bad; (1rail) = a rail without same-rail runs ((no C) with 3+ rails).
     function hostStatus(h) {{
         function lv(arr, rl) {{ if (!arr.length) return -1; var m = arr.reduce(function(a, b) {{ return a + b; }}, 0) / arr.length, t = railTiers[rl]; return m >= t.F ? 0 : m >= t.S ? 1 : 2; }}
-        var a = lv(h.aGbps, 'A'), b = lv(h.bGbps, 'B'), x = lv(h.xGbps, 'X'), ws = Math.max(a, b), w = Math.max(ws, x);
+        var lvs = rails.map(function(rl) {{ return lv(h.r[rl].g, rl); }});
+        var x = lv(h.xGbps, 'X'), ws = Math.max.apply(null, lvs), w = Math.max(ws, x);
         if (w < 0) return '-';
-        return ['OK', 'SLOW', 'CRITICAL'][w] + (ws >= 0 && w > ws ? '(cross)' : '') + (a < 0 || b < 0 ? '(1rail)' : '');
+        var miss = rails.filter(function(rl, i) {{ return lvs[i] < 0; }});
+        return ['OK', 'SLOW', 'CRITICAL'][w] + (ws >= 0 && w > ws ? '(cross)' : '') + (!miss.length ? '' : rails.length === 2 ? '(1rail)' : '(no ' + miss.join(',') + ')');
     }}
     function statusBadge(s) {{ return '<span class="badge ' + (s.indexOf('OK') === 0 ? 'badge-ok' : s.indexOf('SLOW') === 0 ? 'badge-slow' : s === '-' ? '' : 'badge-down') + '">' + s + '</span>'; }}
     var hostRows = [];
     Object.values(perHost).forEach(function(h) {{
-        var aDown = h.ipA && downIps.has(h.ipA);
-        var bDown = h.ipB && downIps.has(h.ipB);
-        var aMed = aDown ? 0 : (h.aGbps.length ? median(h.aGbps) : 0);
-        var bMed = bDown ? 0 : (h.bGbps.length ? median(h.bGbps) : 0);
-        var aName = ipNic[h.ipA] || 'NIC A';
-        var bName = ipNic[h.ipB] || 'NIC B';
-        var nicDown = aDown && bDown ? aName + ' & ' + bName : aDown ? aName : bDown ? bName : '';
-        var gbps = (aDown || bDown) ? null : Math.round((aMed + bMed) / 2);
-        var totalRetr = h.aRetr + h.bRetr + h.xRetr;
-        var totalGB = h.aGB + h.bGB + h.xGB;
+        var nics = rails.map(function(rl) {{
+            var n = h.r[rl], down = !!(n.ip && downIps.has(n.ip));
+            return {{ rl: rl, ip: n.ip || '-', name: ipNic[n.ip] || 'NIC ' + rl, down: down, med: down ? 0 : (n.g.length ? median(n.g) : 0), retr: n.retr, gb: n.gb }};
+        }});
+        var downs = nics.filter(function(n) {{ return n.down; }});
+        var nicDown = downs.map(function(n) {{ return n.name; }}).join(' & ');
+        var gbps = downs.length ? null : Math.round(nics.reduce(function(a, n) {{ return a + n.med; }}, 0) / nics.length);
+        var totalRetr = nics.reduce(function(a, n) {{ return a + n.retr; }}, 0) + h.xRetr;
+        var totalGB = nics.reduce(function(a, n) {{ return a + n.gb; }}, 0) + h.xGB;
         var xMed = h.xGbps.length ? median(h.xGbps) : null;
-        hostRows.push({{ host: h.host, status: hostStatus(h), gbps: gbps, nicDown: nicDown, ipA: h.ipA || '-', nicA: aName, aMed: aMed, ipB: h.ipB || '-', nicB: bName, bMed: bMed, xMed: xMed, aDown: aDown, bDown: bDown, aRetr: h.aRetr, bRetr: h.bRetr, totalRetr: totalRetr, aGB: h.aGB, bGB: h.bGB, totalGB: totalGB }});
+        hostRows.push({{ host: h.host, status: hostStatus(h), gbps: gbps, nicDown: nicDown, nics: nics, xMed: xMed, totalRetr: totalRetr, totalGB: totalGB }});
     }});
 
     function nicBadge(val, isDown, rl) {{
@@ -1066,7 +1111,7 @@ $(document).ready(function() {{
                 tbody += '<td>' + r.iteration + '</td><td>' + r.phase + '</td></tr>';
                 shown++;
             }});
-            $('#allResultsTable thead tr').html('<th>#</th><th>Host A</th><th>IP A</th><th>Dev A</th><th>Host B</th><th>IP B</th><th>Dev B</th><th>Gbps<small>single iperf3 test result</small></th><th>Retrans<small>retransmits for this test</small></th><th>GBytes</th><th>Iter</th><th>Phase</th>');
+            $('#allResultsTable thead tr').html('<th>#</th><th>{ep[0]}</th><th>{ep[1]}</th><th>{ep[2]}</th><th>{ep[3]}</th><th>{ep[4]}</th><th>{ep[5]}</th><th>Gbps<small>single iperf3 test result</small></th><th>Retrans<small>retransmits for this test</small></th><th>GBytes</th><th>Iter</th><th>Phase</th>');
             $('#allResultsTable tbody').html(tbody);
             rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [[7, 'asc']] }}));
         }} else {{
@@ -1081,12 +1126,14 @@ $(document).ready(function() {{
                     tbody += '<td><span class="badge ' + gbpsBadge(r.gbps) + '">' + r.gbps + '</span></td>';
                 }}
                 tbody += '<td>' + retrFmt(r.totalRetr, r.totalGB) + '</td>';
-                tbody += '<td>' + r.ipA + '</td><td>' + r.nicA + '</td><td>' + nicBadge(r.aMed, r.aDown, 'A') + '</td><td>' + retrFmt(r.aRetr, r.aGB) + '</td>';
-                tbody += '<td>' + r.ipB + '</td><td>' + r.nicB + '</td><td>' + nicBadge(r.bMed, r.bDown, 'B') + '</td><td>' + retrFmt(r.bRetr, r.bGB) + '</td>';
-                tbody += '<td>' + (r.xMed === null ? '-' : nicBadge(r.xMed, false, 'X')) + '</td></tr>';
+                r.nics.forEach(function(n) {{
+                    tbody += '<td>' + n.ip + '</td><td>' + n.name + '</td><td>' + nicBadge(n.med, n.down, n.rl) + '</td><td>' + retrFmt(n.retr, n.gb) + '</td>';
+                }});
+                if (rails.length > 1) tbody += '<td>' + (r.xMed === null ? '-' : nicBadge(r.xMed, false, 'X')) + '</td>';
+                tbody += '</tr>';
                 shown++;
             }});
-            $('#allResultsTable thead tr').html('<th>#</th><th>Host</th><th>Status<small>worst of A, B, Cross (means)</small></th><th>Gbps<small>avg of NIC A &amp; B medians</small></th><th>Retrans<small>total TCP retransmits</small></th><th>IP A</th><th>Dev A</th><th>A Median<small>median Gbps across NIC A tests</small></th><th>A Retrans<small>total retransmits, NIC A</small></th><th>IP B</th><th>Dev B</th><th>B Median<small>median Gbps across NIC B tests</small></th><th>B Retrans<small>total retransmits, NIC B</small></th><th>Cross Median<small>median Gbps across A&lt;-&gt;B tests (a path, not a NIC)</small></th>');
+            $('#allResultsTable thead tr').html({json.dumps(host_head)});
             $('#allResultsTable tbody').html(tbody);
             rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [[3, 'asc']] }}));
         }}
@@ -1171,6 +1218,7 @@ $(document).ready(function() {{
                 font: {{ size: 14, color: '#4ecca3', bold: {{ size: 14 }} }},
             }},
             host: {{ shape: 'dot', size: 10 }},
+            client: {{ shape: 'square', size: 10 }},
         }},
         interaction: {{ hover: true, tooltipDelay: 100, navigationButtons: true, keyboard: true, dragNodes: true }},
     }};
@@ -1226,7 +1274,7 @@ $(document).ready(function() {{
         var hostSel = document.getElementById('topoExcludeHost');
         var linkSel = document.getElementById('topoExcludeLink');
         var hosts = [];
-        topoNodesData.forEach(function(n) {{ if (n.group === 'host') hosts.push(n.id); }});
+        topoNodesData.forEach(function(n) {{ if (n.group === 'host' || n.group === 'client') hosts.push(n.id); }});
         hosts.sort();
         hosts.forEach(function(h) {{
             var o = document.createElement('option'); o.value = h; o.textContent = h;
@@ -1274,8 +1322,9 @@ $(document).ready(function() {{
 
     function topoUpdateLegend() {{
         // Count visible hosts by bucket
-        var h350=0, h300=0, h250=0, h200=0, hLow=0, hDown=0, hVis=0;
+        var h350=0, h300=0, h250=0, h200=0, hLow=0, hDown=0, hVis=0, cVis=0;
         topoNodesData.forEach(function(n) {{
+            if (n.group === 'client' && !topoNodes.get(n.id).hidden) cVis++;
             if (n.group !== 'host') return;
             var node = topoNodes.get(n.id);
             if (node.hidden) return;
@@ -1316,6 +1365,7 @@ $(document).ready(function() {{
         }});
         // Update summary
         document.getElementById('legHosts').textContent = hVis;
+        if (document.getElementById('legClients')) document.getElementById('legClients').textContent = cVis;
         document.getElementById('legLinks').textContent = lVis;
         document.getElementById('legSwitches').textContent = sVis;
         // Update detail table
@@ -1542,6 +1592,12 @@ def nic_view(d):
             v[ip_nic[r['dst']]]['recv'].append(r['gbps'])
             if r['src'] in ip_nic:
                 v[ip_nic[r['dst']]].setdefault('from', set()).add(ip_nic[r['src']])
+    cl = d.get('clients') or {}
+    for n in cl.get('nics', []):   # a client NIC: sent = its runs to the backends, received = from them (waves, else all at once)
+        if n['ip'] in ip_nic:
+            for side, dr in (('sent', 'C->B'), ('recv', 'B->C')):
+                fs = [f for f in cl['flows'] if f['client_ip'] == n['ip'] and f['dir'] == dr]
+                v[ip_nic[n['ip']]][side] = [f['gbps'] for f in ([f for f in fs if f['phase'].startswith('C')] or fs)]
     for x in d['driver_info']:
         k = f"{x['host']}_{x['nic']}"
         if k in v:
@@ -1637,7 +1693,8 @@ def _cross_finding(data):
     for r in xs:
         tot[r['iteration'], r.get('wave', '')] += r['gbps']
     t = list(tot.values())
-    ab = sum(1 for r in xs if ipr[r['src']] == 'A')
+    rails = data.get('rails', ['A', 'B'])
+    pairs = Counter((ipr[r['src']], ipr[r['dst']]) for r in xs)
     xr = sum(r.get('retransmits', 0) for r in xs)
     sr = sum(r.get('retransmits', 0) for r in res if not _cross(r, ipr))
     xm = med([r['gbps'] for r in xs])
@@ -1647,15 +1704,16 @@ def _cross_finding(data):
            f'{bw(sum(t) / len(t))} on average ({bw(min(t))} to {bw(max(t))} over {len(t)} waves), {len(xs)} flows' if waves else
            f'Cross-rail total per iteration: {bw(sum(t) / len(t))} on average ({bw(min(t))} to {bw(max(t))} '
            f'over {len(t)} iterations), {len(xs)} flows')
-    agg += f' (A->B {ab}, B->A {len(xs) - ab}); median {xm:.1f} Gbps per flow; retransmits {k(xr)} cross-rail vs {k(sr)} same-rail'
-    cut = {x: rt.get(x, data['tiers'])['F'] for x in ('A', 'B')}
-    sm = {x: med([r['gbps'] for r in res if ipr[r['src']] == x and ipr[r['dst']] == x]) for x in ('A', 'B')}
+    dirs = ', '.join(f'{a}->{b} {pairs[a, b]}' for a in rails for b in rails if a != b)
+    agg += f' ({dirs}); median {xm:.1f} Gbps per flow; retransmits {k(xr)} cross-rail vs {k(sr)} same-rail'
+    cut = {x: rt.get(x, data['tiers'])['F'] for x in rails}
+    sm = {x: med([r['gbps'] for r in res if ipr[r['src']] == x and ipr[r['dst']] == x]) for x in rails}
     fx = min(cut.values())
     shared = None
     if xm < fx and any(v is not None for v in sm.values()) and all(v is None or v >= cut[x] for x, v in sm.items()):
         f = lambda v: '-' if v is None else f'{v:.1f}'
         shared = (f"Same-rail runs are OK, cross-rail runs are not: cross-rail median {xm:.1f} Gbps per flow (OK >= {fx:g}), "
-                  f"same-rail median {f(sm['A'])} (A) / {f(sm['B'])} (B) Gbps. The hosts pass on their own rail, so the likely "
+                  f"same-rail median {' / '.join(f'{f(sm[x])} ({x})' for x in rails)} Gbps. The hosts pass on their own rail, so the likely "
                   'limit is the shared path between the rails (switch inter-link or spine), not the hosts.')
     return agg, shared
 
@@ -1671,16 +1729,29 @@ def _uplinks(data):
     u = {'n': n, 'm': m, 's': s, 'C': n * m * s, 'rows': [], 'notes': [],
          'src': 'declared by the run' if ok3(run) else 'declared at render time (FF_SPINES etc. in the environment)'}
     C = u['C']
+    # client leaves (only client NICs on them): spines x client links x Gbps, run metadata else FF_CLIENT_SPINE_* here
+    cnames = (('client_spine_links', 'FF_CLIENT_SPINE_LINKS'), ('client_spine_gbps', 'FF_CLIENT_SPINE_GBPS'))
+    crun, cenv = [_int(meta.get(k)) for k, _ in cnames], [_int(os.environ.get(e)) for _, e in cnames]
+    cn = n or _int(meta.get('spines')) or _int(os.environ.get('FF_SPINES')) or 0
+    u['cm'], u['cs'] = crun if ok3(crun) else cenv if ok3(cenv) else (0, 0)
+    u['cn'], u['Cc'] = cn, cn * u['cm'] * u['cs']
     ipr = data.get('ip_rail', {})
     leaf = {l['ip']: l['switch'] for l in data['lldp_info'] if l['switch'] not in ('unknown', '')}
     ips = set(ipr)
+    cips = data.get('client_ips', set())
+    side = {}   # leaf -> backend | client | shared (a shared leaf is judged as a backend leaf)
+    for ip in ips | cips:
+        if ip in leaf:
+            k = 'client' if ip in cips else 'backend'
+            side[leaf[ip]] = k if side.get(leaf[ip], k) == k else 'shared'
+    u['clients'] = bool(cips)
     if not any(ip in leaf for ip in ips):
         if not C:
             return None
         u['notes'].append('Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour.')
         return u
     rr = data.get('rail_rate', {})
-    la, lb = rr.get('A') or data['line_rate'], rr.get('B') or data['line_rate']
+    rate = {x: rr.get(x) or data['line_rate'] for x in data.get('rails', ['A', 'B'])}
     def med(v):
         v, k = sorted(v), len(v)
         return None if not k else v[k // 2] if k % 2 else (v[k // 2 - 1] + v[k // 2]) / 2
@@ -1702,31 +1773,62 @@ def _uplinks(data):
             continue
         ob[ph, it, x] += r['gbps']; ib[ph, it, y] += r['gbps']
         xl[ph, x].append(r['gbps']); xl[ph, y].append(r['gbps']); its[ph].add(it)
-    if not ob and not ib and not C:
+    cleft, cph, cpx = 0, set(), defaultdict(list)
+    for r in (data.get('clients') or {}).get('flows', []):   # client<->backend: out of the source leaf, into the destination's
+        a, b = r['src'], r['dst']
+        if a not in leaf or b not in leaf:
+            cleft += 1
+            continue
+        x, y, ph, it = leaf[a], leaf[b], r['phase'], r['iteration']
+        if r.get('wave'):
+            it = f"{it} wave {r['wave']}"
+        if x != y:
+            p = 100 * r['gbps'] / r['expected'] if r['expected'] else 0
+            ob[ph, it, x] += r['gbps']; ib[ph, it, y] += r['gbps']
+            xl[ph, x].append(r['gbps']); xl[ph, y].append(r['gbps']); its[ph].add(it)
+            cpx[ph, x].append(p); cpx[ph, y].append(p); cph.add(ph)
+    if not ob and not ib and not C and not u['Cc']:
         return None
     nm = sum(1 for ip in ips if ip not in leaf)
     if nm:
         u['notes'].append(f'{nm} of {len(ips)} rail NICs have no LLDP neighbour; their {left} runs are left out of the leaf totals.')
+    cm = sum(1 for ip in cips if ip not in leaf)
+    if cm:
+        u['notes'].append(f'{cm} of {len(cips)} client NICs have no LLDP neighbour; their {cleft} runs are left out of the leaf totals.')
     dl = defaultdict(float)
     for ip in ips:
         if ip in leaf:
-            dl[leaf[ip]] += data.get('ip_gbps', {}).get(ip) or (la if ipr[ip] == 'A' else lb)
-    lx = min(la, lb)
+            dl[leaf[ip]] += data.get('ip_gbps', {}).get(ip) or rate.get(ipr[ip], data['line_rate'])
+    for ip in cips:
+        if ip in leaf:
+            dl[leaf[ip]] += data.get('ip_gbps', {}).get(ip) or data['clients']['line'].get(ip) or 0
+    lx = min(rate.values())
     okp, slp = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
     okc = lx * okp / 100
     best = {}
-    for (ph, it, lf) in set(ob) | set(ib):
+    # in run order, so a tie keeps the earliest wave (set order varied with the hash seed)
+    for (ph, it, lf) in sorted(set(ob) | set(ib), key=lambda k: (k[0], [_int(x) or x for x in re.split(r'[ /]', str(k[1]))], k[2])):
         busy = max(ob[ph, it, lf], ib[ph, it, lf])
         if (ph, lf) not in best or busy > best[ph, lf][0]:
             best[ph, lf] = (busy, it)
     for (ph, lf) in sorted(best):
         busy, it = best[ph, lf]
+        cap = u['Cc'] if side.get(lf) == 'client' and u['Cc'] else C
         row = {'leaf': lf, 'phase': ph, 'out': ob[ph, it, lf], 'in': ib[ph, it, lf], 'iter': it, 'iters': len(its[ph]),
-               'down': dl[lf], 'pct': None, 'ovs': None, 'verdict': ''}
-        if C:
-            row['pct'], row['ovs'] = 100 * busy / C, dl[lf] / C
+               'down': dl[lf], 'pct': None, 'ovs': None, 'verdict': '', 'C': cap, 'side': side.get(lf, '')}
+        if cap:
+            row['pct'], row['ovs'] = 100 * busy / cap, dl[lf] / cap
             xm, sm = med(xl[ph, lf]), med(same[lf])
-            if row['pct'] >= okp and xm < lx:
+            if ph in cph:   # client runs: % of each run's expected rate, not Gbps against the rail line
+                cm_ = med(cpx[ph, lf])
+                if row['pct'] >= okp and cm_ < okp:
+                    row['verdict'] = (f"at declared uplink capacity: oversubscribed {row['ovs']:.1f}:1 by design; cross-leaf client runs "
+                                      f'(median {cm_:.0f}% of expected) get their share of the uplinks')
+                elif cm_ < okp and sm is not None and sm >= okc and row['pct'] < slp:
+                    row['verdict'] = (f"uplinks carried only {row['pct']:.0f}% of declared capacity while cross-leaf client runs were slow "
+                                      f'(median {cm_:.0f}% of expected, OK >= {okp}%) and same-leaf backend runs were OK (median {sm:.1f}); '
+                                      'a link or spine may be down, or ECMP is uneven')
+            elif row['pct'] >= okp and xm < lx:
                 row['verdict'] = (f"at declared uplink capacity: oversubscribed {row['ovs']:.1f}:1 by design; cross-leaf runs "
                                   f'(median {xm:.1f} Gbps) get their share of the uplinks, not line rate')
             elif xm is not None and xm < okc and sm is not None and sm >= okc and row['pct'] < slp:
@@ -1760,21 +1862,90 @@ def _host_rx_html(rx):
             f'<tbody>{body}</tbody></table></div></div>')
 
 
+def _clients_html(data):
+    """Clients card: per client NIC its runs to and from the backends, all-at-once totals, routes, anomalies, exclusions."""
+    cl = data.get('clients')
+    if not cl:
+        return ''
+    meta = data['metadata']
+    ok, slow = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
+    cls = {'OK': 'badge-ok', 'SLOW': 'badge-slow', 'CRITICAL': 'badge-down'}
+    badge = lambda s: f"<span class='badge {cls.get(s, 'badge-down')}'>{escape(s)}</span>"
+    def dcell(n, d):
+        v = n['dirs'].get(d)
+        return ('<td>-</td><td>-</td>' if not v else
+                f"<td>{v['avg']:.1f} {badge(v['status'])}</td><td>{v['exp']:.1f} <small>({v['n']} run{'s' if v['n'] != 1 else ''}, {escape(v['phases'])})</small></td>")
+    nics = sorted(cl['nics'], key=lambda n: ({'CRITICAL': 0, 'SLOW': 1, 'OK': 3}.get(n['status'], 2), n['host'], n['nic']))
+    line = lambda n: f"{cl['line'][n['ip']]:g}" if cl['line'].get(n['ip']) else 'unknown'
+    rows = ''.join(f"<tr><td>{escape(n['host'])}</td><td>{escape(n['nic'])}</td><td>{escape(n['ip'])}</td><td>{line(n)}</td>"
+                   f"{dcell(n, 'C->B')}{dcell(n, 'B->C')}<td>{badge(n['status'])}</td></tr>" for n in nics)
+    cnt = Counter(n['status'] for n in cl['nics'])
+    tot = ''.join(f"<tr><td>{escape(t['phase'])}</td><td>{escape(t['dir'])}</td><td>{t['flows']}</td><td>{t['gbps']:.1f}</td>"
+                  f"<td>{t['exp']:.1f}</td><td>{100 * t['gbps'] / t['exp'] if t['exp'] else 0:.0f}%</td><td>{badge(t['status'])}</td></tr>"
+                  for t in cl['totals'])
+    und = [r for r in cl['routes'] if r[5] == 'undeclared']
+    an = [a for a in data.get('anomalies', []) if len(a) > 1 and (a[1].startswith('client_') or a[1] == 'shared_leaf')]
+    ex = [n for n in data['not_tested'] if n['kind'] in ('client', 'client path')]
+    hosts = len({n['host'] for n in cl['nics']})
+    sec = lambda title, head, body: (f'<h6 class="mt-2">{title}</h6><table class="table table-sm table-striped"><thead><tr>'
+                                     + ''.join(f'<th>{h}</th>' for h in head) + f'</tr></thead><tbody>{body}</tbody></table>')
+    out = (f'<div class="card mb-3"><div class="card-header">Clients: {len(cl["nics"])} data NICs on {hosts} clients | '
+           f'<b class="stat-good">{cnt["OK"]}</b> OK, <b class="{"stat-warn" if cnt["SLOW"] else "stat-good"}">{cnt["SLOW"]}</b> slow, '
+           f'<b class="{"stat-bad" if cnt["CRITICAL"] else "stat-good"}">{cnt["CRITICAL"]}</b> critical'
+           + (f', <b class="stat-bad">{len(cl["nics"]) - cnt["OK"] - cnt["SLOW"] - cnt["CRITICAL"]}</b> no result'
+              if len(cl['nics']) > sum(cnt[k] for k in cls) else '')
+           + f' | ratio {escape(meta.get("client_ratio", "?"))}, {escape(meta.get("client_waves", "?"))} waves | '
+           f'{len(und)} undeclared routes | {len(cl["errors"])} failed runs</div>'
+           '<div class="card-body" style="max-height:520px; overflow-y:auto;">'
+           f'<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Each run is judged against expected = min(client line, backend rail '
+           f'line / share), share = runs on that backend NIC at once. OK &ge; {ok}% of expected, slow &ge; {slow}%, else critical. Per NIC: '
+           f'average of its wave runs (C1 client->backend, C2 backend->client), or of the all-at-once runs (F1/F2) when it had no waves; '
+           f'status = the worse direction. Client line: {escape(cl["line_src"])}.</p>'
+           + sec('Per client NIC', ['Client', 'NIC', 'IP', 'Line (G)', 'C-&gt;B avg', 'C-&gt;B expected', 'B-&gt;C avg', 'B-&gt;C expected', 'Status'], rows))
+    if tot:
+        out += sec('All clients at once', ['Phase', 'Direction', 'Runs', 'Total Gbps', 'Expected', 'Of expected', 'Status'], tot)
+    if und:
+        out += sec('Undeclared client routes (the unsourced route to a backend leaves by a NIC that is not a declared data NIC)',
+                   ['Client', 'Client NIC', 'Backend rail', 'Backend IP', 'Egress', ''],
+                   ''.join('<tr>' + ''.join(f'<td>{escape(c)}</td>' for c in r[:6]) + '</tr>' for r in und))
+    if an:
+        out += sec('Client findings (preflight)', ['Subject', 'Finding', 'Detail'],
+                   ''.join(f"<tr><td>{escape(a[0])}</td><td>{escape(a[1])}</td><td>{escape(a[2] if len(a) > 2 else '')}</td></tr>" for a in an))
+    if ex:
+        out += sec('Client paths and NICs not tested', ['Kind', 'What', 'Why'],
+                   ''.join(f"<tr><td>{escape(n['kind'])}</td><td>{escape(n['what'])}</td><td>{escape(n['why'])}</td></tr>" for n in ex))
+    if cl['errors']:
+        out += sec('Failed client runs', ['Phase', 'From', 'To', 'Error'],
+                   ''.join(f"<tr><td>{escape(e['phase'])} {escape(e['wave'])}</td><td>{escape(e['src'])}</td><td>{escape(e['dst'])}</td>"
+                           f"<td>{escape(e['why'])}</td></tr>" for e in cl['errors']))
+    return out + '</div></div>\n'
+
+
 def _uplinks_html(u):
     if not u:
         return ''
     t = lambda g: f'{g / 1000:.2f} T'
     rows = ''
+    J = u['C'] or u.get('Cc')   # any leaf judged: Declared/Busiest/Oversubscribed/Verdict columns
     for r in u['rows']:
         busiest = f" (iteration {r['iter']}, busiest of {r['iters']})" if r['iters'] > 1 else ''
-        judged = (f"<td>{t(u['C'])}</td><td>{r['pct']:.0f}%</td>" if u['C'] else '')
-        tail = (f"<td>{r['ovs']:.1f}:1</td><td>{escape(r['verdict'])}</td>" if u['C'] else '')
-        rows += (f"<tr><td>{escape(r['leaf'])}</td><td>{escape(r['phase'])}{busiest}</td><td>{t(r['out'])}</td><td>{t(r['in'])}</td>"
+        cap = r.get('C', u['C'])
+        judged = ((f"<td>{t(cap)}</td><td>{r['pct']:.0f}%</td>" if cap else '<td>-</td><td>-</td>') if J else '')
+        tail = ((f"<td>{r['ovs']:.1f}:1</td><td>{escape(r['verdict'])}</td>" if cap else '<td>-</td><td></td>') if J else '')
+        sd = f"<td>{escape(r.get('side', ''))}</td>" if u.get('clients') else ''
+        rows += (f"<tr><td>{escape(r['leaf'])}</td>{sd}<td>{escape(r['phase'])}{busiest}</td><td>{t(r['out'])}</td><td>{t(r['in'])}</td>"
                  f"{judged}<td>{t(r['down'])}</td>{tail}</tr>")
     head = (f"Leaf uplinks, {u['src']}: {u['n']} spines x {u['m']} links x {u['s']}G = {t(u['C'])} per leaf, each direction" if u['C'] else
             'Leaf uplink totals (set FF_SPINES, FF_SPINE_LINKS, FF_SPINE_GBPS to judge against uplink capacity)')
-    cols = ('<th>Leaf</th><th>Phase</th><th>Out</th><th>In</th>' + ('<th>Declared</th><th>Busiest</th>' if u['C'] else '')
-            + '<th>Downlinks</th>' + ('<th>Oversubscribed</th><th>Verdict</th>' if u['C'] else ''))
+    if u.get('Cc'):
+        head = (f"Leaf uplinks per side, each direction: backend leaves {u['n']} spines x {u['m']} links x {u['s']}G = {t(u['C'])}"
+                if u['C'] else 'Leaf uplinks per side, each direction: backend leaves not declared') + \
+               f"; client leaves {u['cn']} spines x {u['cm']} links x {u['cs']}G = {t(u['Cc'])} (a leaf with both is judged as backend)"
+    elif u.get('clients') and u['C']:
+        head += ' (client leaves too: FF_CLIENT_SPINE_LINKS/FF_CLIENT_SPINE_GBPS not declared)'
+    cols = ('<th>Leaf</th>' + ('<th>Side</th>' if u.get('clients') else '') + '<th>Phase</th><th>Out</th><th>In</th>'
+            + ('<th>Declared</th><th>Busiest</th>' if J else '')
+            + '<th>Downlinks</th>' + ('<th>Oversubscribed</th><th>Verdict</th>' if J else ''))
     return (f'<div class="card mb-3"><div class="card-header">{head}</div><div class="card-body">'
             + ''.join(f'<p class="text-warning mb-1">{escape(x)}</p>' for x in u['notes'])
             + (f'<table class="table table-sm table-striped"><thead><tr>{cols}</tr></thead><tbody>{rows}</tbody></table>'
@@ -1791,6 +1962,81 @@ def _ip_speeds(results, ip_rail):
     xonly = set(cross) - set(same)
     same.update({ip: cross[ip] for ip in xonly})
     return same, xonly
+
+
+def _iperf_row(line):
+    """One iperf3 receiver [SUM] line ('src,dst,[SUM] ... receiver retransmits:N cpu:S/R [share:K]'), or None."""
+    m = re.match(r'^(\S+),(\S+),\[SUM\]\s+\S+\s+sec\s+([\d.]+)\s+([KMGTP]?)Bytes\s+([\d.]+)\s+Gbits/sec\s+receiver\s*(?:retransmits:(\d+))?(?:\s+cpu:(\S+))?', line)
+    if not m:
+        return None
+    bval = float(m.group(3))
+    bunit = m.group(4) or ''
+    unit_scale = {'': 1e-9, 'K': 1e-6, 'M': 1e-3, 'G': 1, 'T': 1024, 'P': 1048576}
+    gbytes = int(round(bval * unit_scale.get(bunit, 1)))
+    r = {'src': m.group(1), 'dst': m.group(2),
+         'gbytes': gbytes, 'gbps': round(float(m.group(5)), 1),
+         'retransmits': int(m.group(6)) if m.group(6) else 0,
+         'cpu': m.group(7) or ''}   # sender/receiver iperf3 CPU %, absent before -V
+    sh = re.search(r'\sshare:(\d+)', line)   # client runs: flows on that backend NIC at once
+    if sh:
+        r['share'] = int(sh.group(1))
+    return r
+
+
+def _clients(data, read_file):
+    """Client NICs (clients.txt) and their runs to the backends (client_results.txt), each judged against
+    min(client line, backend rail line / share); per NIC the wave phases (C1/C2), else all-at-once (F1/F2)."""
+    meta, cl = data['metadata'], data['clients']
+    ok, slow = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
+    cips, ipr = data['client_ips'], data['ip_rail']
+    flows, errors, it, ph, wv = [], [], 1, '', ''
+    for line in read_file('client_results.txt').splitlines():
+        # '### client [iteration:N ]phase:P[ wave:w/W]'
+        mm = re.match(r'^###\s+client(?:\s+iteration:(\d+))?\s+phase:(\S+)(?:\s+wave:(\S+))?', line)
+        if mm:
+            it, ph, wv = int(mm.group(1) or 1), mm.group(2), mm.group(3) or ''
+            continue
+        r = _iperf_row(line)
+        if r:
+            c_src = r['src'] in cips
+            cip, bip = (r['src'], r['dst']) if c_src else (r['dst'], r['src'])
+            share = r.get('share') or 1
+            back = data['rail_rate'].get(ipr.get(bip), data['line_rate']) / share
+            cline = cl['line'].get(cip)
+            exp = min(cline, back) if cline else back
+            flows.append({**r, 'iteration': it, 'phase': ph, 'wave': wv, 'share': share, 'client_ip': cip, 'backend_ip': bip,
+                          'dir': 'C->B' if c_src else 'B->C', 'expected': round(exp, 1), 'rail': ipr.get(bip, '?')})
+        elif ',ERROR' in line:
+            p = line.split(',', 2)
+            errors.append({'phase': ph, 'wave': wv, 'src': p[0], 'dst': p[1] if len(p) > 1 else '',
+                           'why': p[2][len('ERROR'):].strip() if len(p) > 2 else ''})
+    def judge(g, e):
+        pct = 100 * g / e if e else 0
+        return 'OK' if pct >= ok else 'SLOW' if pct >= slow else 'CRITICAL'
+    rank = {'OK': 0, 'SLOW': 1, 'CRITICAL': 2}
+    for n in cl['nics']:
+        n['dirs'] = {}
+        for d in ('C->B', 'B->C'):
+            mine = [f for f in flows if f['client_ip'] == n['ip'] and f['dir'] == d]
+            use = [f for f in mine if f['phase'].startswith('C')] or mine
+            if use:
+                g, e = sum(f['gbps'] for f in use) / len(use), sum(f['expected'] for f in use) / len(use)
+                n['dirs'][d] = {'avg': g, 'exp': e, 'n': len(use), 'status': judge(g, e),
+                                'phases': '/'.join(sorted({f['phase'] for f in use}))}
+        st = [v['status'] for v in n['dirs'].values()]
+        n['status'] = (max(st, key=rank.get) if st else 'no result' if n['state'] == 'ok' else n['state'].replace('_', ' '))
+        n['avg'] = sum(v['avg'] for v in n['dirs'].values()) / len(n['dirs']) if n['dirs'] else 0
+    # all at once (F1/F2): totals per iteration and phase (each iteration's flows ran together) against the
+    # sum of the flows' expected rates
+    tot = []
+    for i, p in sorted({(f['iteration'], f['phase']) for f in flows if f['phase'].startswith('F')}):
+        fs = [f for f in flows if f['phase'] == p and f['iteration'] == i]
+        g, e = sum(f['gbps'] for f in fs), sum(f['expected'] for f in fs)
+        multi = len({f['iteration'] for f in flows}) > 1
+        tot.append({'phase': f'{p} (iteration {i})' if multi else p, 'flows': len(fs), 'gbps': g, 'exp': e, 'status': judge(g, e),
+                    'dir': 'C->B' if all(f['dir'] == 'C->B' for f in fs) else 'B->C' if all(f['dir'] == 'B->C' for f in fs) else 'both'})
+    cl.update({'flows': flows, 'errors': errors, 'totals': tot})
+    cl['routes'] = [l.split() for l in read_file('client_routes.txt').splitlines() if len(l.split()) >= 6]
 
 
 def parse_tar_archive(filepath):
@@ -1836,18 +2082,43 @@ def parse_tar_archive(filepath):
     # Down IPs
     data['down_ips'] = [l.strip() for l in read_file('down_ips.txt').splitlines() if l.strip()]
 
+    # Rails from the data: rails.txt header (Rail_<X>_IP columns), else metadata rail_count (absent = 2, A and B)
+    rails_lines = read_file('rails.txt').splitlines()
+    rhead = rails_lines[0].split() if rails_lines else []
+    rcol = {c: i for i, c in enumerate(rhead)}
+    rails = [c[5:-3] for c in rhead if re.match(r'^Rail_[A-Z]_IP$', c)]
+    if not rails:
+        rails = [chr(65 + i) for i in range(min(26, _int(data['metadata'].get('rail_count')) or 2))]
+    data['rails'] = rails
+    rail_rows = [l.split() for l in rails_lines[1:] if len(l.split()) >= len(rhead)]
+
+    # Clients (clients=1 only): one clients.txt row per client data NIC, read by header
+    data['clients'], data['client_ips'] = None, set()
+    if data['metadata'].get('clients') == '1':
+        cl = read_file('clients.txt').splitlines()
+        ch = cl[0].split() if cl else []
+        cnics = [dict(zip(('host', 'target', 'nic', 'ip', 'mtu', 'state', 'speed'),
+                          (p[ch.index(c)] if c in ch else '' for c in ('Client', 'Target', 'NIC', 'IP', 'MTU', 'State', 'Speed'))))
+                 for p in (l.split() for l in cl[1:]) if len(p) >= len(ch)]
+        cmeta = _int(data['metadata'].get('client_line_gbps'))   # FF_CLIENT_GBPS, else 'nic': each NIC's own speed
+        line = {n['ip']: cmeta or (int(n['speed'][:-4]) / 1000 if re.match(r'^\d+Mb/s$', n['speed']) else None) for n in cnics}
+        data['clients'] = {'nics': cnics, 'line': line, 'line_src': 'FF_CLIENT_GBPS' if cmeta else 'each NIC\'s ethtool speed'}
+        data['client_ips'] = {n['ip'] for n in cnics}
+
     # What the run could not test (collector files; absent in older archives)
     nt = []
-    for l in read_file('rails.txt').splitlines()[1:]:
-        p = l.split()
-        if len(p) >= 10:
-            for rail, (nic, ip, st) in (('A', (p[2], p[3], p[5])), ('B', (p[6], p[7], p[9]))):
-                if st != 'ok':
-                    nt.append({'kind': 'rail', 'what': f'{p[0]} rail {rail} {nic} {ip}', 'why': st.replace('_', ' ')})
+    for p in rail_rows:
+        for rail in rails:
+            nic, ip, st = (p[rcol[c]] for c in (f'Rail_{rail}_NIC', f'Rail_{rail}_IP', f'State_{rail}'))
+            if st != 'ok':
+                nt.append({'kind': 'rail', 'what': f'{p[0]} rail {rail} {nic} {ip}', 'why': st.replace('_', ' ')})
+    for n in (data['clients'] or {}).get('nics', []):
+        if n['state'] != 'ok':
+            nt.append({'kind': 'client', 'what': f"{n['host']} {n['nic']} {n['ip']}", 'why': n['state'].replace('_', ' ')})
     for l in read_file('paths_excluded.txt').splitlines():
         p = l.split(None, 6)
         if len(p) == 7:
-            nt.append({'kind': 'path', 'what': f'{p[2]} {p[3]} → {p[4]} {p[5]} (iter {p[0]} phase {p[1]})', 'why': p[6]})
+            nt.append({'kind': 'client path' if p[1] in ('C1', 'C2', 'F1', 'F2') else 'path', 'what':f'{p[2]} {p[3]} → {p[4]} {p[5]} (iter {p[0]} phase {p[1]})', 'why': p[6]})
     for l in read_file('excluded.txt').splitlines():
         p = l.split(None, 1)
         if p:
@@ -1903,7 +2174,7 @@ def parse_tar_archive(filepath):
 
     # Line rate: collector's value, else the most common NIC speed, else best run seen
     speeds = [l.split()[3] for l in read_file('nic_diagnostics.txt').splitlines()
-              if len(l.split()) >= 4 and re.match(r'^\d+Mb/s$', l.split()[3])]
+              if len(l.split()) >= 4 and re.match(r'^\d+Mb/s$', l.split()[3]) and l.split()[2] not in data['client_ips']]
     lr = data['metadata'].get('line_rate_gbps', '')
     # most common speed, the higher one on a tie (deterministic, and tests the upper limit)
     def _mode(sp):
@@ -1918,12 +2189,11 @@ def parse_tar_archive(filepath):
     # per-rail line rate only when the collector says so (FF_LINE_GBPS=A,B); otherwise the faster rail's
     # most common speed for both, so a rail that came up slow everywhere shows as slow
     ip_rail = {}
-    for l in read_file('rails.txt').splitlines()[1:]:
-        q = l.split()
-        if len(q) >= 8:
-            ip_rail[q[3]], ip_rail[q[7]] = 'A', 'B'
+    for q in rail_rows:
+        for r in rails:
+            ip_rail[q[rcol[f'Rail_{r}_IP']]] = r
     rail_rate = {}
-    for r in ('A', 'B'):
+    for r in rails:
         v = data['metadata'].get(f'line_rate_{r.lower()}_gbps', '')
         rs = [l.split()[3] for l in read_file('nic_diagnostics.txt').splitlines()
               if len(l.split()) >= 4 and ip_rail.get(l.split()[2]) == r and re.match(r'^\d+Mb/s$', l.split()[3])]
@@ -1942,19 +2212,9 @@ def parse_tar_archive(filepath):
         if mm:
             cur_iter, cur_phase, cur_wave = int(mm.group(1)), int(mm.group(2)), mm.group(3) or ''
             continue
-        m = re.match(r'^(\S+),(\S+),\[SUM\]\s+\S+\s+sec\s+([\d.]+)\s+([KMGTP]?)Bytes\s+([\d.]+)\s+Gbits/sec\s+receiver\s*(?:retransmits:(\d+))?(?:\s+cpu:(\S+))?', line)
-        if m:
-            bval = float(m.group(3))
-            bunit = m.group(4) or ''
-            unit_scale = {'': 1e-9, 'K': 1e-6, 'M': 1e-3, 'G': 1, 'T': 1024, 'P': 1048576}
-            gbytes = int(round(bval * unit_scale.get(bunit, 1)))
-            data['iperf_results'].append({
-                'iteration': cur_iter, 'phase': cur_phase, 'wave': cur_wave,
-                'src': m.group(1), 'dst': m.group(2),
-                'gbytes': gbytes, 'gbps': round(float(m.group(5)), 1),
-                'retransmits': int(m.group(6)) if m.group(6) else 0,
-                'cpu': m.group(7) or '',   # sender/receiver iperf3 CPU %, absent before -V
-            })
+        r = _iperf_row(line)
+        if r:
+            data['iperf_results'].append({'iteration': cur_iter, 'phase': cur_phase, 'wave': cur_wave, **r})
 
     # host-side receive table (collector host_rx.txt; absent before system info capture)
     rx = [l.split() for l in read_file('host_rx.txt').splitlines() if l.strip()]
@@ -1974,6 +2234,10 @@ def parse_tar_archive(filepath):
                 data['nic_inventory']['unknown'] += 1
                 # still listed: a link-down NIC reports Unknown! too
                 data['nic_inventory']['unknown_list'].append({'host': host, 'nic': nic, 'ip': ip, 'speed': speed})
+            elif ip in data['client_ips'] and speed == f"{round((data['clients']['line'].get(ip) or 0) * 1000)}Mb/s":
+                data['nic_inventory']['at_line'] += 1   # a client NIC: at FF_CLIENT_GBPS, else its own speed
+            elif ip in data['client_ips']:
+                data['nic_inventory']['not_line'].append({'host': host, 'nic': nic, 'ip': ip, 'speed': speed})
             elif speed == f"{data['rail_rate'].get(ip_rail.get(ip), line_gbps) * 1000}Mb/s":
                 data['nic_inventory']['at_line'] += 1
             else:
@@ -2097,9 +2361,11 @@ def parse_tar_archive(filepath):
         return {'G': _tier(l * 0.875), 'F': _tier(l * ok / 100), 'M': _tier(l * (ok + slow) / 200), 'S': _tier(l * slow / 100)}
     data['tiers'] = _tiers(line_gbps)
     data['rail_tiers'] = {r: _tiers(v) if v else data['tiers'] for r, v in data['rail_rate'].items()}
-    if data['rail_rate']['A'] == data['rail_rate']['B']:   # one rate (or an old tarball): exactly as before
-        data['rail_tiers'] = {r: data['tiers'] for r in ('A', 'B')}
+    if len(set(data['rail_rate'].values())) == 1:   # one rate (or an old tarball): exactly as before
+        data['rail_tiers'] = {r: data['tiers'] for r in rails}
     F = data['tiers']['F']
+    if data['clients']:
+        _clients(data, read_file)
 
     # Build slow_ips from iperf results
     ip_stats, xonly = _ip_speeds(data['iperf_results'], data['ip_rail'])
@@ -2212,6 +2478,15 @@ def parse_tar_archive(filepath):
     if cov and cov != 'COMPLETE':
         problems.append(f"Collector coverage {cov}: hosts tested {meta.get('hosts_tested', '?')}/{meta.get('hosts_expected', '?')}, "
                         f"{'path checks passed' if no_load else 'paths with a result'} {meta.get('paths_ok', '?')}/{meta.get('paths_planned', '?')} (see Not tested).")
+    if data['clients'] and not data['clients']['nics']:
+        problems.append('The run tested clients (clients=1) but clients.txt lists no client NICs: client runs and NICs '
+                        'cannot be told from backend ones.')
+    if data['clients']:
+        ce, ct, cp, co =(_int(meta.get(k)) for k in ('clients_expected', 'clients_tested', 'client_paths_planned', 'client_paths_ok'))
+        if (ce is not None and (ct or 0) < ce) or (cp is not None and (co or 0) < cp):
+            problems.append(f"Client coverage: clients tested {meta.get('clients_tested', '?')}/{meta.get('clients_expected', '?')}, "
+                            f"client {'path checks passed' if no_load else 'paths with a result'} {meta.get('client_paths_ok', '?')}/"
+                            f"{meta.get('client_paths_planned', '?')} (see Clients and Not tested).")
     hosts = _int(meta.get('total_hosts')) or 0
     if hosts and data['nic_inventory']['total'] == 0:
         problems.append('No NIC diagnostics were collected.')
@@ -2227,19 +2502,20 @@ def parse_tar_archive(filepath):
     if flaps:
         problems.append('Rail links went down during the run (their runs measured a flap, not the fabric): '
                         + ', '.join(f'{f[1]} {f[0]} (+{f[3]})' for f in flaps))
-    xr = meta.get('cross_rail')
+    xr = meta.get('cross_rail')   # 'single' (one rail): no cross-rail phase by design, nothing to say
+    xab = '<->'.join(rails)
     if xr == 'unrouted':
-        notes.append('Rails not routed to each other: every A<->B path check failed on routing, no same-rail one did. '
+        notes.append(f'Rails not routed to each other: every {xab} path check failed on routing, no same-rail one did. '
                      'Either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or inter-rail routing missing on '
-                     'every host; the skipped A<->B paths count until the operator says which.')
+                     f'every host; the skipped {xab} paths count until the operator says which.')
     elif xr == 'off':
-        notes.append('Cross-rail phase (A<->B) not run: FF_CROSS_RAIL=0 (operator: rails are separate fabrics).')
+        notes.append(f'Cross-rail phase ({xab}) not run: FF_CROSS_RAIL=0 (operator: rails are separate fabrics).')
     xs = [r for r in data['iperf_results'] if _cross(r, data['ip_rail'])]
-    fx = min(data.get('rail_tiers', {}).get(k, data['tiers'])['F'] for k in ('A', 'B'))
+    fx = min(data.get('rail_tiers', {}).get(k, data['tiers'])['F'] for k in rails)
     slow_x = [r for r in xs if r['gbps'] < fx]
     if slow_x:
         agg, shared = _cross_finding(data)
-        problems.append(f'{len(slow_x)} of {len(xs)} cross-rail (A<->B) runs below {fx:g} Gbps. Per-IP and per-rail figures '
+        problems.append(f'{len(slow_x)} of {len(xs)} cross-rail ({xab}) runs below {fx:g} Gbps. Per-IP and per-rail figures '
                         'leave cross-rail runs out, so look at the path between the rails (spine, inter-rail routing). '
                         + (agg + '.' if agg else ''))
         if shared:
@@ -2279,6 +2555,12 @@ if __name__ == '__main__':
     print(f"  {len(data['lldp_info'])} LLDP entries")
     print(f"  {len(data['optics'])} optics entries")
     print(f"  {len(data.get('raw_hosts', {}))} raw host files")
+    if data['clients']:
+        c = data['clients']
+        print(f"  {len(c['nics'])} client NICs, {len(c['flows'])} client runs, {len(c['errors'])} failed; "
+              + ', '.join(f"{k} {v}" for k, v in sorted(Counter(n['status'] for n in c['nics']).items())))
+    if len(data['rails']) != 2:
+        print(f"  Rails: {', '.join(data['rails'])}")
     iters = set(r['iteration'] for r in data['iperf_results'])
     print(f"  Iterations: {sorted(iters) if iters else 'none'}")
     print(f"Generating {OUTPUT_FILE}...")
