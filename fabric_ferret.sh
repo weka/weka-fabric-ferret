@@ -1,14 +1,14 @@
 #!/bin/bash
-# fabric_ferret: dual-rail backend-to-backend iperf3 fabric check.
+# fabric_ferret: backend-to-backend (any number of rails) and client-to-backend iperf3 fabric check.
 # Hosts and rails come from env vars (see usage); output is a .tgz bundle
 # that generate_dashboard.py turns into an HTML dashboard.
 
 usage() {
     cat <<'EOF'
-Usage: FF_HOSTS=<targets> FF_RAIL_A=<cidr,...> FF_RAIL_B=<cidr,...> ./fabric_ferret.sh [duration_s]
+Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
        FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
-       ssh jump 'FF_HOSTS=10.1.0.0/24 FF_RAIL_A=... FF_RAIL_B=... bash -s -- 120' < fabric_ferret.sh
+       ssh jump "FF_HOSTS=10.1.0.0/24 FF_RAILS='10.20.1.0/24;10.20.2.0/24' bash -s -- 120" < fabric_ferret.sh
        The run ends by printing the scp + render line for the tarball it left on the jump host.
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
@@ -21,13 +21,30 @@ Required
                10.1.0.10-40             last-octet range
                10.1.0-1.10-40           per-octet ranges (nmap style)
                @hosts.txt               file, entries split on lines/commas/spaces, # comments
-  FF_RAIL_A  rail A data subnets, comma separated:  10.20.1.0/24,10.20.3.0/24
-  FF_RAIL_B  rail B data subnets:                    10.20.2.0/24,10.20.4.0/24
+  FF_RAILS   each rail's data subnets: ';' between rails (A first), ',' between a rail's subnets.
+               '10.20.1.0/24;10.20.2.0/24'                two rails, one subnet each
+               '10.20.1.0/24,10.20.3.0/24;10.20.2.0/24'   rail A has two subnets
+               10.20.1.0/24                               one rail (no cross-rail phase)
+             Any number of rails, labelled A, B, C... Quote it: ';' ends a shell command.
    or
-  FF_RAILS   shorthand for one subnet per rail, A first:  10.20.1.0/24,10.20.2.0/24
-   or
-  FF_NICS    data NIC per rail, rail A first:   enp5s0np0,enp196s0np0   (wins over the subnet forms)
+  FF_NICS    data NIC per rail, rail A first:   enp5s0np0,enp196s0np0   (wins over FF_RAILS)
   None set: the tool sweeps the hosts, prints the IPv4 subnets it found, and stops.
+
+Clients (optional): tested against every backend rail, both ways
+  FF_CLIENTS        client ssh targets, FF_HOSTS syntax
+  FF_CLIENT_NETS    the clients' data subnets, comma separated (every NIC with an address in them is a data NIC)
+   or
+  FF_CLIENT_NICS    the clients' data NIC names, comma separated (a client may have one or several)
+                    Neither set: the tool lists the subnets on the clients and stops.
+  FF_CLIENT_RATIO   N (1): waves, at most N client NICs on each backend NIC at once; full: every client NIC
+                    at once, clients->backends then backends->clients; N:full: the waves, then all at once
+  FF_CLIENT_GBPS    client line rate (default: each client NIC's ethtool speed; a bond counts its total)
+  FF_EXPECT_CLIENTS clients that should be tested; fewer makes the coverage PARTIAL
+  A client run is judged against min(client line rate, backend rail line rate / flows sharing that backend NIC).
+  Clients follow FF_ITER: each iteration ends with a client phase and moves every client NIC on to the next
+  backend, so after as many iterations as a rail has backends every client NIC has met every backend NIC
+  (FF_ITER=all covers it). Each client's route to each backend rail must leave by a declared data NIC; one
+  that leaves by another NIC (management, say) is flagged.
 
 Optional (default)
   FF_DURATION      iperf3 seconds per run (120; $1 also sets it)
@@ -52,10 +69,10 @@ Optional (default)
   FF_MESH=1        before load, ping every tested host's rail IPs from every other one's (same rail and
                    cross-rail; tested hosts only, so other clusters on shared subnets are never
                    probed). Failures go to mesh_failures.txt and the Preflight card.
-  FF_CROSS_RAIL=0  the rails are separate fabrics by design: skip the cross-rail phase (A<->B) and
-                   leave it out of the coverage count. Default: test it; unrouted A<->B paths count
+  FF_CROSS_RAIL=0  the rails are separate fabrics by design: skip the cross-rail phase and leave it
+                   out of the coverage count. Default: test it; unrouted cross-rail paths count
                    as skipped (PARTIAL), since missing inter-rail routes can be the fault. When every
-                   A<->B check fails on routing and no same-rail one does, the log says so.
+                   cross-rail check fails on routing and no same-rail one does, the log says so.
   FF_CROSS_MAX=N   at most N cross-rail flows at once: phase 2 (and U2) run in balanced waves,
                    each flow for the full duration; keeps a shared inter-rail path from capping
                    every flow (unset: all at once)
@@ -68,19 +85,23 @@ Optional (default)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
   FF_OUT_DIR       where the .tgz bundle goes (.)
-  FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for both rails, or A,B when the rails
-                   differ by design (e.g. 100,50). Default: the faster rail's most common NIC
-                   speed for both, so a rail that came up slow everywhere shows as slow
+  FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
+                   the rails differ by design (e.g. 100,50). Default: the fastest rail's most common
+                   NIC speed for all, so a rail that came up slow everywhere shows as slow
   FF_OK_PCT        OK at or above this % of link speed (75)
   FF_SLOW_PCT      SLOW at or above this %, CRITICAL below (50)
-                   Each iteration: phase 1 same rail (A->A, B->B); phase 2 cross-rail, one flow each
-                   way per pair (A->B and B->A at once). Host Status = the worst of Rail_A, Rail_B
-                   and Cross; SLOW(cross)/CRITICAL(cross) = only the cross-rail runs were that slow.
+                   Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
+                   way per pair between two rails (with more than two rails, the rail pair rotates each
+                   pairing cycle). Host Status = the worst of its rail columns and Cross;
+                   SLOW(cross)/CRITICAL(cross) = only the cross-rail runs were that slow.
   FF_SPINES        leaf-spine uplinks, all three or none (no defaults): spines, links from each
-  FF_SPINE_LINKS   leaf to each spine, Gbps per link. The summary always sums each leaf's runs to
-  FF_SPINE_GBPS    other leaves per phase (leaf = LLDP neighbour); with these set it judges them
+  FF_SPINE_LINKS   backend leaf to each spine, Gbps per link. The summary always sums each leaf's runs
+  FF_SPINE_GBPS    to other leaves per phase (leaf = LLDP neighbour); with these set it judges them
                    against spines x links x Gbps per direction: oversubscribed by design, or a
                    lost link/spine. Status is unchanged.
+  FF_CLIENT_SPINE_LINKS, FF_CLIENT_SPINE_GBPS  the same for client leaves (both or neither; they need
+                   FF_SPINES: one spine layer serves both). A leaf that serves both clients and backends
+                   is flagged and judged as a backend leaf.
   FF_BUSY_CHECK    command run on each host before any load; exit 0 = host is in
                    production use, 1 = idle, anything else = unknown (counts as in use).
                    Default: WEKA containers running (`weka local ps`); idle where WEKA
@@ -91,7 +112,8 @@ Optional (default)
                    (default: every target for a plain host list, the hosts found on
                    the rails when FF_HOSTS has a CIDR or range)
 
-Result: the last line is "RESULT coverage=COMPLETE|PARTIAL|NONE hosts=t/e paths=r/p ...";
+Result: the last line is "RESULT coverage=COMPLETE|PARTIAL|NONE hosts=t/e paths=r/p ..." (with clients,
+also clients=t/e client_paths=r/p);
 exit 0 = COMPLETE, 3 = PARTIAL, 4 = NONE (no throughput result at all), 2 = stopped early.
 EOF
 }
@@ -134,7 +156,7 @@ declare -A _SEEN=()
 _emit() {
     [[ -n ${_SEEN[$1]+x} ]] && return
     _SEEN[$1]=1; TARGETS+=("$1")
-    (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "FF_HOSTS expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
+    (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "$EXPANDING expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
 }
 _need() {  # refuse a range before looping over it
     (( ${#TARGETS[@]} + $1 <= FF_MAX_TARGETS )) || die "'$2' adds $1 targets, past FF_MAX_TARGETS=$FF_MAX_TARGETS"
@@ -186,10 +208,11 @@ expand_entry() {
 # split on commas and whitespace, no globbing
 _words() { local IFS=$', \t\n'; set -f; WORDS=($1); set +f; }
 
+# expand_targets value [setting name, FF_HOSTS]: fills TARGETS and INPUT_RANGES
 expand_targets() {
     local w line
-    TARGETS=(); _SEEN=()
-    [[ -n $1 ]] || die "FF_HOSTS is empty"
+    EXPANDING=${2:-FF_HOSTS}; TARGETS=(); _SEEN=(); INPUT_RANGES=0
+    [[ -n $1 ]] || die "$EXPANDING is empty"
     _words "$1"
     local -a top=("${WORDS[@]}")
     for w in "${top[@]}"; do
@@ -207,40 +230,72 @@ expand_targets() {
             expand_entry "$w"
         fi
     done
-    (( ${#TARGETS[@]} > 0 )) || die "FF_HOSTS expanded to zero targets"
+    (( ${#TARGETS[@]} > 0 )) || die "$EXPANDING expanded to zero targets"
 }
 
 # ---------- rail spec ----------
 
+# Rails: RAIL_SPEC[r] = rail r's CIDRs (space separated) or NIC name; NR rails, labelled A, B, C...
+LETTERS=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+rail_letter() { echo "${LETTERS:$1:1}"; }
 parse_rails() {
     if [[ -n $FF_NICS ]]; then
         RAIL_MODE=nic; _words "$FF_NICS"; RAIL_SPEC=("${WORDS[@]}")
-        local n
+        local n m
         for n in "${RAIL_SPEC[@]}"; do [[ $n =~ ^[A-Za-z0-9_.:-]+$ ]] || die "bad NIC name in FF_NICS: '$n'"; done
-        [[ ${RAIL_SPEC[0]} != "${RAIL_SPEC[1]}" ]] || die "FF_NICS names the same NIC twice"
-    elif [[ -n $FF_RAIL_A || -n $FF_RAIL_B ]]; then
-        [[ -n $FF_RAIL_A && -n $FF_RAIL_B ]] || die "set both FF_RAIL_A and FF_RAIL_B"
-        RAIL_MODE=cidr
-        _words "$FF_RAIL_A"; RAIL_SPEC[0]="${WORDS[*]}"
-        _words "$FF_RAIL_B"; RAIL_SPEC[1]="${WORDS[*]}"
+        for (( n = 0; n < ${#RAIL_SPEC[@]}; n++ )); do for (( m = n + 1; m < ${#RAIL_SPEC[@]}; m++ )); do
+            [[ ${RAIL_SPEC[n]} != "${RAIL_SPEC[m]}" ]] || die "FF_NICS names the same NIC twice: ${RAIL_SPEC[n]}"
+        done; done
     elif [[ -n $FF_RAILS ]]; then
-        RAIL_MODE=cidr; _words "$FF_RAILS"
-        (( ${#WORDS[@]} == 2 )) || die "FF_RAILS takes one CIDR per rail (A,B), got ${#WORDS[@]}; for several per rail use FF_RAIL_A and FF_RAIL_B"
-        RAIL_SPEC=("${WORDS[@]}")
+        RAIL_MODE=cidr; RAIL_SPEC=()
+        local -a parts; local p
+        IFS=';' read -r -a parts <<<"$FF_RAILS"
+        for p in "${parts[@]}"; do
+            _words "$p"; (( ${#WORDS[@]} )) || die "FF_RAILS has an empty rail: '$FF_RAILS' (';' between rails, ',' between a rail's subnets)"
+            RAIL_SPEC+=("${WORDS[*]}")
+        done
     else
-        RAIL_MODE=none; RAIL_SPEC=(); return
+        RAIL_MODE=none; RAIL_SPEC=(); NR=0; RAILS=(); return
     fi
-    (( ${#RAIL_SPEC[@]} == 2 )) || die "need exactly 2 rails, got ${#RAIL_SPEC[@]}: ${RAIL_SPEC[*]}"
+    NR=${#RAIL_SPEC[@]}; RAILS=($(seq 0 $(( NR - 1 ))))
+    (( NR >= 1 && NR <= 26 )) || die "need 1 to 26 rails, got $NR"
     [[ $RAIL_MODE == cidr ]] || return 0
-    # a rail is a set of CIDRs; no A CIDR may overlap a B CIDR
-    local ca cb a b
-    for ca in ${RAIL_SPEC[0]} ${RAIL_SPEC[1]}; do [[ -n $(cidr_bounds "$ca") ]] || die "bad rail CIDR: '$ca'"; done
-    for ca in ${RAIL_SPEC[0]}; do for cb in ${RAIL_SPEC[1]}; do
-        a=$(cidr_bounds "$ca"); b=$(cidr_bounds "$cb")
-        if (( ${a% *} <= ${b#* } && ${b% *} <= ${a#* } )); then
-            die "rail A $ca overlaps rail B $cb, so the rails can't be told apart; list each rail's subnets or set FF_NICS"
-        fi
+    # a rail is a set of CIDRs; no CIDR of one rail may overlap one of another
+    local ca cb a b r s
+    for r in "${RAILS[@]}"; do for ca in ${RAIL_SPEC[r]}; do [[ -n $(cidr_bounds "$ca") ]] || die "bad rail CIDR: '$ca'"; done; done
+    for r in "${RAILS[@]}"; do for (( s = r + 1; s < NR; s++ )); do
+        for ca in ${RAIL_SPEC[r]}; do for cb in ${RAIL_SPEC[s]}; do
+            a=$(cidr_bounds "$ca"); b=$(cidr_bounds "$cb")
+            if (( ${a% *} <= ${b#* } && ${b% *} <= ${a#* } )); then
+                die "rail $(rail_letter $r) $ca overlaps rail $(rail_letter $s) $cb, so the rails can't be told apart; list each rail's subnets or set FF_NICS"
+            fi
+        done; done
     done; done
+}
+
+# Client data NICs: CLIENT_MODE nets (CLIENT_SPEC = CIDRs) or nics (names); none when FF_CLIENTS is unset
+parse_clients() {
+    CLIENT_MODE=none; CLIENT_SPEC=()
+    [[ -n $FF_CLIENTS ]] || { [[ -n $FF_CLIENT_NETS$FF_CLIENT_NICS ]] && die "FF_CLIENT_NETS/FF_CLIENT_NICS need FF_CLIENTS (the client ssh targets)"; return 0; }
+    local c
+    if [[ -n $FF_CLIENT_NICS ]]; then
+        CLIENT_MODE=nics; _words "$FF_CLIENT_NICS"; CLIENT_SPEC=("${WORDS[@]}")
+        for c in "${CLIENT_SPEC[@]}"; do [[ $c =~ ^[A-Za-z0-9_.:-]+$ ]] || die "bad NIC name in FF_CLIENT_NICS: '$c'"; done
+    elif [[ -n $FF_CLIENT_NETS ]]; then
+        CLIENT_MODE=nets; _words "$FF_CLIENT_NETS"; CLIENT_SPEC=("${WORDS[@]}")
+        for c in "${CLIENT_SPEC[@]}"; do [[ -n $(cidr_bounds "$c") ]] || die "bad client CIDR in FF_CLIENT_NETS: '$c'"; done
+    else
+        CLIENT_MODE=list   # sweep, list the clients' subnets, stop
+    fi
+    [[ -z $FF_CLIENT_RATIO || $FF_CLIENT_RATIO =~ ^([1-9][0-9]*|full|[1-9][0-9]*:full)$ ]] ||
+        die "FF_CLIENT_RATIO must be N, full or N:full (N = client NICs per backend NIC per wave), got '$FF_CLIENT_RATIO'"
+    : "${FF_CLIENT_RATIO:=1}"
+    CL_WAVES=1; CL_FULL=0; CL_R=${FF_CLIENT_RATIO%%:*}
+    [[ $FF_CLIENT_RATIO == full ]] && { CL_WAVES=0; CL_FULL=1; CL_R=0; }
+    [[ $FF_CLIENT_RATIO == *:full ]] && CL_FULL=1
+    [[ -z $FF_CLIENT_GBPS || $FF_CLIENT_GBPS =~ ^[1-9][0-9]*$ ]] || die "FF_CLIENT_GBPS must be a positive integer, got '$FF_CLIENT_GBPS'"
+    [[ -z $FF_EXPECT_CLIENTS || $FF_EXPECT_CLIENTS =~ ^[1-9][0-9]*$ ]] || die "FF_EXPECT_CLIENTS must be a positive integer"
+    return 0
 }
 
 # exit 1 = WEKA not installed or no container running, 0 = one is Running, 2 = CLI failed
@@ -436,12 +491,22 @@ out=$(ping -c1 -W2 -M do -s "$4" -I "$1" "$2" 2>&1) || { echo "MTU $(( $4 + 28 )
 echo OK
 EOF
 
-# Servers: port ip... ; clears earlier iperf3 first (port clash)
+# Servers: port count ip... (count servers per IP, on port..port+count-1: a backend NIC that serves
+# several client flows at once needs one server each); clears earlier iperf3 first (port clash)
 read -r -d '' SERVER_SCRIPT <<'EOF'
-port=$1; shift
+port=$1 count=$2; shift 2
 pkill -x iperf3
 for i in $(seq 20); do [ -z "$(pgrep -x iperf3)" ] && break; sleep 0.5; done
-for ip in "$@"; do iperf3 -s -D -B "$ip" -p "$port"; done
+for ip in "$@"; do for j in $(seq 0 $(( count - 1 ))); do iperf3 -s -D -B "$ip" -p $(( port + j )); done; done
+EOF
+
+# Client routes: backend_ip... -> "@@CROUTE ip egress_dev" by the kernel's own choice (no source address),
+# the path a client's own traffic to that rail takes
+read -r -d '' CROUTE_SCRIPT <<'EOF'
+for ip in "$@"; do
+    d=$(ip -o route get "$ip" 2>&1 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i+1); exit}}')
+    echo "@@CROUTE $ip ${d:-none}"
+done
 EOF
 
 # One iperf3 run: src dst port streams secs [tos] -> "[SUM] ... receiver retransmits:N cpu:S/R" or "ERROR ..."
@@ -597,16 +662,75 @@ rail_lookup() {
 }
 
 rail_ok() { [[ ${RSTATE[$1,$2]} == ok ]]; }
-rail_letter() { [[ $1 == 0 ]] && echo A || echo B; }
+
+# client_lookup k: client k's data NICs (CN, CNIC/CIP/CMTU/CSTATE by j) per FF_CLIENT_NETS or FF_CLIENT_NICS
+client_lookup() {
+    local k=$1 f=${DISC[$1]} n a c j=0 line
+    local -A got=()
+    while read -r n a; do
+        [[ $n == lo || -n ${got[$n]} ]] && continue
+        if [[ $CLIENT_MODE == nics ]]; then [[ " ${CLIENT_SPEC[*]} " == *" $n "* ]] || continue
+        else local hit=; for c in "${CLIENT_SPEC[@]}"; do in_cidr "$a" "$c" && { hit=1; break; }; done; [[ -n $hit ]] || continue; fi
+        got[$n]=1; CNIC[$k,$j]=$n; CIP[$k,$j]=$a
+        line=$(section "$f" link | awk -v n="$n" '{x=$2; sub(/:$/,"",x); sub(/@.*/,"",x)} x==n {print; exit}')
+        CMTU[$k,$j]=$(awk '{for (i = 1; i < NF; i++) if ($i == "mtu") print $(i+1)}' <<<"$line")
+        if [[ $line != *LOWER_UP* ]]; then CSTATE[$k,$j]="link DOWN on $n"; else CSTATE[$k,$j]=ok; fi
+        j=$(( j + 1 ))
+    done < <(section "$f" addr | awk '{split($4,a,"/"); print $2, a[1]}')
+    if [[ $CLIENT_MODE == nics ]]; then   # a named NIC with no IPv4 is a finding, not silence
+        for c in "${CLIENT_SPEC[@]}"; do
+            [[ -n ${got[$c]} ]] && continue
+            section "$f" link | awk -v n="$c" '{sub(/:$/,"",$2); sub(/@.*/,"",$2)} $2==n {f=1} END {exit !f}' || continue
+            CNIC[$k,$j]=$c; CIP[$k,$j]=none; CSTATE[$k,$j]="no IPv4 on $c"; j=$(( j + 1 ))
+        done
+    fi
+    CN[$k]=$j
+}
+cl_ok() { [[ ${CSTATE[$1,$2]} == ok ]]; }
+
+# list_subnets k...: the IPv4 subnets on hosts k (hosts, NIC, subnet); where two NICs on a host share
+# a subnet, the mask can't tell them apart, so also each NIC's addresses by /24 and the FF_NICS hint
+list_subnets() {
+    local k
+    for k in "$@"; do
+        section "${DISC[$k]}" addr | awk '$2!="lo" {print $2, $4}' | while read -r n a; do
+            local b; b=$(cidr_bounds "$a") && echo "$n $(int2ip ${b% *})/${a#*/}"
+        done
+    done | sort | uniq -c | sort -rn | sed 's/^/#   /' >&2
+    local shared; shared=$(for k in "$@"; do
+        section "${DISC[$k]}" addr | awk '$2!="lo" {print $2, $4}' | while read -r n a; do
+            local b; b=$(cidr_bounds "$a") && echo "$k $n $(int2ip ${b% *})/${a#*/} ${a%/*}"
+        done | awk '{h[$3] = h[$3] " " $2; c[$3]++; ip[$2] = $4} END {for (s in c) if (c[s] > 1) {n = split(h[s], x, " "); for (i = 1; i <= n; i++) {split(ip[x[i]], o, "."); print x[i], o[1] "." o[2] "." o[3] ".0/24"}}}'
+    done)
+    [[ -n $shared ]] || return 0
+    log "Some hosts have several NICs in one subnet, so the subnet can't tell their rails apart. Those NICs' addresses by /24 (hosts, NIC, /24):"
+    sort <<<"$shared" | uniq -c | sort -k2,2 -k1,1rn | sed 's/^/#   /' >&2
+    log "Name the rails by NIC (FF_NICS=$(awk '{print $1}' <<<"$shared" | sort -u | paste -sd, -)) or by narrower subnets, ';' between rails"
+}
 
 # Swapped rails by NIC name (subnet mode): a host whose rail-A NIC is the name most hosts
 # use for rail B, and the reverse, has its IPs or cables swapped.
 rail_consistency() {
-    [[ $RAIL_MODE == cidr ]] || return 0
-    local maj k r; maj=$(for k in "${ELIG[@]}"; do for r in 0 1; do [[ ${RNIC[$k,$r]} != - ]] && echo "$r ${RNIC[$k,$r]}"; done; done |
-        awk '{c[$1 " " $2]++} END {for (x in c) {split(x, p, " "); if (c[x] > b[p[1]]) {b[p[1]] = c[x]; m[p[1]] = p[2]}} print m[0] " " m[1]}')
-    local ma=${maj% *} mb=${maj#* } n=0
-    [[ -n $ma && -n $mb && $ma != "$mb" ]] || return 0
+    [[ $RAIL_MODE == cidr ]] && (( NR >= 2 )) || return 0
+    local maj k r n=0
+    maj=$(for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do [[ ${RNIC[$k,$r]} != - ]] && echo "$r ${RNIC[$k,$r]}"; done; done |
+        awk -v nr=$NR '{c[$1 " " $2]++} END {for (x in c) {split(x, p, " "); if (c[x] > b[p[1]]) {b[p[1]] = c[x]; m[p[1]] = p[2]}}
+                            for (r = 0; r < nr; r++) printf "%s ", (r in m) ? m[r] : "-"}')
+    if (( NR > 2 )); then   # a rail NIC that is the name most hosts use for another rail
+        local -a M=($maj); local s
+        for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+            [[ ${RNIC[$k,$r]} != - && ${RNIC[$k,$r]} != "${M[r]}" ]] || continue
+            for s in "${RAILS[@]}"; do
+                [[ $s != "$r" && ${RNIC[$k,$r]} == "${M[s]}" ]] || continue
+                echo "${T_HOST[$k]} rail_nic_overlap rail $(rail_letter $r) on ${RNIC[$k,$r]}, the NIC most hosts use for rail $(rail_letter $s) (most use ${M[r]} for rail $(rail_letter $r))" >> "$COLLECT_DIR/rail_anomalies.txt"
+                n=$(( n + 1 ))
+            done
+        done; done
+        (( n )) && { log "WARNING: $n rail NICs are the NIC most hosts use for another rail:"; grep ' rail_nic_overlap ' "$COLLECT_DIR/rail_anomalies.txt" | sed 's/^/#   /' | head -n 10 >&2; }
+        return 0
+    fi
+    local ma=${maj%% *} mb; mb=${maj#* }; mb=${mb%% *}
+    [[ $ma != - && $mb != - && $ma != "$mb" ]] || return 0
     for k in "${ELIG[@]}"; do
         if [[ ${RNIC[$k,0]} == "$mb" && ${RNIC[$k,1]} == "$ma" ]]; then
             echo "${T_HOST[$k]} swapped_nics rail A is on $mb and rail B on $ma, the reverse of most hosts (A=$ma, B=$mb): IPs or cables swapped" >> "$COLLECT_DIR/rail_anomalies.txt"; n=$(( n + 1 ))
@@ -618,11 +742,62 @@ rail_consistency() {
     return 0
 }
 
+# "mtu host" lines -> where they differ: "most at M; N on h1 h2;" (nothing when they agree)
+mtu_odd() {
+    awk '{if (!($1 in n)) d++; n[$1]++; h[$1] = h[$1] " " $2} END {if (d < 2) exit; for (m in n) if (n[m] > b) {b = n[m]; mm = m}
+         t = 0; for (m in n) if (n[m] == b) t++
+         if (t > 1) {printf "no majority:"; for (m in n) printf " %s on%s;", m, h[m]}
+         else {printf "most at %s;", mm; for (m in n) if (m != mm) printf " %s on%s;", m, h[m]}}'
+}
+
+# Client routes: each client asks its kernel for the route to one backend IP per rail and backend subnet;
+# a route that leaves by a NIC that isn't a declared data NIC is flagged (client_routes.txt, rail_anomalies.txt)
+client_routes() {
+    local k j r ip
+    local -A pick=() rl=()
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+        rail_ok $k $r || continue
+        local pfx; pfx=$(section "${DISC[$k]}" addr | awk -v ip="${RIP[$k,$r]}" '{split($4, a, "/"); if (a[1] == ip) {print a[2]; exit}}')
+        local b; b=$(cidr_bounds "${RIP[$k,$r]}/${pfx:-32}") || continue
+        [[ -n ${pick[$r,${b% *}]} ]] || { pick[$r,${b% *}]=${RIP[$k,$r]}; rl[${RIP[$k,$r]}]=$(rail_letter $r); }
+    done; done
+    local -a ips=("${pick[@]}")
+    : > "$COLLECT_DIR/client_routes.txt"
+    (( ${#ips[@]} )) || return 0
+    for k in "${CLI[@]}"; do
+        throttle
+        ( rbash "${T_TARGET[$k]}" "${ips[@]}" <<<"$CROUTE_SCRIPT" > "$WORK/croute.$k" 2>&1 ) &
+    done
+    wait
+    for k in "${CLI[@]}"; do
+        local decl=" "; for (( j = 0; j < CN[$k]; j++ )); do decl+="${CNIC[$k,$j]} "; done
+        awk -v h="${T_HOST[$k]}" -v decl="$decl" -v rl="$(for ip in "${!rl[@]}"; do printf '%s=%s ' "$ip" "${rl[$ip]}"; done)" '
+            BEGIN { n = split(rl, q, " "); for (i = 1; i <= n; i++) { split(q[i], kv, "="); R[kv[1]] = kv[2] } }
+            $1 == "@@CROUTE" { d = $3; dc = index(decl, " " d " "); print h, (dc ? d : "-"), R[$2], $2, d, (dc ? "declared" : "undeclared"); seen = 1 }
+            END { if (!seen) print h, "-", "-", "-", "none", "unread" }' "$WORK/croute.$k"
+    done | sort -V > "$WORK/croutes"
+    cat "$WORK/croutes" > "$COLLECT_DIR/client_routes.txt"
+    local bad; bad=$(awk '$6 == "undeclared"' "$WORK/croutes")
+    local unread; unread=$(awk '$6 == "unread" {print $1}' "$WORK/croutes" | paste -sd' ' -)
+    if [[ -n $unread ]]; then   # no answer is not a clean route: flag it like a bad one
+        log "WARNING: client routes not read on: $unread"
+        for k in $unread; do echo "$k client_route_unread no route answer from this client (ssh or ip route failed); its routes are unknown"; done >> "$COLLECT_DIR/rail_anomalies.txt"
+    fi
+    if [[ -n $bad ]]; then
+        awk '{r[$1] = r[$1] sprintf("%srail %s (%s) by %s", (r[$1] == "" ? "" : "; "), $3, $4, $5)} END {for (h in r) print h, "client_route_undeclared route to", r[h], "- not a declared data NIC"}' <<<"$bad" |
+            sort -V >> "$COLLECT_DIR/rail_anomalies.txt"
+        log "WARNING: $(awk '{print $1}' <<<"$bad" | sort -u | wc -l | tr -d ' ') clients route to a backend rail by a NIC that isn't a declared data NIC (client_routes.txt):"
+        echo "$bad" | head -n 10 | column -t | sed 's/^/#   /' >&2
+    else
+        log "Client routes: every client reaches every backend rail by a declared data NIC ($(wc -l < "$WORK/croutes" | tr -d ' ') routes read)"
+    fi
+}
+
 # Each usable rail's gateway(s) must answer a full-MTU no-fragment ping (routed rails only).
 gateway_check() {
     local k r j
     : > "$COLLECT_DIR/gateways.txt"
-    for k in "${ELIG[@]}"; do for r in 0 1; do
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
         rail_ok $k $r || continue
         local -a peers=()
         for j in "${ELIG[@]}"; do [[ $j != "$k" ]] && rail_ok $j $r && peers+=("${RIP[$j,$r]}"); done
@@ -651,7 +826,7 @@ take_locks() {
     cross_waves $(( ${#ELIG[@]} / 2 ))   # phase 2 waves stretch an iteration
     local max=$(( 2 * ((1 + XW) * FF_DURATION + (FF_UDP == 1 ? (1 + XW) * FF_UDP_DURATION : 0)) + 300 ))
     local info="since=$(date -u +%Y-%m-%dT%H:%M:%SZ),from=$(hostname -s),user=$(id -un)"   # no spaces: args are re-split remotely
-    for k in "${ELIG[@]}"; do
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
         ( out=$(rbash "${T_TARGET[$k]}" take "$RUN_ID" "$info" "$max" <<<"$LOCK_SCRIPT" 2>&1)
           echo "${T_HOST[$k]} ${out%%$'\n'*}" > "$WORK/lock.$k" ) &
@@ -670,9 +845,9 @@ take_locks() {
     fi
 }
 
-lock_all() {  # touch | release on every tested host (only our own lock is changed)
+lock_all() {  # touch | release on every tested host and client (only our own lock is changed)
     local k
-    for k in "${ELIG[@]}"; do rbash "${T_TARGET[$k]}" "$1" "$RUN_ID" <<<"$LOCK_SCRIPT" >> "$WORK/lock.log" 2>&1 & done
+    for k in "${ELIG[@]}" "${CLI[@]}"; do rbash "${T_TARGET[$k]}" "$1" "$RUN_ID" <<<"$LOCK_SCRIPT" >> "$WORK/lock.log" 2>&1 & done
     wait
 }
 
@@ -680,17 +855,21 @@ lock_all() {  # touch | release on every tested host (only our own lock is chang
 mesh_check() {
     local k j r total=0 a b
     local -A host_of=()
-    for j in "${ELIG[@]}"; do for r in 0 1; do rail_ok $j $r && host_of[${RIP[$j,$r]}]=${T_HOST[$j]}; done; done
+    for j in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $j $r && host_of[${RIP[$j,$r]}]=${T_HOST[$j]}; done; done
     log "Mesh: every rail IP pings the ${#host_of[@]} rail IPs of the other tested hosts..."
     for k in "${ELIG[@]}"; do
-        local -a dst=()
-        for j in "${ELIG[@]}"; do [[ $j != "$k" ]] || continue; for r in 0 1; do rail_ok $j $r && dst+=("${RIP[$j,$r]}"); done; done
-        a=none; b=none; rail_ok $k 0 && a=${RIP[$k,0]}; rail_ok $k 1 && b=${RIP[$k,1]}
-        [[ $a == none && $b == none ]] && continue
-        local srcs=0; [[ $a != none ]] && srcs=$(( srcs + 1 )); [[ $b != none ]] && srcs=$(( srcs + 1 ))
-        total=$(( total + srcs * ${#dst[@]} ))
-        throttle
-        ( rbash "${T_TARGET[$k]}" "$a" "$b" "${dst[@]}" <<<"$MESH_SCRIPT" > "$WORK/mesh.$k" 2>&1 ) &
+        local -a dst=() src=()
+        for j in "${ELIG[@]}"; do [[ $j != "$k" ]] || continue; for r in "${RAILS[@]}"; do rail_ok $j $r && dst+=("${RIP[$j,$r]}"); done; done
+        for r in "${RAILS[@]}"; do rail_ok $k $r && src+=("${RIP[$k,$r]}"); done
+        (( ${#src[@]} )) || continue
+        total=$(( total + ${#src[@]} * ${#dst[@]} ))
+        # the script takes two sources ("none" = no such rail): one call per two rails
+        local q
+        for (( q = 0; q < ${#src[@]}; q += 2 )); do
+            a=${src[q]}; b=${src[q+1]:-none}
+            throttle
+            ( rbash "${T_TARGET[$k]}" "$a" "$b" "${dst[@]}" <<<"$MESH_SCRIPT" > "$WORK/mesh.$k.$q" 2>&1 ) &
+        done
     done
     wait
     cat "$WORK"/mesh.* 2>&1 | awk '$1 == "MESHFAIL" {print $2, $3}' | while read -r s d; do
@@ -723,14 +902,15 @@ mesh_check() {
 # LLDP: a rail NIC whose switch most hosts reach on the other rail is cabled to the wrong rail.
 lldp_rail_check() {
     local railmap=$WORK/railmap k r
-    for k in "${ELIG[@]}"; do for r in 0 1; do
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
         [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"
     done; done > "$railmap"
+    # compared with the rail most NICs on that switch use (with two rails: the other one)
     awk 'FNR == 1 {f++}
-         f == 1 {rail[$1 " " $2] = $3; next}
+         f == 1 {rail[$1 " " $2] = $3; rails[$3] = 1; next}
          $4 != "unknown" && (($1 " " $2) in rail) {n++; h[n] = $1; nic[n] = $2; sw[n] = $4; rl[n] = rail[$1 " " $2]; c[$4 " " rl[n]]++}
-         END {for (i = 1; i <= n; i++) {o = (rl[i] == "A") ? "B" : "A"
-                  if (c[sw[i] " " o] > c[sw[i] " " rl[i]])
+         END {for (i = 1; i <= n; i++) {o = ""; for (r in rails) if (r != rl[i] && (o == "" || c[sw[i] " " r] > c[sw[i] " " o])) o = r
+                  if (o != "" && c[sw[i] " " o] > c[sw[i] " " rl[i]])
                       printf "%s lldp_wrong_rail rail %s NIC %s is cabled to %s, which %d other NICs reach on rail %s\n", h[i], rl[i], nic[i], sw[i], c[sw[i] " " o], o}}' \
         "$railmap" "$1" > "$WORK/lldp_anom"
     if [[ -s $WORK/lldp_anom ]]; then
@@ -759,9 +939,10 @@ round_pairs() {
 # xpaths p: pair p's two phase 2 runs, one each way across the rails, in X1/X2 (src_k src_r dst_k dst_r).
 # Odd: client A <-> server B; even: client B <-> server A. A rotating host moves one slot per round, so slot
 # parity swaps its NIC each iteration; slot 0 (the fixed host) swaps by iteration.
+# With more than two rails, the rail pair (XA, XB) comes from UPAIRS by pairing cycle (set per iteration).
 xpaths() {
-    local c=${PC[$1]} s=${PS[$1]} i=${PI[$1]}
-    if (( i ? i % 2 : (RND + 1) % 2 )); then X1=($c 0 $s 1); X2=($s 1 $c 0); else X1=($c 1 $s 0); X2=($s 0 $c 1); fi
+    local c=${PC[$1]} s=${PS[$1]} i=${PI[$1]} a=${XA:-0} b=${XB:-1}
+    if (( i ? i % 2 : (RND + 1) % 2 )); then X1=($c $a $s $b); X2=($s $b $c $a); else X1=($c $b $s $a); X2=($s $a $c $b); fi
 }
 
 # cross_waves npairs: XW = phase 2 waves under FF_CROSS_MAX (1 when unset). A pair's two flows (one each
@@ -798,6 +979,19 @@ xwaves() {
     done
     PHASE_OUT=$all
 }
+
+# p1_paths p check|run [mode]: pair p's same-rail paths, one per rail: client->server on even rails,
+# server->client on odd ones (two rails: A c->s, B s->c), so each host sends on some rails and receives on others
+p1_paths() {
+    local p=$1 fn=${2}_path mode=$3 r
+    for r in "${RAILS[@]}"; do
+        if (( r % 2 )); then $fn p1${r}_$p ${PS[p]} $r ${PC[p]} $r $mode
+        else $fn p1${r}_$p ${PC[p]} $r ${PS[p]} $r $mode; fi
+    done
+}
+# "A->A and B->B" / "A->B and B->A" for the log
+same_desc() { local r o=""; for r in "${RAILS[@]}"; do o+="$( (( r == 0 )) || { (( r == NR - 1 )) && echo " and " || echo ", "; })$(rail_letter $r)->$(rail_letter $r)"; done; echo "$o"; }
+cross_desc() { echo "$(rail_letter ${XA:-0})->$(rail_letter ${XB:-1}) and $(rail_letter ${XB:-1})->$(rail_letter ${XA:-0})"; }
 
 # check_path key src_k src_r dst_k dst_r: writes OK or a reason to $PATHS/key
 check_path() {
@@ -839,11 +1033,19 @@ run_path() {
       echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
 }
 
-collect_counters() {  # script outfile: run a counter script on every tested host
-    local script=$1 outfile=$2 k
+# host_nics k: host k's data NICs ("-" = none on that rail): its rail NICs, or a client's data NICs
+host_nics() {
+    local k=$1 r
+    if [[ -n ${IS_CL[$k]} ]]; then for (( r = 0; r < ${CN[$k]:-0}; r++ )); do echo "${CNIC[$k,$r]}"; done
+    else for r in "${RAILS[@]}"; do echo "${RNIC[$k,$r]}"; done; fi
+}
+
+collect_counters() {  # script outfile [k...]: run a counter script on every tested host (or hosts k...)
+    local script=$1 outfile=$2 k; shift 2
+    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}")
     : > "$outfile"
-    for k in "${ELIG[@]}"; do
-        rbash "${T_TARGET[$k]}" "${RNIC[$k,0]}" "${RNIC[$k,1]}" <<<"$script" >> "$outfile" 2>> "$RUNLOG_SSH" &
+    for k in "${ks[@]}"; do
+        rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$script" >> "$outfile" 2>> "$RUNLOG_SSH" &
     done
     wait
 }
@@ -854,7 +1056,7 @@ collect_sysinfo() {
     log "System info: capturing on ${#ELIG[@]} hosts, at most ${FF_SYSINFO_TIMEOUT}s each (bundle: sysinfo/<host>/)..."
     for k in "${ELIG[@]}"; do
         throttle
-        ( timeout "$FF_SYSINFO_TIMEOUT" ssh "${SSH_OPTS[@]}" "${T_TARGET[$k]}" $SUDO bash -s -- "${RNIC[$k,0]}" "${RNIC[$k,1]}" \
+        ( timeout "$FF_SYSINFO_TIMEOUT" ssh "${SSH_OPTS[@]}" "${T_TARGET[$k]}" $SUDO bash -s -- $(host_nics $k) \
               <<<"$SYSINFO_SCRIPT" > "$WORK/si.$k" 2>> "$RUNLOG_SSH"; echo $? > "$WORK/si_rc.$k" ) &
     done
     wait
@@ -875,7 +1077,7 @@ collect_sysinfo() {
 # Rail NIC receive config from the sysinfo capture: "host rail numa ring_cur/max pcie_GTs x width cur/max"
 rx_config() {
     local k r f
-    for k in "${ELIG[@]}"; do for r in 0 1; do
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
         f=$SI/${T_HOST[$k]}/nic-${RNIC[$k,$r]}
         [[ ${RNIC[$k,$r]} != - && -f $f ]] || continue
         awk -v h="${T_HOST[$k]}" -v r=$(rail_letter $r) '
@@ -952,7 +1154,9 @@ f == 8 { hr[$1] = $2; ha[$1] = $3; next }
 f == 9 { if ($2 !~ /^rdma:/ && tolower($2) ~ /discard|out_of_buffer/) dc[nh[$1]] = 1 }
 function v(a, k) { return (k in a) ? a[k] : "-" }
 END {
-    print "Host NUMA_A/B Ring_A Ring_B PCIe_A PCIe_B Governor IRQbal RcvCPU% RcvThr% SndCPU% Softnet_drop Squeeze TCP_rcv_drop NIC_discard AER Klog Flags"
+    nr = length(RL); hn = "NUMA_"; hg = ""; hp = ""
+    for (i = 1; i <= nr; i++) { lt = substr(RL, i, 1); hn = hn (i > 1 ? "/" : "") lt; hg = hg " Ring_" lt; hp = hp " PCIe_" lt }
+    print "Host " hn hg hp " Governor IRQbal RcvCPU% RcvThr% SndCPU% Softnet_drop Squeeze TCP_rcv_drop NIC_discard AER Klog Flags"
     for (h in hosts) {
         # "-" = not read (ssh failed, no AER in sysfs, no discard counter on this driver): unknown, not zero
         cr = (h in hr) ? hr[h] : 0
@@ -965,8 +1169,9 @@ END {
         # on 3.16+, else 1; an unknown version counts as 1, which can only flag more)
         RT = (h in rc) ? sprintf("%.1f", rc[h] / ((th[h] + 0 > 0) ? th[h] : 1)) : "-"
         if (RT != "-" && RT + 0 >= 90) fl[h] = fl[h] ",rcv_cpu>=90/thread"
-        printf "%s %s/%s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", h, v(numa, h SUBSEP "A"), v(numa, h SUBSEP "B"),
-            v(ring, h SUBSEP "A"), v(ring, h SUBSEP "B"), v(pcie, h SUBSEP "A"), v(pcie, h SUBSEP "B"), v(gov, h), v(irq, h),
+        nu = ""; ri = ""; pc = ""
+        for (i = 1; i <= nr; i++) { lt = substr(RL, i, 1); nu = nu (i > 1 ? "/" : "") v(numa, h SUBSEP lt); ri = ri " " v(ring, h SUBSEP lt); pc = pc " " v(pcie, h SUBSEP lt) }
+        printf "%s %s%s%s %s %s %s %s %s %s %s %s %s %s %s %s\n", h, nu, ri, pc, v(gov, h), v(irq, h),
             ((h in rc) ? rc[h] : "-"), RT, ((h in sc) ? sc[h] : "-"), SD, SQ, TD, ND, AE, v(kl, h), (fl[h] == "" ? "-" : substr(fl[h], 2))
     }
 }'
@@ -987,7 +1192,7 @@ host_rx() {  # writes $COLLECT_DIR/host_rx.txt and prints the flagged hosts
     grep "Gbits/sec" "$1" > "$WORK/rx_results"
     awk '{r[$1]++; a[$1] += $2} END {for (h in r) print h, r[h], a[h]}' "$WORK/hc_reads" > "$WORK/hcreads"
     [[ -f $WORK/prio_post ]] || : > "$WORK/prio_post"
-    awk -v ns="$HC_READS" "$HOSTRX_AWK" "$WORK/nicmap" "$WORK/ipmap" "$WORK/rxcfg" "$WORK/hostinfo" "$WORK/rx_results" \
+    awk -v ns="$HC_READS" -v RL="${LETTERS:0:NR}" "$HOSTRX_AWK" "$WORK/nicmap" "$WORK/ipmap" "$WORK/rxcfg" "$WORK/hostinfo" "$WORK/rx_results" \
         "$COLLECT_DIR/host_counters.txt" "$COLLECT_DIR/prio_counters.txt" "$WORK/hcreads" "$WORK/prio_post" \
         | { read -r hdr; echo "$hdr"; sort -V; } > "$COLLECT_DIR/host_rx.txt"
 }
@@ -1028,21 +1233,30 @@ cross_summary() {
           for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1) + 0; if ($i ~ /^retransmits:/) { split($i, q, ":"); rt = q[2] + 0 } }
           if (g >= 0 && ($1 in rail) && ($2 in rail)) print (rail[$1] == rail[$2] ? rail[$1] : rail[$1] ">" rail[$2]), it, g, rt }' "$1" "$2")
     [[ $x == *'>'* ]] || return 0
-    med() { sort -n | awk '{v[NR] = $1} END {if (NR) printf "%.1f", NR % 2 ? v[(NR + 1) / 2] : (v[NR / 2] + v[NR / 2 + 1]) / 2}'; }
-    xm=$(awk '$1 ~ />/ {print $3}' <<<"$x" | med); am=$(awk '$1 == "A" {print $3}' <<<"$x" | med); bm=$(awk '$1 == "B" {print $3}' <<<"$x" | med)
-    awk -v xm="$xm" -v am="$am" -v bm="$bm" -v la="${LINE_A:-0}" -v lb="${LINE_B:-0}" -v ok="$FF_OK_PCT" -v cm="${FF_CROSS_MAX:-0}" '
+    awk -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v cm="${FF_CROSS_MAX:-0}" '
         function bw(g) { return g >= 1000 ? sprintf("%.2f Tbps", g / 1000) : sprintf("%.1f Gbps", g) }
         function k(n) { return n >= 1e6 ? sprintf("%.1fM", n / 1e6) : (n >= 1e4 ? sprintf("%.1fk", n / 1e3) : n) }
-        $1 ~ />/ { nx++; d[$1]++; tot[$2] += $3; xr += $4; if (index($2, "w")) wv = 1; next }
-        { sr += $4 }
+        function med(s,   n, v, i, j, t) { n = split(s, v, " "); if (!n) return ""
+            for (i = 2; i <= n; i++) { t = v[i] + 0; for (j = i - 1; j >= 1 && v[j] + 0 > t; j--) v[j + 1] = v[j]; v[j + 1] = t }
+            return sprintf("%.1f", n % 2 ? v[(n + 1) / 2] : (v[n / 2] + v[n / 2 + 1]) / 2) }
+        BEGIN { nr = split(lines, q, " "); for (i = 1; i <= nr; i++) { split(q[i], kv, "="); R[i] = kv[1]; L[kv[1]] = kv[2] + 0 } }
+        $1 ~ />/ { nx++; d[$1]++; tot[$2] += $3; xr += $4; xv = xv " " $3; if (index($2, "w")) wv = 1; next }
+        { sr += $4; sv[$1] = sv[$1] " " $3 }
         END { for (i in tot) { ni++; s += tot[i]; if (ni == 1 || tot[i] < lo) lo = tot[i]; if (ni == 1 || tot[i] > hi) hi = tot[i] }
               if (ni == 1) printf "  Cross-rail total: %s over %d flows run at once", bw(s), nx
               else if (wv) printf "  Cross-rail total per wave (FF_CROSS_MAX=%d flows at once): largest %s, %s on average (%s to %s over %d waves), %d flows", cm, bw(hi), bw(s / ni), bw(lo), bw(hi), ni, nx
               else printf "  Cross-rail total per iteration: %s on average (%s to %s over %d iterations), %d flows", bw(s / ni), bw(lo), bw(hi), ni, nx
-              printf " (A->B %d, B->A %d); median %s Gbps per flow; retransmits %s cross-rail vs %s same-rail\n", d["A>B"], d["B>A"], xm, k(xr), k(sr + 0)
-              lx = la < lb ? la : lb; ca = la * ok / 100; cb = lb * ok / 100; cx = lx * ok / 100
-              if (lx > 0 && xm + 0 < cx && (am != "" || bm != "") && (am == "" || am + 0 >= ca) && (bm == "" || bm + 0 >= cb))
-                  printf "  Same-rail runs are OK, cross-rail runs are not: cross-rail median %s Gbps per flow (OK >= %g), same-rail median %s (A) / %s (B) Gbps. The hosts pass on their own rail, so the likely limit is the shared path between the rails (switch inter-link or spine), not the hosts.\n", xm, cx, (am == "" ? "-" : am), (bm == "" ? "-" : bm) }' <<<"$x"
+              # directions: every one with two rails (as before), the ones that ran with more
+              ds = ""; for (i = 1; i <= nr; i++) for (j = 1; j <= nr; j++) if (i != j && (nr == 2 || (R[i] ">" R[j]) in d))
+                  ds = ds sprintf("%s%s->%s %d", ds == "" ? "" : ", ", R[i], R[j], d[R[i] ">" R[j]])
+              xm = med(xv)
+              printf " (%s); median %s Gbps per flow; retransmits %s cross-rail vs %s same-rail\n", ds, xm, k(xr), k(sr + 0)
+              lx = 0; for (i = 1; i <= nr; i++) if (i == 1 || L[R[i]] < lx) lx = L[R[i]]
+              cx = lx * ok / 100; any = 0; allok = 1; sm = ""
+              for (i = 1; i <= nr; i++) { m = med(sv[R[i]]); sm = sm sprintf("%s%s (%s)", i > 1 ? " / " : "", m == "" ? "-" : m, R[i])
+                  if (m != "") { any = 1; if (m + 0 < L[R[i]] * ok / 100) allok = 0 } }
+              if (lx > 0 && xm + 0 < cx && any && allok)
+                  printf "  Same-rail runs are OK, cross-rail runs are not: cross-rail median %s Gbps per flow (OK >= %g), same-rail median %s Gbps. The hosts pass on their own rail, so the likely limit is the shared path between the rails (switch inter-link or spine), not the hosts.\n", xm, cx, sm }' <<<"$x"
 }
 
 # uplink_summary ipmap lldp nicdiag results: per leaf (its LLDP neighbour) and phase, the runs that cross
@@ -1053,11 +1267,14 @@ function med(s,   n, v, i, j, t) { n = split(s, v, " "); if (!n) return -1
     for (i = 2; i <= n; i++) { t = v[i] + 0; for (j = i - 1; j >= 1 && v[j] + 0 > t; j--) v[j + 1] = v[j]; v[j + 1] = t }
     return n % 2 ? v[(n + 1) / 2] + 0 : (v[n / 2] + v[n / 2 + 1]) / 2 }
 function tb(g) { return sprintf("%.2f T", g / 1000) }
+BEGIN { nr = split(lines, lq, " "); for (i = 1; i <= nr; i++) { split(lq[i], kv, "="); L[kv[1]] = kv[2] + 0; if (i == 1 || kv[2] + 0 < lx) lx = kv[2] + 0 } }
 FNR == 1 { f++ }
-f == 1 { rail[$1] = $3; nip++; next }
+f == 1 { rail[$1] = $3; if ($3 == "client") cl[$1] = 1; else nip++; next }
 f == 2 { if ($4 != "unknown" && $4 != "") leaf[$3] = $4; next }
 f == 3 { if ($4 ~ /^[0-9]+Mb\/s$/) { s = $4; sub(/Mb\/s/, "", s); sp[$3] = s / 1000 }; next }
-/^### / { split($2, a, ":"); split($3, b, ":"); it = a[2]; ph = b[2]; if ($4 ~ /^wave:/) it = it " wave " substr($4, 6); next }
+/^### / { it = ""; ph = ""; w = ""
+          for (i = 2; i <= NF; i++) { if ($i ~ /^iteration:/) it = substr($i, 11); else if ($i ~ /^phase:/) ph = substr($i, 7); else if ($i ~ /^wave:/) w = substr($i, 6) }
+          if (w != "") it = it " wave " w; next }
 { g = -1; for (i = 1; i <= NF; i++) if ($i == "Gbits/sec") { g = $(i-1) + 0; break }
   if (g < 0 || !($1 in rail) || !($2 in rail)) next
   if (!($1 in leaf) || !($2 in leaf)) { left++; next }
@@ -1066,18 +1283,42 @@ f == 3 { if ($4 ~ /^[0-9]+Mb\/s$/) { s = $4; sub(/Mb\/s/, "", s); sp[$3] = s / 1
   if (!((ph, it, x) in seen)) { seen[ph, it, x] = 1; key[++nk] = ph SUBSEP it SUBSEP x }
   if (!((ph, it, y) in seen)) { seen[ph, it, y] = 1; key[++nk] = ph SUBSEP it SUBSEP y }
   ob[ph, it, x] += g; ib[ph, it, y] += g; xl[ph, x] = xl[ph, x] " " g; xl[ph, y] = xl[ph, y] " " g; its[ph, it] = 1 }
+# side: a leaf seen by client NICs only is a client leaf (capacity CC), else a backend leaf (C)
 END {
-    for (ip in rail) if (ip in leaf) { nl++; dl[leaf[ip]] += (ip in sp) ? sp[ip] : (rail[ip] == "A" ? la : lb) } else nm++
-    if (C > 0) printf "  Declared uplinks: %d spines x %d links x %dG = %s per leaf, each direction\n", N, M, S, tb(C)
-    if (!nl) { if (C > 0) print "  Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour."; exit }
+    for (ip in rail) if (ip in leaf) { if (ip in cl) cleaf[leaf[ip]] = 1; else { nl++; bleaf[leaf[ip]] = 1 }
+                                       dl[leaf[ip]] += (ip in sp) ? sp[ip] : ((ip in cl) ? cgb : L[rail[ip]]) }
+                     else if (!(ip in cl)) nm++
+    if (mode == "client") {
+        # clients: one pass over the client runs, each leaf against its own side
+        for (lf in cleaf) if (lf in bleaf) nsh++
+        if (CC > 0) printf "  Declared client leaf uplinks: %d spines x %d links x %dG = %s per leaf, each direction\n", N, CM, CS, tb(CC)
+        if (nsh) printf "  %d leaves serve both clients and backends; they are judged as backend leaves (rail_anomalies.txt shared_leaf)\n", nsh
+        C0 = C; C = 1   # judge per leaf below
+    } else {
+        if (C > 0) printf "  Declared uplinks: %d spines x %d links x %dG = %s per leaf, each direction\n", N, M, S, tb(C)
+        if (!nl) { if (C > 0) print "  Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour."; exit }
+    }
     # busiest iteration per (phase, leaf), in first-seen order
     for (k = 1; k <= nk; k++) { split(key[k], p, SUBSEP); bz = ob[key[k]] > ib[key[k]] ? ob[key[k]] : ib[key[k]]
         pl = p[1] SUBSEP p[3]; if (!(pl in best)) lst[++no] = pl; if (!(pl in best) || bz > best[pl]) { best[pl] = bz; bk[pl] = key[k] } }
+    if (mode == "client") {
+        if (!no) { print "  No client runs crossed between leaves" (left ? sprintf(" (%d runs have a NIC with no LLDP neighbour)", left) : "") "."; exit }
+        print "  Client runs, uplink totals per leaf (busiest wave):"
+        for (q = 1; q <= no; q++) { pl = lst[q]; split(pl, p, SUBSEP); k = bk[pl]; split(k, kk, SUBSEP); lf = p[2]
+            side = (lf in bleaf) ? ((lf in cleaf) ? "shared" : "backend") : "client"; cp = (lf in bleaf) ? C0 : CC
+            bi = sprintf(" [iteration %s]", kk[2])
+            if (cp <= 0) { printf "  Uplinks %s (%s leaf) phase %s: out %s / in %s%s; downlinks %s\n", lf, side, p[1], tb(ob[k]), tb(ib[k]), bi, tb(dl[lf]); continue }
+            pct = 100 * best[pl] / cp
+            printf "  Uplinks %s (%s leaf) phase %s: out %s / in %s of %s declared (%.0f%%)%s; downlinks %s, oversubscribed %.1f:1\n", lf, side, p[1], tb(ob[k]), tb(ib[k]), tb(cp), pct, bi, tb(dl[lf]), dl[lf] / cp
+            if (pct >= ok) printf "    at declared uplink capacity: client runs through %s get their share of the uplinks, not line rate\n", lf
+        }
+        exit
+    }
     if (!no && C == 0) exit
     if (C == 0) print "  Uplink totals per leaf (set FF_SPINES, FF_SPINE_LINKS, FF_SPINE_GBPS to judge against uplink capacity):"
     if (nm) printf "  Uplinks: %d of %d rail NICs have no LLDP neighbour; their %d runs are left out of the leaf totals.\n", nm, nip, left
     if (!no) { print "  No runs crossed between leaves."; exit }
-    lx = la < lb ? la : lb; okc = lx * ok / 100
+    okc = lx * ok / 100
     for (q = 1; q <= no; q++) { pl = lst[q]; split(pl, p, SUBSEP); k = bk[pl]; split(k, kk, SUBSEP)
         ni = 0; for (z in its) { split(z, zz, SUBSEP); if (zz[1] == p[1]) ni++ }
         bi = ni > 1 ? sprintf(" [iteration %s, busiest of %d]", kk[2], ni) : ""
@@ -1091,8 +1332,11 @@ END {
             printf "    uplinks carried only %.0f%% of declared capacity while cross-leaf runs were slow (median %.1f Gbps, OK >= %g) and same-leaf runs were OK (median %.1f); a link or spine may be down, or ECMP is uneven\n", pct, xm, okc, sm
     } }'
 
+# uplink_summary [client] ipmap lldp nicdiag results: "client" = the client runs, each leaf judged by its side
 uplink_summary() {
-    awk -F'[, ]+' -v C="${UPLINK_GBPS:-0}" -v N="$FF_SPINES" -v M="$FF_SPINE_LINKS" -v S="$FF_SPINE_GBPS" -v la="${LINE_A:-0}" -v lb="${LINE_B:-0}" \
+    local mode=; [[ $1 == client ]] && { mode=client; shift; }
+    awk -F'[, ]+' -v mode="$mode" -v C="${UPLINK_GBPS:-0}" -v CC="${CL_UPLINK_GBPS:-0}" -v N="$FF_SPINES" -v M="$FF_SPINE_LINKS" -v S="$FF_SPINE_GBPS" \
+        -v CM="$FF_CLIENT_SPINE_LINKS" -v CS="$FF_CLIENT_SPINE_GBPS" -v lines="$RAIL_LINES" -v cgb="${FF_CLIENT_GBPS:-0}" \
         -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$UPLINK_AWK" "$@"
 }
 
@@ -1104,12 +1348,10 @@ udp_phases() {
     for u in 1 2; do
         PHASE=U$u; PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
         if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; continue; fi
-        [[ $u == 1 ]] && log "Phase U1: UDP A->A and B->B at once (-b 0)" || log "Phase U2: UDP cross-rail, A->B and B->A at once (-b 0)"
+        [[ $u == 1 ]] && log "Phase U1: UDP $(same_desc) at once (-b 0)" || log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0)"
         echo "### iteration:${ITER} phase:${PHASE}" >> "$UDP_RESULTS"
         if [[ $u == 1 ]]; then
-            for (( p = 0; p < ${#PC[@]}; p++ )); do
-                ck=${PC[p]}; sk=${PS[p]}; run_path p1a_$p $ck 0 $sk 0 udp; run_path p1b_$p $sk 1 $ck 1 udp
-            done
+            for (( p = 0; p < ${#PC[@]}; p++ )); do p1_paths $p run udp; done
             wait
         else xwaves "$UDP_RESULTS" udp; fi
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
@@ -1129,6 +1371,187 @@ udp_phases() {
     done
 }
 
+# ---------- clients ----------
+# client_plan: the client runs. Waves (FF_CLIENT_RATIO N): each client data NIC to one backend on every rail,
+# spread over the backends, packed first-fit so no client NIC runs twice in a wave and no backend NIC serves
+# more than N at once. All at once (full): each client NIC to one backend NIC, rails and backends round robin.
+# Sets CT_* (waves) and FT_* (all at once) by task: K client, J its NIC, R rail, B backend (-1: none usable),
+# W wave, S port slot, H share (flows on that backend NIC in that wave); CL_NW waves, CL_K servers per backend IP.
+# client_plan [iteration]: each iteration moves every client NIC on to the next backend (all at once: the next
+# rail, then the next backend), as backend pairing rotates; CL_ALL = iterations for every client NIC x backend NIC.
+client_plan() {
+    local k j r g=0 t w b nb off=$(( ${1:-1} - 1 ))
+    local -a BL=()   # BL[r] = usable backends on rail r, in host order
+    for r in "${RAILS[@]}"; do BL[r]=""; for k in "${ORDER[@]}"; do rail_ok $k $r && BL[r]+=" $k"; done; done
+    local nbm=0; for r in "${RAILS[@]}"; do local -a bl=(${BL[r]}); (( ${#bl[@]} > nbm )) && nbm=${#bl[@]}; done
+    CL_ALL=0; (( CL_WAVES )) && CL_ALL=$nbm; (( CL_FULL && NR * nbm > CL_ALL )) && CL_ALL=$(( NR * nbm )); CL_NBM=$nbm
+    (( off )) ||     for r in "${RAILS[@]}"; do [[ -n ${BL[r]} ]] || log "WARNING: no usable backend NIC on rail $(rail_letter $r): client runs to it are skipped"; done
+    local -a ck=($(for k in "${CLI[@]}"; do echo "$k ${T_HOST[$k]}"; done | sort -V -k2 | awk '{print $1}'))
+    CT_K=(); CT_J=(); CT_R=(); CT_B=(); CT_W=(); CT_S=(); CT_H=(); FT_K=(); FT_J=(); FT_R=(); FT_B=(); FT_S=(); FT_H=()
+    CL_NW=0; CL_K=1
+    local -A WC=() WL=() FL=()
+    for k in "${ck[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do
+        for r in "${RAILS[@]}"; do
+            local -a bl=(${BL[r]}); nb=${#bl[@]}
+            t=${#CT_K[@]}; CT_K[t]=$k; CT_J[t]=$j; CT_R[t]=$r; CT_B[t]=$( (( nb )) && echo ${bl[(g + r + off) % nb]} || echo -1 ); CT_W[t]=-1
+        done
+        # all at once: rail by NIC count, backend by NIC count over the rails
+        r=$(( (g + off) % NR )); local -a bl=(${BL[r]}); nb=${#bl[@]}
+        t=${#FT_K[@]}; FT_K[t]=$k; FT_J[t]=$j; FT_R[t]=$r; FT_B[t]=$( (( nb )) && echo ${bl[((g + off) / NR) % nb]} || echo -1 )
+        g=$(( g + 1 ))
+    done; done
+    if (( CL_WAVES )); then
+        for (( t = 0; t < ${#CT_K[@]}; t++ )); do
+            b=${CT_B[t]}; (( b >= 0 )) || continue
+            for (( w = 0; ; w++ )); do
+                [[ -z ${WC[$w,${CT_K[t]},${CT_J[t]}]} && ${WL[$w,$b,${CT_R[t]}]:-0} -lt $CL_R ]] && break
+            done
+            CT_W[t]=$w; CT_S[t]=${WL[$w,$b,${CT_R[t]}]:-0}; WL[$w,$b,${CT_R[t]}]=$(( CT_S[t] + 1 )); WC[$w,${CT_K[t]},${CT_J[t]}]=1
+            (( w + 1 > CL_NW )) && CL_NW=$(( w + 1 ))
+        done
+        for (( t = 0; t < ${#CT_K[@]}; t++ )); do
+            (( CT_W[t] >= 0 )) || continue
+            CT_H[t]=${WL[${CT_W[t]},${CT_B[t]},${CT_R[t]}]}; (( CT_H[t] > CL_K )) && CL_K=${CT_H[t]}
+        done
+    fi
+    if (( CL_FULL )); then
+        for (( t = 0; t < ${#FT_K[@]}; t++ )); do
+            b=${FT_B[t]}; (( b >= 0 )) || continue
+            FT_S[t]=${FL[$b,${FT_R[t]}]:-0}; FL[$b,${FT_R[t]}]=$(( FT_S[t] + 1 ))
+        done
+        for (( t = 0; t < ${#FT_K[@]}; t++ )); do
+            (( FT_B[t] >= 0 )) || continue
+            FT_H[t]=${FL[${FT_B[t]},${FT_R[t]}]}; (( FT_H[t] > CL_K )) && CL_K=${FT_H[t]}
+        done
+    fi
+}
+
+# cl_check key ck cj b r dir: a client path check, written to $PATHS/key. dir c2b: from the client NIC to the
+# backend rail IP; b2c: the reverse, from the backend. MTU: the smaller of the two ends (routed).
+cl_check() {
+    local key=$1 ck=$2 cj=$3 b=$4 r=$5 dir=$6
+    if (( b < 0 )); then echo "DOWN no usable backend NIC on rail $(rail_letter $r)" > "$PATHS/$key"; return; fi
+    if ! cl_ok $ck $cj; then echo "DOWN ${T_HOST[$ck]}: ${CSTATE[$ck,$cj]}" > "$PATHS/$key"; return; fi
+    if ! rail_ok $b $r; then echo "DOWN ${T_HOST[$b]}: ${RSTATE[$b,$r]}" > "$PATHS/$key"; return; fi
+    local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
+    local size=$(( (m1 < m2 ? m1 : m2) - 28 ))
+    if [[ $dir == c2b ]]; then
+        ( out=$(rbash "${T_TARGET[$ck]}" "${CIP[$ck,$cj]}" "${RIP[$b,$r]}" "${CNIC[$ck,$cj]}" $size <<<"$PATH_SCRIPT" 2>&1)
+          echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
+    else
+        ( out=$(rbash "${T_TARGET[$b]}" "${RIP[$b,$r]}" "${CIP[$ck,$cj]}" "${RNIC[$b,$r]}" $size <<<"$PATH_SCRIPT" 2>&1)
+          echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
+    fi
+}
+
+# cl_run key ck cj b r dir slot share phase: one client iperf3 run (or, with FF_SKIP_IPERF=1, the path check's
+# record), appended to $PHASE_OUT as "src,dst,<result> share:N". c2b runs from the client to port FF_PORT+slot
+# on the backend; b2c from the backend to the client's one server.
+cl_run() {
+    local key=$1 ck=$2 cj=$3 b=$4 r=$5 dir=$6 slot=$7 share=$8 ph=$9 st src dst from port
+    if [[ $dir == c2b ]]; then src=${CIP[$ck,$cj]}; dst=${RIP[$b,$r]:-none}; from=${T_TARGET[$ck]}; port=$(( FF_PORT + slot ))
+    else src=${RIP[$b,$r]:-none}; dst=${CIP[$ck,$cj]}; from=${T_TARGET[$b]}; port=$FF_PORT; fi
+    (( b >= 0 )) || { src=${CIP[$ck,$cj]}; dst=none; }
+    st=$(cat "$PATHS/$key")
+    local sh dh; sh=${T_HOST[$ck]}; dh=$( (( b >= 0 )) && echo "${T_HOST[$b]}" || echo - ); [[ $dir == b2c ]] && { sh=$dh; dh=${T_HOST[$ck]}; }
+    if [[ $st != OK ]]; then
+        echo "$ITER $ph $sh $src $dh $dst $st" >> "$PATH_EXCL"
+        log "  skip $sh $src -> $dh $dst: $st"
+        return
+    fi
+    if (( FF_SKIP_IPERF )); then echo "$src $dst" >> "$WORK/cpaths_ok"; return; fi
+    ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+              "$src" "$dst" "$port" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
+      [[ -n $out ]] || out="ERROR timeout or ssh failure"
+      echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &
+}
+
+# client_phase P: P = C1/C2 (waves; client->backend, backend->client) or F1/F2 (all at once). Path checks
+# first, then the runs, wave by wave, with the drop counters of every client and backend around the phase.
+client_phase() {
+    local P=$1 dir t w nw pfx; dir=c2b; [[ $P == ?2 ]] && dir=b2c
+    local -a TK TJ TR TB TW TS TH
+    if [[ $P == C? ]]; then TK=("${CT_K[@]}"); TJ=("${CT_J[@]}"); TR=("${CT_R[@]}"); TB=("${CT_B[@]}"); TW=("${CT_W[@]}"); TS=("${CT_S[@]}"); TH=("${CT_H[@]}"); nw=$CL_NW
+    else TK=("${FT_K[@]}"); TJ=("${FT_J[@]}"); TR=("${FT_R[@]}"); TB=("${FT_B[@]}"); TS=("${FT_S[@]}"); TH=("${FT_H[@]}"); nw=1
+         for (( t = 0; t < ${#TK[@]}; t++ )); do TW[t]=$(( TB[t] >= 0 ? 0 : -1 )); done; fi
+    (( ${#TK[@]} )) || return 0
+    pfx=$(tr 'A-Z' 'a-z' <<<"$P")
+    PATHS=$WORK/paths.client.$ITER.$P; mkdir -p "$PATHS"
+    for (( t = 0; t < ${#TK[@]}; t++ )); do cl_check ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir; done
+    wait
+    CL_PLANNED=$(( CL_PLANNED + ${#TK[@]} ))
+    local bad; bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' ')
+    log "Client phase $P ($( [[ $dir == c2b ]] && echo "clients -> backends" || echo "backends -> clients")$( [[ $P == F? ]] && echo ", all at once")): ${#TK[@]} runs in $nw wave$( (( nw > 1 )) && echo s); path checks $(( ${#TK[@]} - bad )) OK, $bad excluded"
+    # runs no wave could take (no usable backend on their rail) are recorded once, as skips
+    for (( t = 0; t < ${#TK[@]}; t++ )); do (( TW[t] < 0 )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir 0 0 $P; done
+    local pre=$WORK/cdrops_pre.$ITER.$P post=$WORK/cdrops_post.$ITER.$P
+    (( FF_SKIP_IPERF )) || collect_drops "$pre" "${ELIG[@]}" "${CLI[@]}"
+    for (( w = 0; w < nw; w++ )); do
+        PHASE_OUT=$WORK/cphase.$ITER.$P.$w; : > "$PHASE_OUT"
+        (( FF_SKIP_IPERF )) || echo "### client iteration:$ITER phase:$P$( (( nw > 1 )) && echo " wave:$(( w + 1 ))/$nw")" >> "$CRESULTS"
+        for (( t = 0; t < ${#TK[@]}; t++ )); do
+            (( TW[t] == w )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir ${TS[t]} ${TH[t]} $P
+        done
+        wait
+        (( FF_SKIP_IPERF )) && continue
+        column -t < "$PHASE_OUT" | tee -a "$CRESULTS"
+        lock_all touch
+    done
+    (( FF_SKIP_IPERF )) && return 0
+    local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
+    (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
+    collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
+    local d; d=$(compute_drops "$pre" "$post" "iter${ITER}_client$P")
+    if [[ -n $d ]]; then log "Drops during client phase $P:"; echo "$d" | awk '{NF--; print}' | column -t | sed 's/^/#   /' >&2; echo "$d" >> "$DROP_TOTALS"
+    else log "No drop counter increases in client phase $P ($(wc -l < "$post" | tr -d ' ') NICs read)"; fi
+    local flaps; flaps=$(awk -v it="iter${ITER}_client$P" 'NR == FNR {c[$1] = $6; next}
+        ($1 in c) && $6 ~ /^[0-9]+$/ && c[$1] ~ /^[0-9]+$/ && $6 > c[$1] {print it, $1, $2, $6 - c[$1]}' "$pre" "$post")
+    if [[ -n $flaps ]]; then
+        log "WARNING: links went down during client phase $P (host_nic ip carrier-down count):"
+        echo "$flaps" | cut -d' ' -f2- | column -t | sed 's/^/#   /' >&2; echo "$flaps" >> "$COLLECT_DIR/link_flaps.txt"
+    fi
+}
+
+# clients_iter: this iteration's client phases (backends moved on by one from the last iteration)
+clients_iter() {
+    (( ${#CLI[@]} )) || return 0
+    client_plan $ITER
+    (( CL_K <= CL_K0 )) || log "WARNING: iteration $ITER plans $CL_K client flows on one backend NIC, more than the $CL_K0 servers started; the extra runs fail"
+    log "---- Clients, iteration $ITER: $( (( CL_WAVES )) && echo "$CL_NW waves each way, at most $CL_R client NIC$( (( CL_R > 1 )) && echo s) per backend NIC")$( (( CL_WAVES && CL_FULL )) && echo ", then ")$( (( CL_FULL )) && echo "all at once each way") ----"
+    (( CL_WAVES )) && { client_phase C1; client_phase C2; }
+    (( CL_FULL )) && { client_phase F1; client_phase F2; }
+    return 0
+}
+
+# client_summary: per client data NIC, its runs each way judged at min(client line, backend rail line / share)
+# Files: client map (ip host nic line_gbps), rail map (ip host rail), client results.
+CLIENT_SUM_AWK='
+BEGIN { n = split(lines, q, " "); for (i = 1; i <= n; i++) { split(q[i], kv, "="); L[kv[1]] = kv[2] + 0 }; N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL" }
+FNR == 1 { f++ }
+f == 1 { ch[$1] = $2; cn[$1] = $3; cl[$1] = $4 + 0; next }
+f == 2 { br[$1] = $3; next }
+/^### / { ph = ""; it = ""; for (i = 2; i <= NF; i++) { if ($i ~ /^phase:/) ph = substr($i, 7); if ($i ~ /^iteration:/) it = substr($i, 11) }; next }
+{ s = $1; d = $2; g = -1; sh = 1
+  for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1) + 0; if ($i ~ /^share:/) sh = substr($i, 7) + 0 }
+  if (g < 0) next
+  c = (s in ch) ? s : d; b = (s in ch) ? d : s; if (!(c in ch) || !(b in br)) next
+  lb = L[br[b]]; lc = cl[c]; ex = lb > 0 ? lb / (sh > 0 ? sh : 1) : 0; if (lc > 0 && (ex == 0 || lc < ex)) ex = lc
+  col = (ph ~ /^F/) ? "F" : "C"; col = col ((s in ch) ? "o" : "i")
+  sum[c, col] += g; cnt[c, col]++; if (ex > 0) { pct[c, col] += 100 * g / ex; pc[c, col]++ }
+  if (!((c, "x") in mx) || ex < mx[c, "x"]) mx[c, "x"] = ex; seen[c] = 1
+  if (ph ~ /^F/) { ft[ph, it] += g; fn[ph, it]++ } }
+END {
+    print "Client NIC IP C->B B->C All_C->B All_B->C Expect Status"
+    for (c in seen) { w = -1; o = ""
+        for (k = 1; k <= 4; k++) { col = substr("CoCiFoFi", 2 * k - 1, 2)
+            if (!cnt[c, col]) { o = o " -"; continue }
+            o = o sprintf(" %.1f", sum[c, col] / cnt[c, col])
+            if (pc[c, col]) { p = pct[c, col] / pc[c, col]; lv = p >= ok ? 0 : (p >= slow ? 1 : 2); if (lv > w) w = lv } }
+        printf "%s %s %s%s %s %s\n", ch[c], cn[c], c, o, (mx[c, "x"] > 0 ? sprintf("%g", mx[c, "x"]) : "-"), (w < 0 ? "-" : N[w]) }
+    # all at once: per iteration, then the average and the lowest over the iterations
+    for (x in ft) { split(x, y, SUBSEP); p = y[1]; ni[p]++; ts[p] += ft[x]; nf[p] = fn[x]; if (!(p in lo) || ft[x] < lo[p]) lo[p] = ft[x] }
+    for (p in ni) printf "#TOTAL %s %d %.1f %.1f %d\n", p, nf[p], ts[p] / ni[p], lo[p], ni[p] }'
+
 # fec_deltas label seconds: per-NIC FEC counter changes over the iteration, appended to
 # fec_rates.txt as "label host_nic seconds d_corrected_blocks d_uncorrectable_blocks d_corrected_bits d_symbol_errors"
 # (na = not exposed, reset = counter went backwards). Links carry symbols even when idle, so wall time is the right base.
@@ -1147,11 +1570,12 @@ fec_deltas() {
     return 0
 }
 
-collect_drops() {
-    local outfile=$1 k
+collect_drops() {  # outfile [k...]
+    local outfile=$1 k; shift
+    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}")
     : > "$outfile"
-    for k in "${ELIG[@]}"; do
-        rbash "${T_TARGET[$k]}" "${RNIC[$k,0]}" "${RNIC[$k,1]}" <<<"$DROPS_SCRIPT" >> "$outfile" 2>> "$RUNLOG_SSH" &
+    for k in "${ks[@]}"; do
+        rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$DROPS_SCRIPT" >> "$outfile" 2>> "$RUNLOG_SSH" &
     done
     wait
     sort -o "$outfile" "$outfile"
@@ -1183,7 +1607,7 @@ stop_servers() {
 # Ctrl-C runs under load) bash running the INT trap's exit but never the EXIT trap. Written whole, then renamed.
 save_state() {
     [[ -n $STATE_FILE ]] || return 0
-    declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG SSH_OPTS SUDO \
+    declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG CLI SSH_OPTS SUDO \
         FF_SSH_USER 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
@@ -1207,7 +1631,7 @@ cleanup() {
 
 # Every FF_* setting this tool reads. Any other FF_* in the environment is a typo that would be silently
 # ignored (a dropped letter, say), so it stops the run. A regress test keeps the list complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAIL_A FF_RAIL_B FF_RAILS FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 
 # edit_distance a b: Levenshtein distance, for the "did you mean" hint
 edit_distance() {
@@ -1230,6 +1654,7 @@ check_settings() {
     for v in $(compgen -e); do
         # the tool was fabric_sleuth; its FS_ settings would otherwise be silently ignored
         [[ $v == FS_* ]] && die "setting $v uses the old FS_ prefix; settings are now FF_ (${v/#FS_/FF_})"
+        [[ $v == FF_RAIL_A || $v == FF_RAIL_B ]] && die "$v is gone: give every rail in FF_RAILS, ';' between rails and ',' between a rail's subnets, e.g. FF_RAILS='10.20.1.0/24,10.20.3.0/24;10.20.2.0/24'"
         [[ $v == FF_* &&" $FF_KNOWN " != *" $v "* ]] || continue
         best=; bd=99
         for k in $FF_KNOWN; do d=$(edit_distance "$v" "$k"); (( d < bd )) && { bd=$d; best=$k; }; done
@@ -1267,7 +1692,7 @@ main() {
         [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
     done
     (( FF_STREAMS >= 2 )) || die "FF_STREAMS must be >= 2 (iperf3 prints no [SUM] line for one stream)"
-    [[ -z $FF_LINE_GBPS || $FF_LINE_GBPS =~ ^[1-9][0-9]*(,[1-9][0-9]*)?$ ]] || die "FF_LINE_GBPS must be an integer (both rails) or A,B integers, got '$FF_LINE_GBPS'"
+    [[ -z $FF_LINE_GBPS || $FF_LINE_GBPS =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || die "FF_LINE_GBPS must be an integer (every rail) or one integer per rail (A,B,...), got '$FF_LINE_GBPS'"
     # declared uplinks: all three or none, and no default speed (a guess could pass a fault)
     local sv smiss=; UPLINK_GBPS=0
     for sv in FF_SPINES FF_SPINE_LINKS FF_SPINE_GBPS; do
@@ -1276,12 +1701,39 @@ main() {
     done
     if [[ -z $smiss ]]; then UPLINK_GBPS=$(( FF_SPINES * FF_SPINE_LINKS * FF_SPINE_GBPS ))
     elif [[ $smiss != " FF_SPINES FF_SPINE_LINKS FF_SPINE_GBPS" ]]; then die "FF_SPINES, FF_SPINE_LINKS and FF_SPINE_GBPS go together; missing:$smiss"; fi
+    # client leaf uplinks: both or neither, on the same spines
+    CL_UPLINK_GBPS=0
+    for sv in FF_CLIENT_SPINE_LINKS FF_CLIENT_SPINE_GBPS; do
+        [[ -z ${!sv} || ${!sv} =~ ^[1-9][0-9]*$ ]] || die "$sv must be a positive integer, got '${!sv}'"
+    done
+    if [[ -n $FF_CLIENT_SPINE_LINKS$FF_CLIENT_SPINE_GBPS ]]; then
+        [[ -n $FF_CLIENT_SPINE_LINKS && -n $FF_CLIENT_SPINE_GBPS ]] || die "FF_CLIENT_SPINE_LINKS and FF_CLIENT_SPINE_GBPS go together; missing: $([[ -z $FF_CLIENT_SPINE_LINKS ]] && echo FF_CLIENT_SPINE_LINKS || echo FF_CLIENT_SPINE_GBPS)"
+        [[ -n $FF_SPINES ]] || die "FF_CLIENT_SPINE_LINKS and FF_CLIENT_SPINE_GBPS need FF_SPINES (one spine layer serves clients and backends)"
+        CL_UPLINK_GBPS=$(( FF_SPINES * FF_CLIENT_SPINE_LINKS * FF_CLIENT_SPINE_GBPS ))
+    fi
     [[ -z $FF_EXPECT_HOSTS || $FF_EXPECT_HOSTS =~ ^[1-9][0-9]*$ ]] || die "FF_EXPECT_HOSTS must be a positive integer"
     [[ -z $FF_TOS || ( $FF_TOS =~ ^[0-9]{1,3}$ && 10#$FF_TOS -le 255 ) ]] || die "FF_TOS must be 0-255 (decimal), got '$FF_TOS'"
     [[ -n $FF_TOS ]] && FF_TOS=$(( 10#$FF_TOS ))
 
+    parse_rails; parse_clients
+    if [[ -n $FF_LINE_GBPS && $FF_LINE_GBPS == *,* ]]; then
+        local nl; IFS=, read -r -a nl <<<"$FF_LINE_GBPS"
+        (( NR == 0 || ${#nl[@]} == NR )) || die "FF_LINE_GBPS has ${#nl[@]} values for $NR rails: give one for every rail, or one per rail"
+    fi
+    # clients first, so a target in both lists is caught; TARGETS = hosts, then clients (index >= NHT)
+    local -a CL_T=(); CL_RANGES=0
+    if [[ -n $FF_CLIENTS ]]; then expand_targets "$FF_CLIENTS" FF_CLIENTS; CL_T=("${TARGETS[@]}"); CL_RANGES=$INPUT_RANGES; fi
     expand_targets "$FF_HOSTS"
-    if [[ $1 == --list ]]; then printf '%s\n' "${TARGETS[@]}"; log "${#TARGETS[@]} targets"; exit 0; fi
+    NHT=${#TARGETS[@]}
+    if (( ${#CL_T[@]} )); then
+        local t; for t in "${CL_T[@]}"; do [[ -n ${_SEEN[$t]+x} ]] && die "target $t is in both FF_HOSTS and FF_CLIENTS"; done
+    fi
+    if [[ $1 == --list ]]; then
+        printf '%s\n' "${TARGETS[@]}"; log "${#TARGETS[@]} targets"
+        (( ${#CL_T[@]} )) && { printf 'client %s\n' "${CL_T[@]}"; log "${#CL_T[@]} client targets"; }
+        exit 0
+    fi
+    TARGETS+=("${CL_T[@]}")
 
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
@@ -1299,13 +1751,15 @@ main() {
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
               -o ServerAliveInterval=15 -l "$FF_SSH_USER")
     declare -gA T_TARGET T_HOST DISC RNIC RIP RMTU RSTATE STARTED REACH_ONLY DOWN_IP SI_CUT
+    declare -gA IS_CL CN CNIC CIP CMTU CSTATE   # clients: k -> 1, data NIC count; (k,j) -> NIC, IP, MTU, state
     declare -ga RAIL_MTU=()   # per rail: highest MTU among its usable hosts
     trap cleanup EXIT
     # explicit exits so the EXIT trap always runs on Ctrl-C or kill, whatever command was running
     trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
     trap '' PIPE   # a dead log tee must not abort the run: log writes just fail, results go to files
-    parse_rails
-    log "Begin $(date) | ${#TARGETS[@]} targets | rails: $RAIL_MODE A=${RAIL_SPEC[0]// /,} B=${RAIL_SPEC[1]// /,} | ${FF_DURATION}s x $( (( ITER_ALL )) && echo "all (2 x pairing rounds)" || echo $FF_ITER) iterations$([[ -n $FF_CROSS_MAX ]] && echo " | cross-rail at most $FF_CROSS_MAX flows at once")"
+    local rails_desc="none" r
+    if (( NR )); then rails_desc="$RAIL_MODE"; for r in "${RAILS[@]}"; do rails_desc+=" $(rail_letter $r)=${RAIL_SPEC[r]// /,}"; done; fi
+    log "Begin $(date) | $NHT targets$( (( ${#CL_T[@]} )) && echo " + ${#CL_T[@]} client targets") | rails: $rails_desc | ${FF_DURATION}s x $( (( ITER_ALL )) && echo "all (2 x pairing rounds$( (( NR > 2 )) && echo " x rail pairs"))" || echo $FF_ITER) iterations$([[ -n $FF_CROSS_MAX ]] && echo " | cross-rail at most $FF_CROSS_MAX flows at once")"
     log "Temp: $WORK $SOCKET_DIR $COLLECT_DIR $FF_RUNLOG $STATE_FILE (all removed at the end; the collect dir is kept if a run is cut short)"
     save_state
 
@@ -1366,61 +1820,89 @@ main() {
     wait
 
     # dedupe: the same host can answer on several targets (mgmt and data IPs in one CIDR)
-    local -A SEEN_ID=()
-    local k=0 id host dups=0
+    local -A SEEN_ID=() SEEN_CL=()
+    local k=0 id host dups=0 cdups=0 iscl
     for i in "${REACH[@]}"; do
         host=$(section "$WORK/disc/$i" hostname | head -n1)
         [[ -n $host ]] || { echo "${TARGETS[$i]} discovery returned nothing" >> "$COLLECT_DIR/unreachable.txt"; continue; }
         id=$(section "$WORK/disc/$i" machine-id | head -n1)
         [[ $id =~ ^[0-9a-f]{32}$ ]] || id=$host
+        iscl=; (( i >= NHT )) && iscl=1
         if [[ -n ${SEEN_ID[$id]+x} ]]; then
-            dups=$(( dups + 1 )); REACH_ONLY[${TARGETS[$i]}]=1
+            [[ ${SEEN_CL[$id]} == "$iscl" ]] || die "host ${SEEN_ID[$id]} is in both FF_HOSTS and FF_CLIENTS (target ${TARGETS[$i]}); a host is a backend or a client, not both"
+            dups=$(( dups + 1 )); REACH_ONLY[${TARGETS[$i]}]=1; [[ -n $iscl ]] && cdups=$(( cdups + 1 ))
             echo "${TARGETS[$i]} same host as ${SEEN_ID[$id]}" >> "$COLLECT_DIR/excluded.txt"
             continue
         fi
-        SEEN_ID[$id]=$host
+        SEEN_ID[$id]=$host; SEEN_CL[$id]=$iscl
         T_TARGET[$k]=${TARGETS[$i]}; T_HOST[$k]=$host; DISC[$k]=$WORK/disc/$i
+        [[ -n $iscl ]] && IS_CL[$k]=1
         k=$(( k + 1 ))
     done
     (( dups > 0 )) && log "$dups targets were a second address of a host already found; using the first"
+    local -a BK=() CK=()   # backends, clients (k)
+    for k in "${!T_TARGET[@]}"; do if [[ -n ${IS_CL[$k]} ]]; then CK+=("$k"); else BK+=("$k"); fi; done
 
     if [[ $RAIL_MODE == none ]]; then
         log "No rail subnets or NIC names set. IPv4 subnets on the reachable hosts (hosts, NIC, subnet):"
-        for k in "${!T_TARGET[@]}"; do
-            section "${DISC[$k]}" addr | awk '$2!="lo" {print $2, $4}' | while read -r n a; do
-                local b; b=$(cidr_bounds "$a") && echo "$n $(int2ip ${b% *})/${a#*/}"
-            done
-        done | sort | uniq -c | sort -rn | sed 's/^/#   /' >&2
-        die "set FF_RAIL_A and FF_RAIL_B (subnets per rail), FF_RAILS (one per rail), or FF_NICS (two NIC names)"
+        list_subnets "${BK[@]}"
+        die "set FF_RAILS (each rail's subnets, ';' between rails) or FF_NICS (one NIC name per rail)"
+    fi
+    if [[ $CLIENT_MODE == list ]]; then
+        log "FF_CLIENTS set without FF_CLIENT_NETS or FF_CLIENT_NICS. IPv4 subnets on the reachable clients (clients, NIC, subnet):"
+        list_subnets "${CK[@]}"
+        die "set FF_CLIENT_NETS (the clients' data subnets) or FF_CLIENT_NICS (their data NIC names)"
     fi
 
     # --- 3. rails, eligibility, preflight ---
-    local -a ELIG=() NO_IPERF=() BUSY=()
-    local r rc
-    for k in "${!T_TARGET[@]}"; do
-        rail_lookup $k 0; rail_lookup $k 1
-        if [[ ${RNIC[$k,0]} == - && ${RNIC[$k,1]} == - ]]; then
+    local -a ELIG=() NO_IPERF=() BUSY=() CLI=()
+    local r rc amb=0
+    for k in "${BK[@]}"; do
+        for r in "${RAILS[@]}"; do rail_lookup $k $r; [[ ${RSTATE[$k,$r]} == AMBIGUOUS* ]] && amb=$(( amb + 1 )); done
+        local used="" dup=""
+        for r in "${RAILS[@]}"; do
+            [[ ${RNIC[$k,$r]} == - ]] && continue
+            [[ " $used " == *" ${RNIC[$k,$r]} "* ]] && dup=${RNIC[$k,$r]}
+            used+=" ${RNIC[$k,$r]}"
+        done
+        if [[ -z $used ]]; then
             echo "${T_TARGET[$k]} ${T_HOST[$k]} not on data rails" >> "$COLLECT_DIR/excluded.txt"; continue
         fi
-        if [[ ${RNIC[$k,0]} != - && ${RNIC[$k,0]} == "${RNIC[$k,1]}" ]]; then
-            echo "${T_TARGET[$k]} ${T_HOST[$k]} both rails on one NIC ${RNIC[$k,0]}" >> "$COLLECT_DIR/excluded.txt"; continue
+        if [[ -n $dup ]]; then
+            echo "${T_TARGET[$k]} ${T_HOST[$k]} $( (( NR == 2 )) && echo both rails || echo two rails) on one NIC $dup" >> "$COLLECT_DIR/excluded.txt"; continue
         fi
         ELIG+=("$k")
+        for r in "${RAILS[@]}"; do
+            [[ ${RSTATE[$k,$r]} == ok ]] || { [[ ${RIP[$k,$r]} != none ]] && DOWN_IP[${RIP[$k,$r]}]=1; }
+        done
+    done
+    for k in "${CK[@]}"; do
+        client_lookup $k
+        if (( CN[$k] == 0 )); then echo "${T_TARGET[$k]} ${T_HOST[$k]} client with no data NIC ($CLIENT_MODE ${CLIENT_SPEC[*]})" >> "$COLLECT_DIR/excluded.txt"; continue; fi
+        CLI+=("$k")
+    done
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         section "${DISC[$k]}" tools | grep -q '^iperf3 /' || NO_IPERF+=("${T_HOST[$k]}")
         if [[ -n $FF_BUSY_CHECK ]]; then
             rc=$(section "${DISC[$k]}" busy | sed -n '1s/^rc=//p')
             if [[ $rc == 0 ]]; then BUSY+=("${T_HOST[$k]}(in use)")
             elif [[ $rc != 1 ]]; then BUSY+=("${T_HOST[$k]}(check rc=${rc:-none})"); fi
         fi
-        for r in 0 1; do
-            [[ ${RSTATE[$k,$r]} == ok ]] || { [[ ${RIP[$k,$r]} != none ]] && DOWN_IP[${RIP[$k,$r]}]=1; }
-        done
     done
     local not_rail; not_rail=$(grep -c 'not on data rails' "$COLLECT_DIR/excluded.txt" 2>&1)
-    [[ $not_rail =~ ^[0-9]+$ && $not_rail -gt 0 ]] && log "$not_rail reachable hosts have no address on either rail; left out"
+    [[ $not_rail =~ ^[0-9]+$ && $not_rail -gt 0 ]] && log "$not_rail reachable hosts have no address on $( (( NR == 1 )) && echo the rail || { (( NR == 2 )) && echo either rail || echo any rail; }); left out"
+    # FF_RAILS=a,b used to mean two rails; now it is one rail with two subnets, and two-NIC hosts come out ambiguous
+    if (( amb )) && [[ $RAIL_MODE == cidr && $FF_RAILS != *';'* ]] && [[ ${RAIL_SPEC[0]} == *' '* ]]; then
+        die "$amb hosts have two NICs in rail A (${RAIL_SPEC[0]// /,}): FF_RAILS has no ';', so it is one rail. For one subnet per rail write FF_RAILS='${RAIL_SPEC[0]// /;}'"
+    fi
     if (( ${#ELIG[@]} < 2 )); then   # the work dir goes with the stop, so show the left-out hosts here
         [[ -s $COLLECT_DIR/excluded.txt ]] && { log "Left out (first 20):"; head -n 20 "$COLLECT_DIR/excluded.txt" | sed 's/^/#   /' >&2; }
         die "need at least 2 hosts on the rails, found ${#ELIG[@]}"
+    fi
+    if [[ $CLIENT_MODE != none ]]; then
+        local nce; nce=$(grep -c 'client with no data NIC' "$COLLECT_DIR/excluded.txt" 2>&1)
+        [[ $nce =~ ^[0-9]+$ && $nce -gt 0 ]] && log "$nce reachable clients have no data NIC ($CLIENT_MODE ${CLIENT_SPEC[*]}); left out"
+        (( ${#CLI[@]} )) || die "no client has a data NIC ($CLIENT_MODE ${CLIENT_SPEC[*]})"
     fi
     (( ${#NO_IPERF[@]} == 0 || FF_SKIP_IPERF )) || die "iperf3 missing on ${#NO_IPERF[@]} hosts: ${NO_IPERF[*]}"
     if (( ${#BUSY[@]} > 0 )); then
@@ -1430,7 +1912,7 @@ main() {
             local nb=${#BUSY[@]}; mapfile -t BUSY < <(printf "%s\n" "${BUSY[@]}" | sort -V)
             die "FF_BUSY_CHECK: $nb hosts in use or check failed$( (( nb > 10 )) && echo " (first 10 of $nb)"): ${BUSY[*]:0:10}. Line-rate load can starve cluster heartbeats and get nodes evicted. Stop the cluster's I/O and set FF_BUSY_OK=1 to proceed, or set FF_SKIP_IPERF=1 to run every check but the bandwidth runs."
         else log "WARNING: ${#BUSY[@]} hosts in use per FF_BUSY_CHECK; FF_BUSY_OK=1 given"; fi
-        for k in "${ELIG[@]}"; do
+        for k in "${ELIG[@]}" "${CLI[@]}"; do
             echo "== ${T_HOST[$k]}"; section "${DISC[$k]}" busy
         done > "$COLLECT_DIR/busy_check.txt"
     fi
@@ -1449,14 +1931,18 @@ main() {
 
     # rail table: what an engineer checks before load starts
     {
-        echo "Host Target Rail_A_NIC Rail_A_IP MTU_A State_A Rail_B_NIC Rail_B_IP MTU_B State_B"
+        local hdr="Host Target" L
+        for r in "${RAILS[@]}"; do L=$(rail_letter $r); hdr+=" Rail_${L}_NIC Rail_${L}_IP MTU_$L State_$L"; done
+        echo "$hdr"
         for k in "${ELIG[@]}"; do
-            echo "${T_HOST[$k]} ${T_TARGET[$k]} ${RNIC[$k,0]} ${RIP[$k,0]} ${RMTU[$k,0]:--} ${RSTATE[$k,0]// /_} ${RNIC[$k,1]} ${RIP[$k,1]} ${RMTU[$k,1]:--} ${RSTATE[$k,1]// /_}"
+            local row="${T_HOST[$k]} ${T_TARGET[$k]}"
+            for r in "${RAILS[@]}"; do row+=" ${RNIC[$k,$r]} ${RIP[$k,$r]} ${RMTU[$k,$r]:--} ${RSTATE[$k,$r]// /_}"; done
+            echo "$row"
         done | sort -V
     } | column -t > "$COLLECT_DIR/rails.txt"
-    local bad_rails; bad_rails=$(awk 'NR>1 && ($6!="ok" || $10!="ok")' "$COLLECT_DIR/rails.txt")
+    local bad_rails; bad_rails=$(awk 'NR>1 {for (i = 6; i <= NF; i += 4) if ($i != "ok") {print; next}}' "$COLLECT_DIR/rails.txt")
     log "${#ELIG[@]} hosts on the rails. Rail NIC names and MTUs seen (count, NIC, MTU):"
-    for k in "${ELIG[@]}"; do for r in 0 1; do echo "rail_$([[ $r == 0 ]] && echo A || echo B) ${RNIC[$k,$r]} mtu=${RMTU[$k,$r]:--}"; done; done \
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do echo "rail_$(rail_letter $r) ${RNIC[$k,$r]} mtu=${RMTU[$k,$r]:--}"; done; done \
         | sort | uniq -c | sed 's/^/#   /' >&2
     if [[ -n $bad_rails ]]; then
         log "Rails not usable (paths through them are skipped):"
@@ -1464,35 +1950,49 @@ main() {
     else
         log "All rails on all ${#ELIG[@]} hosts have an address and link"
     fi
+    if (( ${#CLI[@]} )); then   # client table: one row per client data NIC
+        local j
+        { echo "Client Target NIC IP MTU State"
+          for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do
+              echo "${T_HOST[$k]} ${T_TARGET[$k]} ${CNIC[$k,$j]} ${CIP[$k,$j]} ${CMTU[$k,$j]:--} ${CSTATE[$k,$j]// /_}"
+          done; done | sort -V; } | column -t > "$WORK/clients0"
+        log "${#CLI[@]} clients, $(awk 'NR > 1' "$WORK/clients0" | wc -l | tr -d ' ') data NICs. Client data NICs and MTUs seen (count, NIC, MTU):"
+        awk 'NR > 1 {print $3, "mtu=" $5}' "$WORK/clients0" | sort | uniq -c | sed 's/^/#   /' >&2
+        local bad_cl; bad_cl=$(awk 'NR > 1 && $6 != "ok"' "$WORK/clients0")
+        [[ -n $bad_cl ]] && { log "Client data NICs not usable (their paths are skipped):"; echo "$bad_cl" | sed 's/^/#   /' >&2; }
+        for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j || { [[ ${CIP[$k,$j]} != none ]] && DOWN_IP[${CIP[$k,$j]}]=1; }; done; done
+    fi
     # run lock before any preflight: a second run on the same hosts would kill this one's iperf3 servers
     take_locks
     : > "$COLLECT_DIR/rail_anomalies.txt"   # preflight findings: host kind detail...
     # one MTU per rail expected; name the odd hosts (their paths fail the no-fragment check)
     local rr
-    for rr in 0 1; do
+    for rr in "${RAILS[@]}"; do
         RAIL_MTU[$rr]=$(for k in "${ELIG[@]}"; do rail_ok $k $rr && echo "${RMTU[$k,$rr]:-1500}"; done | sort -n | tail -n1)
-        local mt; mt=$(for k in "${ELIG[@]}"; do rail_ok $k $rr && echo "${RMTU[$k,$rr]:-?} ${T_HOST[$k]}"; done |
-            awk '{if (!($1 in n)) d++; n[$1]++; h[$1] = h[$1] " " $2} END {if (d < 2) exit; for (m in n) if (n[m] > b) {b = n[m]; mm = m}
-                 t = 0; for (m in n) if (n[m] == b) t++
-                 if (t > 1) {printf "no majority:"; for (m in n) printf " %s on%s;", m, h[m]}
-                 else {printf "most at %s;", mm; for (m in n) if (m != mm) printf " %s on%s;", m, h[m]}}')
-        [[ -n $mt ]] && log "WARNING: rail $( [[ $rr == 0 ]] && echo A || echo B) MTUs differ: $mt paths across them fail the no-fragment check and are skipped"
-        [[ -n $mt ]] && echo "rail_$( [[ $rr == 0 ]] && echo A || echo B) mtu_mismatch $mt" >> "$COLLECT_DIR/rail_anomalies.txt"
+        local mt; mt=$(for k in "${ELIG[@]}"; do rail_ok $k $rr && echo "${RMTU[$k,$rr]:-?} ${T_HOST[$k]}"; done | mtu_odd)
+        [[ -n $mt ]] && log "WARNING: rail $(rail_letter $rr) MTUs differ: $mt paths across them fail the no-fragment check and are skipped"
+        [[ -n $mt ]] && echo "rail_$(rail_letter $rr) mtu_mismatch $mt" >> "$COLLECT_DIR/rail_anomalies.txt"
     done
+    if (( ${#CLI[@]} )); then
+        local mt; mt=$(for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j && echo "${CMTU[$k,$j]:-?} ${T_HOST[$k]}_${CNIC[$k,$j]}"; done; done | mtu_odd)
+        [[ -n $mt ]] && log "WARNING: client data NIC MTUs differ: $mt"
+        [[ -n $mt ]] && echo "clients client_mtu_mismatch $mt" >> "$COLLECT_DIR/rail_anomalies.txt"
+    fi
     rail_consistency
     gateway_check
     [[ $FF_MESH == 1 ]] && mesh_check
+    (( ${#CLI[@]} )) && client_routes
 
     # --- 4. diagnostics ---
     log "Collecting NIC diagnostics..."
     local NIC_DIAG=$COLLECT_DIR/nic_diagnostics.txt LLDP_DATA=$COLLECT_DIR/lldp_neighbors.txt DRV_DATA=$COLLECT_DIR/driver_info.txt
     : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"
-    for k in "${ELIG[@]}"; do
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        rbash "${T_TARGET[$k]}" "${RNIC[$k,0]}" "${RNIC[$k,1]}" <<<"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
+        rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
     done
     wait
-    for k in "${ELIG[@]}"; do
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         grep '^@@NIC_DIAG ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$NIC_DIAG"
         grep '^@@LLDP ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$LLDP_DATA"
         grep '^@@DRV ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$DRV_DATA"
@@ -1501,33 +2001,47 @@ main() {
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines"
     lldp_rail_check "$LLDP_DATA"
 
-    # line rate: per rail only when declared (FF_LINE_GBPS=A,B); otherwise the faster rail's most common
-    # speed for both, so a whole rail that came up slow is not judged against itself
-    local LINE_A=${FF_LINE_GBPS%,*} LINE_B=${FF_LINE_GBPS#*,} LINE_GBPS k MODE_A MODE_B
-    for k in "${ELIG[@]}"; do echo "${RIP[$k,0]} A"; echo "${RIP[$k,1]} B"; done > "$WORK/iprail"
-    if [[ -z $FF_LINE_GBPS ]]; then
-        read -r MODE_A MODE_B <<<"$(awk 'NR == FNR {rail[$1] = $2; next}
+    # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
+    # speed for every rail, so a whole rail that came up slow is not judged against itself
+    local -a LINE=() MODE=() fl=(); local LINE_GBPS k
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do echo "${RIP[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
+    if [[ -n $FF_LINE_GBPS ]]; then
+        IFS=, read -r -a fl <<<"$FF_LINE_GBPS"
+        for r in "${RAILS[@]}"; do LINE[r]=${fl[r]:-${fl[0]}}; done
+    else
+        read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" 'NR == FNR {rail[$1] = $2; next}
             ($3 in rail) && $4 ~ /^[0-9]+Mb\/s$/ {s = $4; sub(/Mb\/s/, "", s); n[rail[$3] " " s / 1000]++}
             END {for (k in n) {split(k, p, " "); r = p[1]; v = p[2] + 0
                      if (n[k] > c[r] || (n[k] == c[r] && v > m[r])) {c[r] = n[k]; m[r] = v}}
-                 a = ("A" in m) ? m["A"] : m["B"]; b = ("B" in m) ? m["B"] : a; print a, b}' "$WORK/iprail" "$NIC_DIAG")"
-        LINE_A=$(( ${MODE_A:-0} > ${MODE_B:-0} ? ${MODE_A:-0} : ${MODE_B:-0} )); (( LINE_A )) || LINE_A=; LINE_B=$LINE_A
-        [[ -n $MODE_A && $MODE_A != "$MODE_B" ]] && log "WARNING: rails run at different speeds (most NICs: rail A ${MODE_A}G, rail B ${MODE_B}G): both judged at ${LINE_A}G. If that is by design, set FF_LINE_GBPS=$MODE_A,$MODE_B"
+                 for (i = 1; i <= length(L); i++) printf "%s ", (substr(L, i, 1) in m) ? m[substr(L, i, 1)] : 0}' "$WORK/iprail" "$NIC_DIAG")"
+        local mx=0 differ= ms=""; for r in "${RAILS[@]}"; do (( MODE[r] > mx )) && mx=${MODE[r]}; done
+        for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G"; done
+        (( mx )) || for r in "${RAILS[@]}"; do LINE[r]=; done
+        [[ -n $differ ]] && log "WARNING: rails run at different speeds (most NICs: $ms): $( (( NR == 2 )) && echo both || echo all) judged at ${mx}G. If that is by design, set FF_LINE_GBPS=$(IFS=,; echo "${MODE[*]}")"
     fi
-    LINE_GBPS=$(( ${LINE_A:-0} > ${LINE_B:-0} ? ${LINE_A:-0} : ${LINE_B:-0} )); (( LINE_GBPS )) || LINE_GBPS=
+    LINE_GBPS=0; RAIL_LINES=""; for r in "${RAILS[@]}"; do (( ${LINE[r]:-0} > LINE_GBPS )) && LINE_GBPS=${LINE[r]}; RAIL_LINES+="${RAIL_LINES:+ }$(rail_letter $r)=${LINE[r]:-0}"; done
+    (( LINE_GBPS )) || LINE_GBPS=
+    local same=1; for r in "${RAILS[@]}"; do [[ ${LINE[r]} == "${LINE[0]}" ]] || same=; done
     if [[ -n $LINE_GBPS ]]; then
         cutoffs() { awk -v l="$1" -v o="$FF_OK_PCT" -v s="$FF_SLOW_PCT" 'BEGIN {printf "%gG (OK >= %gG, SLOW >= %gG)", l, l * o / 100, l * s / 100}'; }
-        if [[ $LINE_A == "$LINE_B" ]]; then log "Link speed for cut-offs: $(cutoffs "$LINE_A")"
-        else log "Link speed for cut-offs: rail A $(cutoffs "$LINE_A"), rail B $(cutoffs "$LINE_B")"; fi
-        awk -v a="$(( LINE_A * 1000 ))Mb/s" -v b="$(( LINE_B * 1000 ))Mb/s" 'NR == FNR {rail[$1] = $2; next}
-            $4 ~ /^[0-9]+Mb\/s$/ && ($3 in rail) && $4 != (rail[$3] == "A" ? a : b) {printf "#   %s %s %s (rail %s)\n", $1, $2, $4, rail[$3]}' \
+        if [[ -n $same ]]; then log "Link speed for cut-offs: $(cutoffs "${LINE[0]}")"
+        else log "Link speed for cut-offs: $(for r in "${RAILS[@]}"; do printf '%srail %s %s' "$( (( r )) && echo ', ')" "$(rail_letter $r)" "$(cutoffs "${LINE[r]:-0}")"; done)"; fi
+        awk -v lines="$RAIL_LINES" 'BEGIN {n = split(lines, q, " "); for (i = 1; i <= n; i++) {split(q[i], kv, "="); want[kv[1]] = kv[2] * 1000 "Mb/s"}}
+            NR == FNR {rail[$1] = $2; next}
+            $4 ~ /^[0-9]+Mb\/s$/ && ($3 in rail) && $4 != want[rail[$3]] {printf "#   %s %s %s (rail %s)\n", $1, $2, $4, rail[$3]}' \
             "$WORK/iprail" "$NIC_DIAG" > "$WORK/offspeed"
         if [[ -s $WORK/offspeed ]]; then
-            if [[ $LINE_A == "$LINE_B" ]]; then log "NICs not at ${LINE_A}G:"; else log "NICs not at their rail's speed:"; fi
+            if [[ -n $same ]]; then log "NICs not at ${LINE[0]}G:"; else log "NICs not at their rail's speed:"; fi
             cat "$WORK/offspeed" >&2
         fi
     else
         log "WARNING: no link speed from ethtool and FF_LINE_GBPS unset; no OK/SLOW status"
+    fi
+    if (( ${#CLI[@]} )); then   # clients.txt: the client table plus each data NIC's speed
+        awk 'NR == FNR {sp[$1 " " $2] = $4; next} FNR == 1 {print $0, "Speed"; next} {print $0, (($1 " " $3) in sp && sp[$1 " " $3] ~ /^[0-9]+Mb\/s$/) ? sp[$1 " " $3] : "unknown"}' \
+            "$NIC_DIAG" "$WORK/clients0" | column -t > "$COLLECT_DIR/clients.txt"
+        if [[ -n $FF_CLIENT_GBPS ]]; then log "Client line rate: ${FF_CLIENT_GBPS}G (FF_CLIENT_GBPS)"
+        else log "Client line rate: each client NIC's own speed (a bond counts its total; set FF_CLIENT_GBPS to override): $(awk 'NR > 1 {print $7}' "$COLLECT_DIR/clients.txt" | sort | uniq -c | awk '{printf "%s%s x %s", s, $1, $2; s = ", "}')"; fi
     fi
 
     lock_all touch   # preflight can be long (mesh); refresh before load
@@ -1537,37 +2051,49 @@ main() {
         if (split($5, y, "/") == 2) { split(y[1], c, "x"); split(y[2], m, "x"); if (c[1] + 0 < m[1] + 0 || c[2] + 0 < m[2] + 0) p++ } }
         END { printf "%d NICs read; rx ring below its maximum on %d, PCIe link below its maximum on %d", n, r, p }' "$WORK/rxcfg")"
     # --- 5. iperf3 servers ---
+    ORDER=($(for k in "${ELIG[@]}"; do echo "$k ${T_HOST[$k]}"; done | sort -V -k2 | awk '{print $1}'))
+    CL_K=1; (( ${#CLI[@]} )) && client_plan 1   # backend NICs that serve several client flows at once need a server each
+    CL_K0=$CL_K   # servers started per backend IP; a later iteration plans the same shares, rotated
     LOADED=1
     if (( FF_SKIP_IPERF )); then
         log "FF_SKIP_IPERF=1: no iperf3 servers, no load; path checks, counters and system info only"; save_state
     else
-        log "Stopping stray iperf3 and starting servers on port $FF_PORT..."
-        for k in "${ELIG[@]}"; do STARTED[$k]=1; done; save_state
-        for k in "${ELIG[@]}"; do
-            local ips=()
-            for r in 0 1; do rail_ok $k $r && ips+=("${RIP[$k,$r]}"); done
-            rbash "${T_TARGET[$k]}" "$FF_PORT" "${ips[@]}" <<<"$SERVER_SCRIPT" >> "$RUNLOG_SSH" 2>&1 &
+        log "Stopping stray iperf3 and starting servers on port $FF_PORT$( (( CL_K > 1 )) && echo "-$(( FF_PORT + CL_K - 1 )) (backends: up to $CL_K client flows per NIC at once)")..."
+        for k in "${ELIG[@]}" "${CLI[@]}"; do STARTED[$k]=1; done; save_state
+        local -A WANT=()   # k -> "ip:port ..." that must listen
+        for k in "${ELIG[@]}" "${CLI[@]}"; do
+            local ips=() cnt=$CL_K j
+            if [[ -n ${IS_CL[$k]} ]]; then cnt=1; for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j && ips+=("${CIP[$k,$j]}"); done
+            else for r in "${RAILS[@]}"; do rail_ok $k $r && ips+=("${RIP[$k,$r]}"); done; fi
+            local ip q; WANT[$k]=""; for ip in "${ips[@]}"; do for (( q = 0; q < cnt; q++ )); do WANT[$k]+=" $ip:$(( FF_PORT + q ))"; done; done
+            rbash "${T_TARGET[$k]}" "$FF_PORT" "$cnt" "${ips[@]}" <<<"$SERVER_SCRIPT" >> "$RUNLOG_SSH" 2>&1 &
         done
         wait
-        for k in "${ELIG[@]}"; do
+        for k in "${ELIG[@]}" "${CLI[@]}"; do
             ( for i in $(seq 20); do
                   l=$(rsh "${T_TARGET[$k]}" ss -Htln 2>&1)
                   all=1
-                  for r in 0 1; do rail_ok $k $r && [[ $l != *"${RIP[$k,$r]}:$FF_PORT "* ]] && all=0; done
+                  for w in ${WANT[$k]}; do [[ $l != *"$w "* ]] && all=0; done
                   (( all )) && exit 0
                   sleep 0.5
               done
               echo "$k" ) > "$WORK/srv.$k" &
         done
         wait
-        for k in "${ELIG[@]}"; do
-            if [[ -s $WORK/srv.$k ]]; then
-                for r in 0 1; do
-                    rail_ok $k $r || continue
-                    RSTATE[$k,$r]="iperf3 server not listening on ${RIP[$k,$r]}:$FF_PORT"; DOWN_IP[${RIP[$k,$r]}]=1
+        for k in "${ELIG[@]}" "${CLI[@]}"; do
+            [[ -s $WORK/srv.$k ]] || continue
+            if [[ -n ${IS_CL[$k]} ]]; then
+                for (( j = 0; j < CN[$k]; j++ )); do
+                    cl_ok $k $j || continue
+                    CSTATE[$k,$j]="iperf3 server not listening on ${CIP[$k,$j]}:$FF_PORT"; DOWN_IP[${CIP[$k,$j]}]=1
                 done
-                log "WARNING: ${T_HOST[$k]}: iperf3 server not listening; its paths are skipped"
+            else
+                for r in "${RAILS[@]}"; do
+                    rail_ok $k $r || continue
+                    RSTATE[$k,$r]="iperf3 server not listening on ${RIP[$k,$r]}:$FF_PORT$( (( CL_K > 1 )) && echo "-$(( FF_PORT + CL_K - 1 ))")"; DOWN_IP[${RIP[$k,$r]}]=1
+                done
             fi
+            log "WARNING: ${T_HOST[$k]}: iperf3 server not listening; its paths are skipped"
         done
     fi
 
@@ -1575,56 +2101,71 @@ main() {
     local RESULTS=$COLLECT_DIR/iperf3_results.txt DROP_TOTALS=$COLLECT_DIR/packet_drops.txt
     PATH_EXCL=$COLLECT_DIR/paths_excluded.txt
     : > "$RESULTS"; : > "$DROP_TOTALS"; : > "$COLLECT_DIR/link_flaps.txt"; : > "$PATH_EXCL"
-    ORDER=($(for k in "${ELIG[@]}"; do echo "$k ${T_HOST[$k]}"; done | sort -V -k2 | awk '{print $1}'))
     local FIRST_HOST=${T_HOST[${ORDER[0]}]}
     local n=${#ORDER[@]} p ck sk
     ROT=("${ORDER[@]}"); (( n % 2 )) && ROT+=(-)
     local rounds=$(( ${#ROT[@]} - 1 )) per=$(( n / 2 )) total=$(( n * (n - 1) / 2 ))
-    (( ITER_ALL )) && FF_ITER=$(( 2 * rounds ))
+    # cross-rail phase: on, off when the operator says the rails are separate fabrics, single with one rail
+    CROSS=on; CROSS_UNROUTED=0
+    if (( NR == 1 )); then CROSS=single; log "One rail: no cross-rail phase"
+    elif [[ $FF_CROSS_RAIL == 0 ]]; then CROSS=off; log "Cross-rail phase off (FF_CROSS_RAIL=0): $( (( NR == 2 )) && echo "A<->B" || echo "rail to rail") is not tested"; fi
+    # rail pairs for phase 2: one per pairing cycle (2 x rounds iterations); with two rails always A,B
+    UPAIRS=(); local ua ub; for (( ua = 0; ua < NR; ua++ )); do for (( ub = ua + 1; ub < NR; ub++ )); do UPAIRS+=("$ua $ub"); done; done
+    local NUP=$(( ${#UPAIRS[@]} > 0 ? ${#UPAIRS[@]} : 1 )); [[ $CROSS == on ]] || NUP=1
+    (( ITER_ALL )) && FF_ITER=$(( 2 * rounds * NUP > ${CL_ALL:-0} ? 2 * rounds * NUP : CL_ALL ))
     local used=$(( FF_ITER < rounds ? FF_ITER : rounds ))
     PAIRS_COVERED=$(( used * per )); PAIRS_TOTAL=$total
     PATHS_PLANNED=0; DROP_READS_MIN=-1
     log "Pairing: round-robin, $per pairs per iteration; $FF_ITER iterations cover $PAIRS_COVERED of $total host pairs$( (( FF_ITER < rounds )) && echo " (all pairs need FF_ITER=$rounds)")"
-    # a pair's 8 directed NIC paths: cycle 1 runs 4, cycle 2 (same pairings, client and server swapped) the other 4
-    local -A DIRECTED=(); local dper=$(( FF_CROSS_RAIL == 0 ? 2 : 4 ))
+    # a pair's directed NIC paths (8 with two rails): cycle 1 runs half, cycle 2 (same pairings, client and server
+    # swapped) the other half; with more rails, each further pair of cycles covers one more rail pair
+    local -A DIRECTED=(); local dper=$(( NR * NR )); [[ $CROSS == on ]] || dper=$NR
+    local cyc=$(( 2 * rounds * NUP )) ppp=$(( NR + ($( [[ $CROSS == on ]] && echo 2 || echo 0 )) ))
     DIRECTED_TOTAL=$(( n * (n - 1) * dper ))
-    log "Directed NIC paths: $(( (FF_ITER < 2 * rounds ? FF_ITER : 2 * rounds) * per * dper )) of $DIRECTED_TOTAL planned$( (( FF_ITER < 2 * rounds )) && echo " (every direction on every NIC pair needs FF_ITER=$(( 2 * rounds )), or FF_ITER=all)")"
+    log "Directed NIC paths: $(( (FF_ITER < cyc ? FF_ITER : cyc) * per * ppp )) of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
     (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped"
-    (( FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings from the start"
+    (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
+    (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
     # rail IP -> host/rail, and host_nic -> host, for the summary and UDP loss placement
-    for k in "${ELIG[@]}"; do
-        [[ ${RIP[$k,0]} != none ]] && echo "${RIP[$k,0]} ${T_HOST[$k]} A"
-        [[ ${RIP[$k,1]} != none ]] && echo "${RIP[$k,1]} ${T_HOST[$k]} B"
-    done > "$WORK/ipmap"
-    for k in "${ELIG[@]}"; do for r in 0 1; do
-        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]}_${RNIC[$k,$r]} ${T_HOST[$k]} $( (( r )) && echo B || echo A)"
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+        [[ ${RIP[$k,$r]} != none ]] && echo "${RIP[$k,$r]} ${T_HOST[$k]} $(rail_letter $r)"
+    done; done > "$WORK/ipmap"
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]}_${RNIC[$k,$r]} ${T_HOST[$k]} $(rail_letter $r)"
     done; done > "$WORK/nicmap"
     UDP_RESULTS=$COLLECT_DIR/iperf3_udp_results.txt
     if [[ $FF_UDP == 1 ]]; then
         : > "$UDP_RESULTS"; : > "$COLLECT_DIR/udp_host_counters.txt"; : > "$COLLECT_DIR/udp_nic_drops.txt"
         log "UDP pass on: phases U1/U2 after the TCP phases, ${FF_UDP_DURATION}s each, no rate cap"
     fi
-    # cross-rail phase: on, or off only when the operator says the rails are separate fabrics
-    CROSS=on; CROSS_UNROUTED=0; [[ $FF_CROSS_RAIL == 0 ]] && { CROSS=off; log "Cross-rail phase off (FF_CROSS_RAIL=0): A<->B is not tested"; }
+    CRESULTS=$COLLECT_DIR/client_results.txt; CL_PLANNED=0
+    if (( ${#CLI[@]} )); then
+        : > "$CRESULTS"; : > "$WORK/cpaths_ok"
+        local ncn=0; for k in "${CLI[@]}"; do ncn=$(( ncn + CN[$k] )); done
+        log "Clients: ${#CLI[@]} clients, $ncn data NICs, to $NR rail$( (( NR > 1 )) && echo s) of ${#ELIG[@]} backends (FF_CLIENT_RATIO=$FF_CLIENT_RATIO), each iteration after the backend phases; each iteration moves every client NIC on to the next backend"
+        log "Client NIC to backend NIC coverage: in $FF_ITER iterations each client NIC reaches $(( FF_ITER < CL_ALL ? FF_ITER : CL_ALL )) of $CL_ALL backend NICs$( (( CL_WAVES && !CL_FULL )) && echo " per rail")$( (( FF_ITER < CL_ALL )) && echo " (every client NIC to every backend NIC needs FF_ITER=$CL_ALL, or FF_ITER=all)")"
+        [[ $FF_UDP == 1 ]] && log "UDP pass: backends only; the client runs are TCP"
+    fi
     local cross_decided=; [[ $CROSS == on ]] || cross_decided=1
     for (( ITER = 1; ITER <= FF_ITER; ITER++ )); do
         RND=$(( (ITER - 1) % rounds )); round_pairs $RND
         if (( (ITER - 1) / rounds % 2 )); then local -a tmp=("${PC[@]}"); PC=("${PS[@]}"); PS=("${tmp[@]}"); fi
+        local up=(${UPAIRS[$(( (ITER - 1) / (2 * rounds) % NUP ))]}); XA=${up[0]:-0}; XB=${up[1]:-1}
         lock_all touch
-        local per=4; [[ $CROSS == on ]] || per=2
+        local per=$ppp
         PATHS_PLANNED=$(( PATHS_PLANNED + per * ${#PC[@]} ))
-        log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs) ============"
+        log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs$( (( NR > 2 )) && [[ $CROSS == on ]] && echo "; cross-rail $(rail_letter $XA)<->$(rail_letter $XB)")) ============"
         [[ -n $SITOUT ]] && log "Sits out this iteration (odd host count): ${T_HOST[$SITOUT]}"
         for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
         PATHS=$WORK/paths.$ITER; mkdir -p "$PATHS"
         for (( p = 0; p < ${#PC[@]}; p++ )); do
             ck=${PC[p]}; sk=${PS[p]}
-            check_path p1a_$p $ck 0 $sk 0; check_path p1b_$p $sk 1 $ck 1
+            p1_paths $p check
             [[ $CROSS == on ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; }
-            DIRECTED["$ck 0 $sk 0"]=1; DIRECTED["$sk 1 $ck 1"]=1
+            for r in "${RAILS[@]}"; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
             [[ $CROSS == on ]] && { DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
         done
         wait
@@ -1634,16 +2175,17 @@ main() {
             xn=$(ls "$PATHS" | grep -c '^p2'); xr=$(cat "$PATHS"/p2* | grep -c '^ROUTE'); sr=$(cat "$PATHS"/p1* | grep -c '^ROUTE')
             if (( xn > 0 && xr == xn && sr == 0 )); then
                 CROSS_UNROUTED=1   # still counted: a site missing its inter-rail routes looks the same
-                log "WARNING: rails are not routed to each other (all $xn A<->B path checks failed on routing, no same-rail one did): either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or inter-rail routing missing on every host. The skips count until you say which."
+                log "WARNING: rails are not routed to each other (all $xn $( (( NR == 2 )) && echo "A<->B" || echo cross-rail) path checks failed on routing, no same-rail one did): either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or inter-rail routing missing on every host. The skips count until you say which."
             fi
         fi
         local bad nchk; bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' '); nchk=$(ls "$PATHS" | wc -l | tr -d ' ')
         log "Path checks (egress route, ping, MTU no-fragment): $(( nchk - bad )) OK, $bad excluded"
         if (( FF_SKIP_IPERF )); then   # every planned path's check is recorded; the counters get one window, at the end
             for (( p = 0; p < ${#PC[@]}; p++ )); do
-                ck=${PC[p]}; sk=${PS[p]}; PHASE=1; run_path p1a_$p $ck 0 $sk 0 check; run_path p1b_$p $sk 1 $ck 1 check
+                PHASE=1; p1_paths $p run check
                 [[ $CROSS == on ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
             done
+            clients_iter   # client path checks, every iteration
             (( ITER < FF_ITER )) && { echo; continue; }
         fi
 
@@ -1661,11 +2203,11 @@ main() {
             for PHASE in 1 2; do
                 PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
                 if [[ $PHASE == 2 && $CROSS != on ]]; then log "Phase 2: skipped (cross-rail $CROSS)"; continue; fi
-                [[ $PHASE == 1 ]] && log "Phase 1: A->A and B->B at once" || log "Phase 2: cross-rail, A->B and B->A at once"
+                [[ $PHASE == 1 ]] && log "Phase 1: $(same_desc) at once" || log "Phase 2: cross-rail, $(cross_desc) at once"
                 if [[ $PHASE == 1 ]]; then
                     echo "### iteration:${ITER} phase:${PHASE}" >> "$RESULTS"
                     for (( p = 0; p < ${#PC[@]}; p++ )); do
-                        ck=${PC[p]}; sk=${PS[p]}; run_path p1a_$p $ck 0 $sk 0; run_path p1b_$p $sk 1 $ck 1
+                        p1_paths $p run
                     done
                     wait
                     column -t < "$PHASE_OUT" | tee -a "$RESULTS"
@@ -1690,12 +2232,12 @@ main() {
         if [[ -s $WORK/prio_delta ]]; then
             cat "$WORK/prio_delta" >> "$COLLECT_DIR/prio_counters.txt"
             # which priority carried the bytes, per rail (shows where each rail's DSCP map put the traffic)
-            log "Traffic by priority in iteration $ITER (rx+tx bytes): $(awk '
+            log "Traffic by priority in iteration $ITER (rx+tx bytes): $(awk -v RL="${LETTERS:0:NR}" '
                 NR == FNR { rail[$1] = $3; next }
                 { l = tolower($3) } l ~ /byte/ && match(l, /pri(ority|o)?_?[0-9]/) {
                     p = substr(l, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); r = ($2 in rail) ? rail[$2] : "?"
                     b[r " " p] += $4; n++ }
-                END { for (r = 1; r <= 3; r++) { R = substr("AB?", r, 1); t = ""
+                END { RL = RL "?"; for (r = 1; r <= length(RL); r++) { R = substr(RL, r, 1); t = ""
                           for (p = 0; p <= 7; p++) if ((R " " p) in b) t = t sprintf(" prio%d %s", p, b[R " " p] < 5e7 ? "<0.1GB" : sprintf("%.1fGB", b[R " " p] / 1e9))
                           if (t != "") printf "rail %s:%s  ", R, t }
                       if (!n) printf "no per-priority byte counters" }' "$WORK/nicmap" "$WORK/prio_delta")"
@@ -1725,6 +2267,7 @@ main() {
             echo "$flaps" | cut -d' ' -f2- | column -t | sed 's/^/#   /' >&2
             echo "$flaps" >> "$COLLECT_DIR/link_flaps.txt"
         fi
+        (( FF_SKIP_IPERF )) || clients_iter   # load runs: after the backend phases and their counters
         echo
     done
 
@@ -1741,27 +2284,33 @@ main() {
         echo "=================================================================="
         local map=$WORK/ipmap
         if grep -q 'Gbits/sec' "$RESULTS"; then
-            echo "Per-host throughput, worst first (Gbps; Rail_A/Rail_B: same-rail runs; Cross: A<->B runs, judged at the slower rail's rate):"
+            local cols; cols=$(for r in "${RAILS[@]}"; do printf '%sRail_%s' "$( (( r )) && echo /)" "$(rail_letter $r)"; done)
+            echo "Per-host throughput, worst first (Gbps; $cols: same-rail runs$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate")):"
             # A cross-rail run measures a path, not either rail (routes decide which NIC carries it), so it gets its own
             # column. Status: the worst column, each its average judged at its own line rate (Cross: the slower rail's);
             # (cross) = only Cross is that bad, the same-rail paths were better.
-            grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' -v la="${LINE_A:-0}" -v lb="${LINE_B:-0}" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" '
+            grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" '
+                BEGIN { nr = split(lines, q, " "); lx = 0; zero = 0
+                        for (i = 1; i <= nr; i++) { split(q[i], kv, "="); R[i] = kv[1]; L[kv[1]] = kv[2] + 0
+                                                    if (i == 1 || kv[2] + 0 < lx) lx = kv[2] + 0; if (kv[2] + 0 == 0) zero = 1 }
+                        L["X"] = lx; nc = nr + (nr > 1); if (nr > 1) R[nc] = "X" }
                 NR==FNR { host[$1]=$2; rail[$1]=$3; next }
                 { for (i = 1; i <= NF; i++) if ($i == "Gbits/sec") { s = $(i-1) + 0; break }
                   for (j = 1; j <= 2; j++) { ip = $j; r = rail[$1] == rail[$2] ? rail[ip] : "X"
                                              sum[host[ip], r] += s; cnt[host[ip], r]++; seen[host[ip]] = 1 } }
                 END {
-                    L["A"] = la; L["B"] = lb; L["X"] = la < lb ? la : lb; N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL"
-                    print "Host Avg_Gbps Rail_A Rail_B Cross Status"
+                    N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL"
+                    hd = "Host Avg_Gbps"; for (c = 1; c <= nr; c++) hd = hd " Rail_" R[c]; if (nr > 1) hd = hd " Cross"; print hd " Status"
                     for (h in seen) {
-                        t = 0; m = 0; w = 0; ws = -1; o = ""
-                        for (c = 1; c <= 3; c++) { r = substr("ABX", c, 1); v[r] = cnt[h,r] ? sum[h,r] / cnt[h,r] : -1
+                        t = 0; m = 0; w = 0; ws = -1; o = ""; miss = ""
+                        for (c = 1; c <= nc; c++) { r = R[c]; v[r] = cnt[h,r] ? sum[h,r] / cnt[h,r] : -1
                             if (v[r] >= 0) { t += v[r]; m++; g = L[r] ? 100 * v[r] / L[r] : 0; lv = g >= ok ? 0 : (g >= slow ? 1 : 2)
                                              if (lv > w) w = lv; if (r != "X" && lv > ws) ws = lv }
+                            else if (r != "X") miss = miss r
                             o = o " " (v[r] < 0 ? "-" : sprintf("%.1f", v[r])) }
                         avg = t / m
-                        st = (la == 0 || lb == 0) ? "-" : N[w] (ws >= 0 && w > ws ? "(cross)" : "")
-                        if (v["A"] < 0 || v["B"] < 0) st = st "(1rail)"
+                        st = zero ? "-" : N[w] (ws >= 0 && w > ws ? "(cross)" : "")
+                        if (miss != "" && nr == 2) st = st "(1rail)"; else if (miss != "") st = st "(no " miss ")"
                         printf "%s %.1f%s %s\n", h, avg, o, st
                     }
                 }' "$map" - | { read -r hdr; echo "$hdr"; sort -k2 -n; } | column -t | sed 's/^/  /'
@@ -1778,7 +2327,7 @@ main() {
         echo "Host-side receive: $nfl of $nrx hosts flagged (host_rx.txt; PCIe as GT/s x width, current/max; CPU: iperf3 process %, max over runs, and per thread (iperf3 3.16+: one thread per stream), flagged at 90):"
         (( nfl > 0 )) && awk 'NR == 1 || $NF != "-"' "$COLLECT_DIR/host_rx.txt" | column -t | sed 's/^/  /'
         echo ""
-        echo "  Hosts on the rails: ${#ELIG[@]}, $( (( FF_SKIP_IPERF )) && echo "with a passed path check: $(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)" || echo "with a result: $(grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" - | sort -u | grep -c .)") | Rails unusable: $(awk 'NR > 1 {n += ($6 != "ok") + ($10 != "ok")} END {print n + 0}' "$COLLECT_DIR/rails.txt") (rails.txt) | TCP paths skipped: $(awk '$2 ~ /^[12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt)"
+        echo "  Hosts on the rails: ${#ELIG[@]}, $( (( FF_SKIP_IPERF )) && echo "with a passed path check: $(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)" || echo "with a result: $(grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" - | sort -u | grep -c .)") | Rails unusable: $(awk 'NR > 1 {for (i = 6; i <= NF; i += 4) n += ($i != "ok")} END {print n + 0}' "$COLLECT_DIR/rails.txt") (rails.txt) | TCP paths skipped: $(awk '$2 ~ /^[12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt)"
         echo "  Runs with no result: $(grep -c ',ERROR' "$RESULTS")"
         echo "  Directed NIC paths planned: ${#DIRECTED[@]} of $DIRECTED_TOTAL$( (( ${#DIRECTED[@]} < DIRECTED_TOTAL )) && echo " (all of them: FF_ITER=all)")"
         if [[ $FF_UDP == 1 ]]; then
@@ -1799,6 +2348,30 @@ main() {
             fi
             echo "  UDP runs with no result: $(grep -c ',ERROR' "$UDP_RESULTS")"
         fi
+        if (( ${#CLI[@]} )); then
+            echo ""
+            # client map: ip host nic line_gbps (FF_CLIENT_GBPS, else the NIC's own speed, 0 = unknown)
+            awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, $1, $3, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' \
+                "$COLLECT_DIR/clients.txt" > "$WORK/cmap"
+            cat "$WORK/ipmap" > "$WORK/cipmap"; awk '{print $1, $2, "client"}' "$WORK/cmap" >> "$WORK/cipmap"
+            if grep -q 'Gbits/sec' "$CRESULTS"; then
+                echo "Clients, per data NIC (Gbps; C->B: client to backend, B->C: backend to client, All_: the all-at-once phase; Expect: the lowest of min(client line, backend rail line / flows sharing that backend NIC) over its runs; Status: each direction's average share of its expected rate, worst):"
+                awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$CLIENT_SUM_AWK" "$WORK/cmap" "$WORK/ipmap" "$CRESULTS" > "$WORK/csum"
+                grep -v '^#TOTAL' "$WORK/csum" | { read -r hdr; echo "$hdr"; sort -V; } | column -t | sed 's/^/  /'
+                awk '$1 == "#TOTAL" {printf "  All at once, %s: %s flows, %.2f Tbps in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, $4 / 1000, ($6 > 1 ? sprintf(" on average over %d iterations (lowest %.2f Tbps)", $6, $5 / 1000) : "")}' "$WORK/csum"
+                # client leaves: the client runs against each leaf's side
+                uplink_summary client "$WORK/cipmap" "$LLDP_DATA" "$NIC_DIAG" "$CRESULTS"
+            elif (( FF_SKIP_IPERF )); then
+                echo "Clients: bandwidth not tested (FF_SKIP_IPERF=1). Client path checks: $(wc -l < "$WORK/cpaths_ok" | tr -d ' ') of $CL_PLANNED OK; the rest are in paths_excluded.txt."
+            else echo "  No client iperf3 results collected."; fi
+            echo "  Client runs with no result: $(grep -c ',ERROR' "$CRESULTS") | client paths skipped: $(awk '$2 ~ /^[CF][12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt) | undeclared client routes: $(awk '$6 == "undeclared"' "$COLLECT_DIR/client_routes.txt" | wc -l | tr -d ' '), clients with routes unread: $(awk '$6 == "unread"' "$COLLECT_DIR/client_routes.txt" | wc -l | tr -d ' ') (client_routes.txt)"
+        fi
+        # leaves that serve clients and backends (LLDP)
+        if (( ${#CLI[@]} )); then
+            awk 'NR == FNR {kind[$1] = $3; next} ($3 in kind) && $4 != "unknown" && $4 != "" {if (kind[$3] == "client") c[$4]++; else b[$4]++}
+                 END {for (l in c) if (l in b) printf "%s shared_leaf switch serves %d client NICs and %d backend NICs; judged as a backend leaf\n", l, c[l], b[l]}' \
+                "$WORK/cipmap" "$LLDP_DATA" >> "$COLLECT_DIR/rail_anomalies.txt"
+        fi
         echo "=================================================================="
     } >&2
 
@@ -1806,7 +2379,7 @@ main() {
     local expect hosts_tested paths_ok skipped noresult coverage cov_rc
     if [[ -n $FF_EXPECT_HOSTS ]]; then expect=$FF_EXPECT_HOSTS
     elif (( INPUT_RANGES )); then expect=${#ELIG[@]}
-    else expect=$(( ${#TARGETS[@]} - dups )); fi
+    else expect=$(( NHT - (dups - cdups) )); fi
     if (( FF_SKIP_IPERF )); then   # no load: a path counts once its check passed
         hosts_tested=$(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)
         paths_ok=$(wc -l < "$WORK/paths_ok" | tr -d ' ')
@@ -1816,10 +2389,22 @@ main() {
     fi
     skipped=$(awk '$2 ~ /^[12]$/' "$PATH_EXCL" | wc -l | tr -d ' ')
     noresult=$(grep -c ',ERROR' "$RESULTS")
+    # clients: tested = a client with a result (a passed path check with FF_SKIP_IPERF=1); expected as for hosts
+    local cl_expect=0 cl_tested=0 cl_paths_ok=0 cl_done=1
+    if [[ $CLIENT_MODE != none ]]; then
+        if [[ -n $FF_EXPECT_CLIENTS ]]; then cl_expect=$FF_EXPECT_CLIENTS
+        elif (( CL_RANGES )); then cl_expect=${#CLI[@]}
+        else cl_expect=$(( ${#CL_T[@]} - cdups )); fi
+        local cok; if (( FF_SKIP_IPERF )); then cok=$(cat "$WORK/cpaths_ok"); else cok=$(grep 'Gbits/sec' "$CRESULTS" | awk -F'[, ]+' '{print $1, $2}'); fi
+        cl_paths_ok=$(grep -c . <<<"$cok")
+        cl_tested=$(awk 'NR == FNR {h[$1] = $2; next} ($1 in h) {print h[$1]} ($2 in h) {print h[$2]}' "$WORK/cmap" - <<<"$cok" | sort -u | grep -c .)
+        (( cl_tested >= cl_expect && cl_paths_ok >= CL_PLANNED )) || cl_done=
+    fi
     if (( paths_ok == 0 )); then coverage=NONE; cov_rc=4
-    elif (( hosts_tested >= expect && paths_ok >= PATHS_PLANNED )); then coverage=COMPLETE; cov_rc=0
+    elif (( hosts_tested >= expect && paths_ok >= PATHS_PLANNED )) && [[ -n $cl_done ]]; then coverage=COMPLETE; cov_rc=0
     else coverage=PARTIAL; cov_rc=3; fi
     local RESULT_LINE="RESULT coverage=$coverage hosts=$hosts_tested/$expect paths=$paths_ok/$PATHS_PLANNED skipped=$skipped no_result=$noresult"
+    [[ $CLIENT_MODE != none ]] && RESULT_LINE+=" clients=$cl_tested/$cl_expect client_paths=$cl_paths_ok/$CL_PLANNED client_no_result=$(grep -c ',ERROR' "$CRESULTS")"
     RESULT_LINE+=" cross_rail=$( (( CROSS_UNROUTED )) && echo unrouted || echo "$CROSS")"
     (( FF_SKIP_IPERF )) && RESULT_LINE+=" iperf=skipped (FF_SKIP_IPERF=1: paths = path checks passed, no bandwidth tested)"
     (( INPUT_RANGES )) && [[ -z $FF_EXPECT_HOSTS ]] && RESULT_LINE+=" (hosts expected = hosts found on the rails; set FF_EXPECT_HOSTS to check for missing ones)"
@@ -1833,14 +2418,29 @@ main() {
         echo "iterations=$FF_ITER"
         echo "parallel_streams=$FF_STREAMS"
         echo "total_hosts=${#ELIG[@]}"
-        echo "targets_input=${#TARGETS[@]}"
+        echo "targets_input=$NHT"
         echo "targets_reachable=${#REACH[@]}"
         echo "rail_mode=$RAIL_MODE"
-        echo "rail_a=${RAIL_SPEC[0]// /,}"
-        echo "rail_b=${RAIL_SPEC[1]// /,}"
+        echo "rail_count=$NR"
+        for r in "${RAILS[@]}"; do L=$(rail_letter $r); echo "rail_$(tr 'A-Z' 'a-z' <<<"$L")=${RAIL_SPEC[r]// /,}"; done
         echo "line_rate_gbps=${LINE_GBPS:-unknown}"
-        echo "line_rate_a_gbps=${LINE_A:-unknown}"
-        echo "line_rate_b_gbps=${LINE_B:-unknown}"
+        for r in "${RAILS[@]}"; do L=$(rail_letter $r); echo "line_rate_$(tr 'A-Z' 'a-z' <<<"$L")_gbps=${LINE[r]:-unknown}"; done
+        echo "clients=$( [[ $CLIENT_MODE != none ]] && echo 1 || echo 0)"
+        if [[ $CLIENT_MODE != none ]]; then
+            echo "client_mode=$CLIENT_MODE"
+            echo "client_spec=$(IFS=,; echo "${CLIENT_SPEC[*]}")"
+            echo "client_ratio=$FF_CLIENT_RATIO"
+            echo "client_line_gbps=${FF_CLIENT_GBPS:-nic}"
+            echo "client_targets=${#CL_T[@]}"
+            echo "clients_expected=$cl_expect"
+            echo "clients_tested=$cl_tested"
+            echo "client_paths_planned=$CL_PLANNED"
+            echo "client_paths_ok=$cl_paths_ok"
+            echo "client_waves=$CL_NW"
+            echo "client_servers_per_nic=$CL_K"
+            echo "client_spine_links=${FF_CLIENT_SPINE_LINKS:-none}"
+            echo "client_spine_gbps=${FF_CLIENT_SPINE_GBPS:-none}"
+        fi
         echo "ok_pct=$FF_OK_PCT"
         echo "slow_pct=$FF_SLOW_PCT"
         echo "spines=${FF_SPINES:-none}"
@@ -1866,14 +2466,15 @@ main() {
         echo "cross_rail=$( (( CROSS_UNROUTED )) && echo unrouted || echo "$CROSS")"
         echo "paths_ok=$paths_ok"
         echo "drop_nics_read_min=$DROP_READS_MIN"
-        echo "drop_nics_expected=$(( ${#ELIG[@]} * 2 ))"
+        echo "drop_nics_expected=$(( ${#ELIG[@]} * NR ))"
         echo "nic_diag_lines=$(wc -l < "$NIC_DIAG" | tr -d ' ')"
         echo "mesh_pings=${MESH_PINGS:-}"
         echo "mesh_failures=${MESH_FAILS:-}"
         echo "tool=fabric_ferret"
     } > "$COLLECT_DIR/metadata.txt"
     for k in "${ELIG[@]}"; do
-        echo "${T_HOST[$k]} ${T_TARGET[$k]} ${RIP[$k,0]} ${RIP[$k,1]} ${RNIC[$k,0]} ${RNIC[$k,1]}"
+        local hl="${T_HOST[$k]} ${T_TARGET[$k]}"; for r in "${RAILS[@]}"; do hl+=" ${RIP[$k,$r]}"; done; for r in "${RAILS[@]}"; do hl+=" ${RNIC[$k,$r]}"; done
+        echo "$hl"
     done | sort -V > "$COLLECT_DIR/host_list.txt"
     printf '%s\n' "${!DOWN_IP[@]}" | grep . | sort -V > "$COLLECT_DIR/down_ips.txt"
 
