@@ -1040,9 +1040,9 @@ host_nics() {
     else for r in "${RAILS[@]}"; do echo "${RNIC[$k,$r]}"; done; fi
 }
 
-collect_counters() {  # script outfile [k...]: run a counter script on every tested host (or hosts k...)
+collect_counters() {  # script outfile [k...]: run a counter script on every tested host and client (or hosts k...)
     local script=$1 outfile=$2 k; shift 2
-    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}")
+    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}" "${CLI[@]}")
     : > "$outfile"
     for k in "${ks[@]}"; do
         rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$script" >> "$outfile" 2>> "$RUNLOG_SSH" &
@@ -1053,14 +1053,14 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
 # System info per tested host, split into $SI/<host>/<item> (SYSINFO_SCRIPT)
 collect_sysinfo() {
     local k f t
-    log "System info: capturing on ${#ELIG[@]} hosts, at most ${FF_SYSINFO_TIMEOUT}s each (bundle: sysinfo/<host>/)..."
-    for k in "${ELIG[@]}"; do
+    log "System info: capturing on $(( ${#ELIG[@]} + ${#CLI[@]} )) hosts, at most ${FF_SYSINFO_TIMEOUT}s each (bundle: sysinfo/<host>/)..."
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
         ( timeout "$FF_SYSINFO_TIMEOUT" ssh "${SSH_OPTS[@]}" "${T_TARGET[$k]}" $SUDO bash -s -- $(host_nics $k) \
               <<<"$SYSINFO_SCRIPT" > "$WORK/si.$k" 2>> "$RUNLOG_SSH"; echo $? > "$WORK/si_rc.$k" ) &
     done
     wait
-    for k in "${ELIG[@]}"; do
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         f=$WORK/si.$k
         if ! grep -q '^=== SYSINFO ' "$f"; then log "WARNING: ${T_HOST[$k]}: no system info captured (see ssh_errors.log)"; continue; fi
         if [[ $(cat "$WORK/si_rc.$k") == 124 ]]; then
@@ -1076,11 +1076,16 @@ collect_sysinfo() {
 
 # Rail NIC receive config from the sysinfo capture: "host rail numa ring_cur/max pcie_GTs x width cur/max"
 rx_config() {
-    local k r f
+    local k r
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
-        f=$SI/${T_HOST[$k]}/nic-${RNIC[$k,$r]}
-        [[ ${RNIC[$k,$r]} != - && -f $f ]] || continue
-        awk -v h="${T_HOST[$k]}" -v r=$(rail_letter $r) '
+        [[ ${RNIC[$k,$r]} != - ]] && rx_one "${T_HOST[$k]}" "$(rail_letter $r)" "$SI/${T_HOST[$k]}/nic-${RNIC[$k,$r]}"
+    done; done
+    return 0
+}
+
+rx_one() {  # host slot sysinfo_nic_file: one rx config line (slot: rail letter, or a client's NIC number)
+    [[ -f $3 ]] || return 0
+    awk -v h="$1" -v r="$2" '
             $1 == "numa_node" { numa = $2 }
             $1 ~ /^(current|max)_link_(speed|width)$/ { v = $2; sub(/[^0-9.].*/, "", v); L[$1] = v }
             /^--- / { sec = $3; g = "" }
@@ -1090,8 +1095,7 @@ rx_config() {
             END { ring = ("cur" in R && "max" in R) ? R["cur"] "/" R["max"] : "-"
                   pc = (L["current_link_speed"] != "" && L["max_link_speed"] != "") ? \
                        L["current_link_speed"] "x" L["current_link_width"] "/" L["max_link_speed"] "x" L["max_link_width"] : "-"
-                  print h, r, (numa ~ /^-?[0-9]+$/ ? numa : "-"), ring, pc }' "$f"
-    done; done
+                  print h, r, (numa ~ /^-?[0-9]+$/ ? numa : "-"), ring, pc }' "$3"
 }
 
 # hostctr_delta label pre post: receive counters that rose -> host_counters.txt "label host key delta"
@@ -1115,7 +1119,7 @@ hc_log() {
 # Kernel log per host since its own sysinfo epoch -> $SI/<host>/kernel-log
 collect_klog() {
     local k e
-    for k in "${ELIG[@]}"; do
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
         e=$(cat "$SI/${T_HOST[$k]}/epoch" 2>&1); [[ $e =~ ^[0-9]+$ ]] || continue
         throttle
         rbash "${T_TARGET[$k]}" "$e" <<<"$KLOG_SCRIPT" > "$SI/${T_HOST[$k]}/kernel-log" 2>> "$RUNLOG_SSH" &
@@ -1176,25 +1180,51 @@ END {
     }
 }'
 
-host_rx() {  # writes $COLLECT_DIR/host_rx.txt and prints the flagged hosts
-    local k h g i n s t
+# hostinfo_line host: "host governor irqbalance klog_hits sysinfo_state iperf3_threads" from its sysinfo
+hostinfo_line() {
+    local h=$1 g i n s t
+    g=-; [[ -f $SI/$h/cpu-governor ]] && g=$(awk '$1 ~ /^[0-9]+$/ {printf "%s%s", s, $2; s = "+"} /^n\/a/ {printf "-"}' "$SI/$h/cpu-governor")
+    i=$(cat "$SI/$h/irqbalance" 2>&1); [[ $i == running ]] && i=on || { [[ $i == "not running" ]] && i=off || i=-; }
+    n=-; [[ -f $SI/$h/kernel-log ]] && n=$(grep -c -i -E "$KLOG_RE" "$SI/$h/kernel-log")
+    s=ok; [[ -d $SI/$h ]] || s=missing; [[ -n ${SI_CUT[$h]} ]] && s=cut
+    # iperf3 threads per receiving process: one per stream from 3.16 (its own --version, from sysinfo)
+    t=1; [[ -f $SI/$h/iperf3 ]] && (( $(awk 'match($0, /iperf 3\.[0-9]+/) {print substr($0, RSTART + 8, RLENGTH - 8) + 0; exit}' "$SI/$h/iperf3") + 0 >= 16 )) && t=$FF_STREAMS
+    echo "$h ${g:--} $i $n $s $t"
+}
+
+host_rx() {  # writes $COLLECT_DIR/host_rx.txt (and client_rx.txt) and prints the flagged hosts
+    local k
     rx_config > "$WORK/rxcfg"
-    for k in "${ELIG[@]}"; do
-        h=${T_HOST[$k]}
-        g=-; [[ -f $SI/$h/cpu-governor ]] && g=$(awk '$1 ~ /^[0-9]+$/ {printf "%s%s", s, $2; s = "+"} /^n\/a/ {printf "-"}' "$SI/$h/cpu-governor")
-        i=$(cat "$SI/$h/irqbalance" 2>&1); [[ $i == running ]] && i=on || { [[ $i == "not running" ]] && i=off || i=-; }
-        n=-; [[ -f $SI/$h/kernel-log ]] && n=$(grep -c -i -E "$KLOG_RE" "$SI/$h/kernel-log")
-        s=ok; [[ -d $SI/$h ]] || s=missing; [[ -n ${SI_CUT[$h]} ]] && s=cut
-        # iperf3 threads per receiving process: one per stream from 3.16 (its own --version, from sysinfo)
-        t=1; [[ -f $SI/$h/iperf3 ]] && (( $(awk 'match($0, /iperf 3\.[0-9]+/) {print substr($0, RSTART + 8, RLENGTH - 8) + 0; exit}' "$SI/$h/iperf3") + 0 >= 16 )) && t=$FF_STREAMS
-        echo "$h ${g:--} $i $n $s $t"
-    done > "$WORK/hostinfo"
-    grep "Gbits/sec" "$1" > "$WORK/rx_results"
+    for k in "${ELIG[@]}"; do hostinfo_line "${T_HOST[$k]}"; done > "$WORK/hostinfo"
+    # iperf3 CPU from every run a host was in, the client runs included
+    { cat "$1"; [[ -f ${CRESULTS:-} ]] && cat "$CRESULTS"; } | grep "Gbits/sec" > "$WORK/rx_results"
     awk '{r[$1]++; a[$1] += $2} END {for (h in r) print h, r[h], a[h]}' "$WORK/hc_reads" > "$WORK/hcreads"
     [[ -f $WORK/prio_post ]] || : > "$WORK/prio_post"
     awk -v ns="$HC_READS" -v RL="${LETTERS:0:NR}" "$HOSTRX_AWK" "$WORK/nicmap" "$WORK/ipmap" "$WORK/rxcfg" "$WORK/hostinfo" "$WORK/rx_results" \
         "$COLLECT_DIR/host_counters.txt" "$COLLECT_DIR/prio_counters.txt" "$WORK/hcreads" "$WORK/prio_post" \
         | { read -r hdr; echo "$hdr"; sort -V; } > "$COLLECT_DIR/host_rx.txt"
+    (( ${#CLI[@]} )) && client_rx
+    return 0
+}
+
+# client_rx: host_rx.txt's columns for the clients -> client_rx.txt, NIC slots 1..N in clients.txt order
+client_rx() {
+    local k j h nm=0 sl=""
+    for k in "${CLI[@]}"; do (( CN[$k] > nm )) && nm=${CN[$k]}; done
+    for (( j = 1; j <= nm; j++ )); do sl+=$j; done
+    : > "$WORK/cnicmap"; : > "$WORK/cipslot"; : > "$WORK/crxcfg"; : > "$WORK/chostinfo"
+    for k in "${CLI[@]}"; do
+        h=${T_HOST[$k]}
+        for (( j = 0; j < CN[$k]; j++ )); do
+            echo "${h}_${CNIC[$k,$j]} $h $(( j + 1 ))" >> "$WORK/cnicmap"
+            [[ ${CIP[$k,$j]} != none ]] && echo "${CIP[$k,$j]} $h $(( j + 1 ))" >> "$WORK/cipslot"
+            rx_one "$h" $(( j + 1 )) "$SI/$h/nic-${CNIC[$k,$j]}" >> "$WORK/crxcfg"
+        done
+        hostinfo_line "$h" >> "$WORK/chostinfo"
+    done
+    awk -v ns="$HC_READS" -v RL="$sl" "$HOSTRX_AWK" "$WORK/cnicmap" "$WORK/cipslot" "$WORK/crxcfg" "$WORK/chostinfo" "$WORK/rx_results" \
+        "$COLLECT_DIR/host_counters.txt" "$COLLECT_DIR/prio_counters.txt" "$WORK/hcreads" "$WORK/prio_post" \
+        | { read -r hdr; echo "Client ${hdr#Host }"; sort -V; } > "$COLLECT_DIR/client_rx.txt"
 }
 
 # UDP loss placement, the same rule as the dashboard: per phase and receiving host,
@@ -1485,7 +1515,10 @@ client_phase() {
     # runs no wave could take (no usable backend on their rail) are recorded once, as skips
     for (( t = 0; t < ${#TK[@]}; t++ )); do (( TW[t] < 0 )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir 0 0 $P; done
     local pre=$WORK/cdrops_pre.$ITER.$P post=$WORK/cdrops_post.$ITER.$P
-    (( FF_SKIP_IPERF )) || collect_drops "$pre" "${ELIG[@]}" "${CLI[@]}"
+    if (( ! FF_SKIP_IPERF )); then   # the same reads as a backend phase: drops, host receive and priority counters
+        collect_drops "$pre" "${ELIG[@]}" "${CLI[@]}"
+        collect_counters "$HOSTCTR_SCRIPT" "$pre.hc"; collect_counters "$PRIO_SCRIPT" "$pre.prio"
+    fi
     for (( w = 0; w < nw; w++ )); do
         PHASE_OUT=$WORK/cphase.$ITER.$P.$w; : > "$PHASE_OUT"
         (( FF_SKIP_IPERF )) || echo "### client iteration:$ITER phase:$P$( (( nw > 1 )) && echo " wave:$(( w + 1 ))/$nw")" >> "$CRESULTS"
@@ -1501,6 +1534,16 @@ client_phase() {
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
     (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
+    collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"
+    hostctr_delta "iter${ITER}_client$P" "$pre.hc" "$post.hc"; hc_log "client phase $P" "$post.hc"
+    awk -v it="iter${ITER}_client$P" 'NR==FNR {pre[$1" "$2]=$3; next}
+        ($1" "$2) in pre && $3 > pre[$1" "$2] {print it, $1, $2, $3 - pre[$1" "$2]}' "$pre.prio" "$post.prio" > "$WORK/cprio_delta"
+    cat "$WORK/cprio_delta" >> "$COLLECT_DIR/prio_counters.txt"
+    awk 'tolower($3) !~ /byte|packet/ || $3 ~ /^rdma:/' "$WORK/cprio_delta" | sort -k4 -rn > "$WORK/cprio_events"
+    if [[ -s $WORK/cprio_events ]]; then
+        log "  Pause/ECN/discard/RDMA counters that rose in client phase $P (top 5 of $(wc -l < "$WORK/cprio_events" | tr -d ' ')):"
+        head -n 5 "$WORK/cprio_events" | cut -d' ' -f2- | column -t | sed 's/^/#     /' >&2
+    else log "  No pause/ECN/discard/RDMA counter rose in client phase $P ($(wc -l < "$post.prio" | tr -d ' ') counters read)"; fi
     local d; d=$(compute_drops "$pre" "$post" "iter${ITER}_client$P")
     if [[ -n $d ]]; then log "Drops during client phase $P:"; echo "$d" | awk '{NF--; print}' | column -t | sed 's/^/#   /' >&2; echo "$d" >> "$DROP_TOTALS"
     else log "No drop counter increases in client phase $P ($(wc -l < "$post" | tr -d ' ') NICs read)"; fi
@@ -1531,23 +1574,24 @@ FNR == 1 { f++ }
 f == 1 { ch[$1] = $2; cn[$1] = $3; cl[$1] = $4 + 0; next }
 f == 2 { br[$1] = $3; next }
 /^### / { ph = ""; it = ""; for (i = 2; i <= NF; i++) { if ($i ~ /^phase:/) ph = substr($i, 7); if ($i ~ /^iteration:/) it = substr($i, 11) }; next }
-{ s = $1; d = $2; g = -1; sh = 1
-  for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1) + 0; if ($i ~ /^share:/) sh = substr($i, 7) + 0 }
+{ s = $1; d = $2; g = -1; sh = 1; rx = 0
+  for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1) + 0; if ($i ~ /^share:/) sh = substr($i, 7) + 0; if ($i ~ /^retransmits:/) rx = substr($i, 13) + 0 }
   if (g < 0) next
   c = (s in ch) ? s : d; b = (s in ch) ? d : s; if (!(c in ch) || !(b in br)) next
   lb = L[br[b]]; lc = cl[c]; ex = lb > 0 ? lb / (sh > 0 ? sh : 1) : 0; if (lc > 0 && (ex == 0 || lc < ex)) ex = lc
   col = (ph ~ /^F/) ? "F" : "C"; col = col ((s in ch) ? "o" : "i")
   sum[c, col] += g; cnt[c, col]++; if (ex > 0) { pct[c, col] += 100 * g / ex; pc[c, col]++ }
   if (!((c, "x") in mx) || ex < mx[c, "x"]) mx[c, "x"] = ex; seen[c] = 1
+  if (s in ch) rt[c] += rx
   if (ph ~ /^F/) { ft[ph, it] += g; fn[ph, it]++ } }
 END {
-    print "Client NIC IP C->B B->C All_C->B All_B->C Expect Status"
+    print "Client NIC IP C->B B->C All_C->B All_B->C Retr Expect Status"
     for (c in seen) { w = -1; o = ""
         for (k = 1; k <= 4; k++) { col = substr("CoCiFoFi", 2 * k - 1, 2)
             if (!cnt[c, col]) { o = o " -"; continue }
             o = o sprintf(" %.1f", sum[c, col] / cnt[c, col])
             if (pc[c, col]) { p = pct[c, col] / pc[c, col]; lv = p >= ok ? 0 : (p >= slow ? 1 : 2); if (lv > w) w = lv } }
-        printf "%s %s %s%s %s %s\n", ch[c], cn[c], c, o, (mx[c, "x"] > 0 ? sprintf("%g", mx[c, "x"]) : "-"), (w < 0 ? "-" : N[w]) }
+        printf "%s %s %s%s %d %s %s\n", ch[c], cn[c], c, o, rt[c], (mx[c, "x"] > 0 ? sprintf("%g", mx[c, "x"]) : "-"), (w < 0 ? "-" : N[w]) }
     # all at once: per iteration, then the average and the lowest over the iterations
     for (x in ft) { split(x, y, SUBSEP); p = y[1]; ni[p]++; ts[p] += ft[x]; nf[p] = fn[x]; if (!(p in lo) || ft[x] < lo[p]) lo[p] = ft[x] }
     for (p in ni) printf "#TOTAL %s %d %.1f %.1f %d\n", p, nf[p], ts[p] / ni[p], lo[p], ni[p] }'
@@ -1572,7 +1616,7 @@ fec_deltas() {
 
 collect_drops() {  # outfile [k...]
     local outfile=$1 k; shift
-    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}")
+    local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}" "${CLI[@]}")
     : > "$outfile"
     for k in "${ks[@]}"; do
         rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$DROPS_SCRIPT" >> "$outfile" 2>> "$RUNLOG_SSH" &
@@ -2041,6 +2085,8 @@ main() {
         awk 'NR == FNR {sp[$1 " " $2] = $4; next} FNR == 1 {print $0, "Speed"; next} {print $0, (($1 " " $3) in sp && sp[$1 " " $3] ~ /^[0-9]+Mb\/s$/) ? sp[$1 " " $3] : "unknown"}' \
             "$NIC_DIAG" "$WORK/clients0" | column -t > "$COLLECT_DIR/clients.txt"
         if [[ -n $FF_CLIENT_GBPS ]]; then log "Client line rate: ${FF_CLIENT_GBPS}G (FF_CLIENT_GBPS)"
+            awk -v w="$(( FF_CLIENT_GBPS * 1000 ))Mb/s" 'NR > 1 && $7 ~ /^[0-9]+Mb\/s$/ && $7 != w {printf "#   %s %s %s %s\n", $1, $3, $4, $7}' "$COLLECT_DIR/clients.txt" > "$WORK/coffspeed"
+            [[ -s $WORK/coffspeed ]] && { log "Client NICs not at ${FF_CLIENT_GBPS}G:"; cat "$WORK/coffspeed" >&2; }
         else log "Client line rate: each client NIC's own speed (a bond counts its total; set FF_CLIENT_GBPS to override): $(awk 'NR > 1 {print $7}' "$COLLECT_DIR/clients.txt" | sort | uniq -c | awk '{printf "%s%s x %s", s, $1, $2; s = ", "}')"; fi
     fi
 
@@ -2285,7 +2331,7 @@ main() {
         local map=$WORK/ipmap
         if grep -q 'Gbits/sec' "$RESULTS"; then
             local cols; cols=$(for r in "${RAILS[@]}"; do printf '%sRail_%s' "$( (( r )) && echo /)" "$(rail_letter $r)"; done)
-            echo "Per-host throughput, worst first (Gbps; $cols: same-rail runs$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate")):"
+            echo "Per-host throughput, worst first (Gbps; $cols: same-rail runs$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate"); Retr: TCP retransmits over the runs it sent):"
             # A cross-rail run measures a path, not either rail (routes decide which NIC carries it), so it gets its own
             # column. Status: the worst column, each its average judged at its own line rate (Cross: the slower rail's);
             # (cross) = only Cross is that bad, the same-rail paths were better.
@@ -2296,11 +2342,12 @@ main() {
                         L["X"] = lx; nc = nr + (nr > 1); if (nr > 1) R[nc] = "X" }
                 NR==FNR { host[$1]=$2; rail[$1]=$3; next }
                 { for (i = 1; i <= NF; i++) if ($i == "Gbits/sec") { s = $(i-1) + 0; break }
+                  for (i = 1; i <= NF; i++) if ($i ~ /^retransmits:/) rt[host[$1]] += substr($i, 13) + 0
                   for (j = 1; j <= 2; j++) { ip = $j; r = rail[$1] == rail[$2] ? rail[ip] : "X"
                                              sum[host[ip], r] += s; cnt[host[ip], r]++; seen[host[ip]] = 1 } }
                 END {
                     N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL"
-                    hd = "Host Avg_Gbps"; for (c = 1; c <= nr; c++) hd = hd " Rail_" R[c]; if (nr > 1) hd = hd " Cross"; print hd " Status"
+                    hd = "Host Avg_Gbps"; for (c = 1; c <= nr; c++) hd = hd " Rail_" R[c]; if (nr > 1) hd = hd " Cross"; print hd " Retr Status"
                     for (h in seen) {
                         t = 0; m = 0; w = 0; ws = -1; o = ""; miss = ""
                         for (c = 1; c <= nc; c++) { r = R[c]; v[r] = cnt[h,r] ? sum[h,r] / cnt[h,r] : -1
@@ -2311,7 +2358,7 @@ main() {
                         avg = t / m
                         st = zero ? "-" : N[w] (ws >= 0 && w > ws ? "(cross)" : "")
                         if (miss != "" && nr == 2) st = st "(1rail)"; else if (miss != "") st = st "(no " miss ")"
-                        printf "%s %.1f%s %s\n", h, avg, o, st
+                        printf "%s %.1f%s %d %s\n", h, avg, o, rt[h], st
                     }
                 }' "$map" - | { read -r hdr; echo "$hdr"; sort -k2 -n; } | column -t | sed 's/^/  /'
             cross_summary "$map" "$RESULTS"
@@ -2326,6 +2373,11 @@ main() {
         local nrx nfl; nrx=$(( $(wc -l < "$COLLECT_DIR/host_rx.txt") - 1 )); nfl=$(awk 'NR > 1 && $NF != "-"' "$COLLECT_DIR/host_rx.txt" | wc -l | tr -d ' ')
         echo "Host-side receive: $nfl of $nrx hosts flagged (host_rx.txt; PCIe as GT/s x width, current/max; CPU: iperf3 process %, max over runs, and per thread (iperf3 3.16+: one thread per stream), flagged at 90):"
         (( nfl > 0 )) && awk 'NR == 1 || $NF != "-"' "$COLLECT_DIR/host_rx.txt" | column -t | sed 's/^/  /'
+        if [[ -f $COLLECT_DIR/client_rx.txt ]]; then   # the same columns for the clients, NIC 1..N in clients.txt order
+            nrx=$(( $(wc -l < "$COLLECT_DIR/client_rx.txt") - 1 )); nfl=$(awk 'NR > 1 && $NF != "-"' "$COLLECT_DIR/client_rx.txt" | wc -l | tr -d ' ')
+            echo "Client-side receive: $nfl of $nrx clients flagged (client_rx.txt; columns as above, _1.._N = the client's data NICs in clients.txt order):"
+            (( nfl > 0 )) && awk 'NR == 1 || $NF != "-"' "$COLLECT_DIR/client_rx.txt" | column -t | sed 's/^/  /'
+        fi
         echo ""
         echo "  Hosts on the rails: ${#ELIG[@]}, $( (( FF_SKIP_IPERF )) && echo "with a passed path check: $(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)" || echo "with a result: $(grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" - | sort -u | grep -c .)") | Rails unusable: $(awk 'NR > 1 {for (i = 6; i <= NF; i += 4) n += ($i != "ok")} END {print n + 0}' "$COLLECT_DIR/rails.txt") (rails.txt) | TCP paths skipped: $(awk '$2 ~ /^[12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt)"
         echo "  Runs with no result: $(grep -c ',ERROR' "$RESULTS")"
@@ -2355,7 +2407,7 @@ main() {
                 "$COLLECT_DIR/clients.txt" > "$WORK/cmap"
             cat "$WORK/ipmap" > "$WORK/cipmap"; awk '{print $1, $2, "client"}' "$WORK/cmap" >> "$WORK/cipmap"
             if grep -q 'Gbits/sec' "$CRESULTS"; then
-                echo "Clients, per data NIC (Gbps; C->B: client to backend, B->C: backend to client, All_: the all-at-once phase; Expect: the lowest of min(client line, backend rail line / flows sharing that backend NIC) over its runs; Status: each direction's average share of its expected rate, worst):"
+                echo "Clients, per data NIC (Gbps; C->B: client to backend, B->C: backend to client, All_: the all-at-once phase; Expect: the lowest of min(client line, backend rail line / flows sharing that backend NIC) over its runs; Status: each direction's average share of its expected rate, worst; Retr: TCP retransmits over the runs it sent):"
                 awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$CLIENT_SUM_AWK" "$WORK/cmap" "$WORK/ipmap" "$CRESULTS" > "$WORK/csum"
                 grep -v '^#TOTAL' "$WORK/csum" | { read -r hdr; echo "$hdr"; sort -V; } | column -t | sed 's/^/  /'
                 awk '$1 == "#TOTAL" {printf "  All at once, %s: %s flows, %.2f Tbps in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, $4 / 1000, ($6 > 1 ? sprintf(" on average over %d iterations (lowest %.2f Tbps)", $6, $5 / 1000) : "")}' "$WORK/csum"
@@ -2466,7 +2518,8 @@ main() {
         echo "cross_rail=$( (( CROSS_UNROUTED )) && echo unrouted || echo "$CROSS")"
         echo "paths_ok=$paths_ok"
         echo "drop_nics_read_min=$DROP_READS_MIN"
-        echo "drop_nics_expected=$(( ${#ELIG[@]} * NR ))"
+        local ncl=0; for k in "${CLI[@]}"; do ncl=$(( ncl + CN[$k] )); done
+        echo "drop_nics_expected=$(( ${#ELIG[@]} * NR + ncl ))"
         echo "nic_diag_lines=$(wc -l < "$NIC_DIAG" | tr -d ' ')"
         echo "mesh_pings=${MESH_PINGS:-}"
         echo "mesh_failures=${MESH_FAILS:-}"

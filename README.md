@@ -96,6 +96,8 @@ With `FF_CLIENTS` but neither `FF_CLIENT_NETS` nor `FF_CLIENT_NICS`, the tool li
 
 Clients follow `FF_ITER` as the backends do: each iteration ends with its client phase, and each iteration moves every client data NIC on to the next backend. In an iteration each client data NIC runs to one backend on every rail, both ways, and the backends are spread so every backend NIC gets its share. After as many iterations as a rail has backends, every client NIC has run to every backend NIC (`FF_ITER=all` covers that too; with `full`, the rail rotates first, so it takes rails x backends iterations). A client run is judged against min(client line rate, backend rail line rate ÷ flows sharing that backend NIC). Each client also asks its kernel for its route to every backend rail; a route that leaves by a NIC that isn't a declared data NIC (management, say) is flagged in `client_routes.txt`.
 
+Clients get the same reports as backends: drop, host receive, priority/ECN and FEC counters (read around every client phase as well), system info and kernel log (`sysinfo/<client>/`), and a host-side receive table of their own (`client_rx.txt`, one column per client data NIC). With `FF_CLIENT_GBPS` set, client NICs at another speed are listed. Both throughput tables carry `Retr`, the TCP retransmits over the runs a host or client NIC sent.
+
 ### Test shape
 
 | Setting (default) | Meaning |
@@ -171,7 +173,7 @@ RESULT coverage=COMPLETE|PARTIAL|NONE hosts=t/e paths=r/p ... [clients=t/e clien
 
 COMPLETE describes coverage, not health. A COMPLETE run can still have slow or critical hosts; read the summary and the dashboard.
 
-The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `metadata.txt`, `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt` and `client_routes.txt`.
+The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `metadata.txt`, `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt`, `client_routes.txt` and `client_rx.txt`.
 
 ## Dashboard
 

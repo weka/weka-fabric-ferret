@@ -376,7 +376,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
 
     # Fail-loud banner: incomplete or empty data must not read as a clean result
     uplinks_html = _uplinks_html(_uplinks(data))
-    host_rx_html = _host_rx_html(data.get('host_rx'))
+    host_rx_html = _host_rx_html(data.get('host_rx'), data.get('client_rx'))
     problems_html = ''
     if data.get('problems') or data.get('notes'):
         items = ''.join(f'<li>{escape(p)}</li>' for p in data.get('problems', []))
@@ -1841,25 +1841,34 @@ def _uplinks(data):
     return u
 
 
-def _host_rx_html(rx):
-    """Host-side receive card: rail NIC config, receive counters over the run, iperf3 CPU, kernel log leads."""
+def _host_rx_html(rx, crx=None):
+    """Host-side receive card: rail NIC config, receive counters over the run, iperf3 CPU, kernel log leads;
+    the clients' rows (client_rx.txt, NIC 1..N in clients.txt order) in a second table with the same columns."""
     if not rx:
         return ('<div class="card mb-3"><div class="card-header">Host-side receive</div><div class="card-body">'
                 '<p class="text-warning mb-0">Not captured: this bundle is from a fabric_ferret without system info capture.</p></div></div>')
-    rows = sorted(rx['rows'], key=lambda r: (r[-1] == '-', r[0]))   # flagged hosts first
-    nfl = sum(1 for r in rows if r[-1] != '-')
-    body = ''.join('<tr>' + ''.join(f'<td>{escape(c)}</td>' for c in r[:-1])
-                   + (f'<td class="text-danger">{escape(r[-1].replace(",", ", "))}</td>' if r[-1] != '-' else '<td>-</td>') + '</tr>'
-                   for r in rows)
+    def table(t):
+        rows = sorted(t['rows'], key=lambda r: (r[-1] == '-', r[0]))   # flagged first
+        body = ''.join('<tr>' + ''.join(f'<td>{escape(c)}</td>' for c in r[:-1])
+                       + (f'<td class="text-danger">{escape(r[-1].replace(",", ", "))}</td>' if r[-1] != '-' else '<td>-</td>') + '</tr>'
+                       for r in rows)
+        return (sum(1 for r in rows if r[-1] != '-'), len(rows),
+                f'<table class="table table-sm table-striped"><thead><tr>{"".join(f"<th>{escape(c)}</th>" for c in t["head"])}</tr></thead>'
+                f'<tbody>{body}</tbody></table>')
+    nfl, n, tb = table(rx)
+    head = f'Host-side receive: {nfl} of {n} hosts flagged'
+    if crx:
+        cfl, cn, ctb = table(crx)
+        head += f'; {cfl} of {cn} clients flagged'
+        tb = f'<h6>Backends</h6>{tb}<h6 class="mt-2">Clients <small>(_1.._N: the client\'s data NICs in clients.txt order)</small></h6>{ctb}'
     note = ('Ring: rx ring current/max. PCIe: GT/s x width, current/max. RcvCPU: receiving iperf3 process %, max over runs; it sums '
             'threads, and iperf3 3.16+ runs one per stream, so RcvThr = RcvCPU / streams there (= RcvCPU on older iperf3) and '
-            'the flag is RcvThr &gt;= 90. Drops, discards, AER: increases during the TCP phases. Klog: kernel log lines naming AER, PCIe, '
+            f'the flag is RcvThr &gt;= 90. Drops, discards, AER: increases during the TCP phases{" and the client phases" if crx else ""}. '
+            'Klog: kernel log lines naming AER, PCIe, '
             'link down, timeouts, hung tasks or OOM (a lead, not a verdict). Raw per-host system info: sysinfo/&lt;host&gt;/ in the bundle.')
-    return (f'<div class="card mb-3"><div class="card-header">Host-side receive: {nfl} of {len(rows)} hosts flagged</div>'
+    return (f'<div class="card mb-3"><div class="card-header">{head}</div>'
             f'<div class="card-body" style="max-height:420px; overflow-y:auto;">'
-            f'<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{note}</p>'
-            f'<table class="table table-sm table-striped"><thead><tr>{"".join(f"<th>{escape(c)}</th>" for c in rx["head"])}</tr></thead>'
-            f'<tbody>{body}</tbody></table></div></div>')
+            f'<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{note}</p>{tb}</div></div>')
 
 
 def _clients_html(data):
@@ -1878,7 +1887,7 @@ def _clients_html(data):
     nics = sorted(cl['nics'], key=lambda n: ({'CRITICAL': 0, 'SLOW': 1, 'OK': 3}.get(n['status'], 2), n['host'], n['nic']))
     line = lambda n: f"{cl['line'][n['ip']]:g}" if cl['line'].get(n['ip']) else 'unknown'
     rows = ''.join(f"<tr><td>{escape(n['host'])}</td><td>{escape(n['nic'])}</td><td>{escape(n['ip'])}</td><td>{line(n)}</td>"
-                   f"{dcell(n, 'C->B')}{dcell(n, 'B->C')}<td>{badge(n['status'])}</td></tr>" for n in nics)
+                   f"{dcell(n, 'C->B')}{dcell(n, 'B->C')}<td>{n.get('retr', 0):,}</td><td>{badge(n['status'])}</td></tr>" for n in nics)
     cnt = Counter(n['status'] for n in cl['nics'])
     tot = ''.join(f"<tr><td>{escape(t['phase'])}</td><td>{escape(t['dir'])}</td><td>{t['flows']}</td><td>{t['gbps']:.1f}</td>"
                   f"<td>{t['exp']:.1f}</td><td>{100 * t['gbps'] / t['exp'] if t['exp'] else 0:.0f}%</td><td>{badge(t['status'])}</td></tr>"
@@ -1901,7 +1910,8 @@ def _clients_html(data):
            f'line / share), share = runs on that backend NIC at once. OK &ge; {ok}% of expected, slow &ge; {slow}%, else critical. Per NIC: '
            f'average of its wave runs (C1 client->backend, C2 backend->client), or of the all-at-once runs (F1/F2) when it had no waves; '
            f'status = the worse direction. Client line: {escape(cl["line_src"])}.</p>'
-           + sec('Per client NIC', ['Client', 'NIC', 'IP', 'Line (G)', 'C-&gt;B avg', 'C-&gt;B expected', 'B-&gt;C avg', 'B-&gt;C expected', 'Status'], rows))
+           + sec('Per client NIC', ['Client', 'NIC', 'IP', 'Line (G)', 'C-&gt;B avg', 'C-&gt;B expected', 'B-&gt;C avg', 'B-&gt;C expected',
+                                       'Retr<small>TCP retransmits, its runs to the backends</small>', 'Status'], rows))
     if tot:
         out += sec('All clients at once', ['Phase', 'Direction', 'Runs', 'Total Gbps', 'Expected', 'Of expected', 'Status'], tot)
     if und:
@@ -2023,6 +2033,7 @@ def _clients(data, read_file):
                 g, e = sum(f['gbps'] for f in use) / len(use), sum(f['expected'] for f in use) / len(use)
                 n['dirs'][d] = {'avg': g, 'exp': e, 'n': len(use), 'status': judge(g, e),
                                 'phases': '/'.join(sorted({f['phase'] for f in use}))}
+        n['retr'] = sum(f.get('retransmits', 0) for f in flows if f['client_ip'] == n['ip'] and f['dir'] == 'C->B')   # the sender counts them
         st = [v['status'] for v in n['dirs'].values()]
         n['status'] = (max(st, key=rank.get) if st else 'no result' if n['state'] == 'ok' else n['state'].replace('_', ' '))
         n['avg'] = sum(v['avg'] for v in n['dirs'].values()) / len(n['dirs']) if n['dirs'] else 0
@@ -2219,6 +2230,8 @@ def parse_tar_archive(filepath):
     # host-side receive table (collector host_rx.txt; absent before system info capture)
     rx = [l.split() for l in read_file('host_rx.txt').splitlines() if l.strip()]
     data['host_rx'] = {'head': rx[0], 'rows': rx[1:]} if rx else None
+    crx = [l.split() for l in read_file('client_rx.txt').splitlines() if l.strip()]
+    data['client_rx'] = {'head': crx[0], 'rows': crx[1:]} if crx else None
     data['_nic_diag_lines'] = read_file('nic_diagnostics.txt').splitlines()   # for --compare
     # NIC diagnostics
     optics_by_key = {}  # (host, nic) -> optics entry, for dedup with raw fallback
