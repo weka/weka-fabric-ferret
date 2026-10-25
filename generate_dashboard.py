@@ -55,23 +55,12 @@ def generate_html(data, output_path):
     def tpath(r, k):
         return min(tip(r['src'], k), tip(r['dst'], k))
     rails = data.get('rails', ['A', 'B'])
-    badge_tiers = {r: {k: rt.get(r, data['tiers'])[k] for k in ('G', 'F', 'S')} for r in rails}
-    badge_tiers['X'] = {k: min(badge_tiers[r][k] for r in rails) for k in ('G', 'F', 'S')}
     rr = data.get('rail_rate', {})
     rail_note = (f" | rails differ: {', '.join(f'{r} {rr[r]}G' for r in rails)} (tables judge each IP by its rail; charts use {L}G)"
                  if len(set(rr.values())) > 1 else '')
     # run endpoints: A/B on a two-rail page as before; with 1 or 3+ rails those letters would read as rails
     ep = (('Host A', 'IP A', 'Dev A', 'Host B', 'IP B', 'Dev B') if rails == ['A', 'B'] else
           ('Sender', 'Sender IP', 'Sender dev', 'Receiver', 'Receiver IP', 'Receiver dev'))
-    # per-host table head, built once for the static page and the JS that redraws it; Cross only with 2+ rails
-    xab = '&lt;-&gt;'.join(rails)
-    host_head = ('<th>#</th><th>Host</th><th>Status<small>worst of ' + ', '.join(rails + ['Cross'] * (len(rails) > 1))
-                 + ' (means)</small></th><th>Gbps<small>'
-                 + (f"avg of NIC {', '.join(rails[:-1])} &amp; {rails[-1]} medians" if len(rails) > 1 else f'NIC {rails[0]} median')
-                 + '</small></th><th>Retrans<small>total TCP retransmits</small></th>'
-                 + ''.join(f'<th>IP {x}</th><th>Dev {x}</th><th>{x} Median<small>median Gbps across NIC {x} tests</small></th>'
-                           f'<th>{x} Retrans<small>total retransmits, NIC {x}</small></th>' for x in rails)
-                 + (f'<th>Cross Median<small>median Gbps across {xab} tests (a path, not a NIC)</small></th>' if len(rails) > 1 else ''))
     at_l = f'{L}G' if not rail_note else 'rail speed'
     label = data['metadata'].get('label', 'Fabric')
     speeds = sorted([r['gbps'] for r in results]) if results else []
@@ -116,6 +105,20 @@ def generate_html(data, output_path):
 
     # Bottom 50 results
     bottom_50 = sorted(results, key=lambda r: r['gbps'] / (tpath(r, 'F') or 1))[:50]
+
+    # one row per data NIC, backends and clients (the default view of the results tab)
+    nic_rows, nic_cols = _nic_rows(data, ip_to_host, ip_to_nic)
+    col_head = {'S': 'Same<small>backend to backend, its rail (mean Gbps)</small>',
+                'X': 'Cross<small>rail to rail runs (a path, judged at the slower rail)</small>',
+                'CO': 'CB_Out<small>client&lt;-&gt;backend runs this NIC sent</small>',
+                'CI': 'CB_In<small>client&lt;-&gt;backend runs this NIC received</small>',
+                'FO': 'All_Out<small>all-at-once runs this NIC sent</small>', 'FI': 'All_In<small>all-at-once runs this NIC received</small>'}
+    nic_head = ('<th>#</th><th>Host</th><th>Status<small>worst column, each its mean share of expected</small></th>'
+                '<th>Role</th><th>NIC</th><th>IP</th>' + ''.join(f'<th>{col_head[k]}</th>' for k in nic_cols)
+                + f"<th>Retrans<small>TCP retransmits over the runs it sent (% of segments; (retr) above {data['metadata'].get('retr_pct') or 0.1}%)</small></th>"
+                '<th>Expect<small>lowest expected Gbps over its runs</small></th>')
+    nic_rows_json = json.dumps(nic_rows)
+    nic_cols_json = json.dumps(nic_cols)
 
     # All results for searchable table
     all_results_json = json.dumps(results)
@@ -803,7 +806,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         </div>
         <div class="card-body">
             <table class="table table-sm table-striped table-hover" id="allResultsTable">
-            <thead><tr>{host_head}</tr></thead>
+            <thead><tr>{nic_head}</tr></thead>
             <tbody></tbody></table>
         </div>
     </div>
@@ -944,77 +947,13 @@ $(document).ready(function() {{
     }}
     function gbpsBadge(v) {{ return v >= {G} ? 'badge-ok' : v >= {F} ? 'badge-func' : v >= {S} ? 'badge-slow' : 'badge-down'; }}
 
-    function median(arr) {{
-        var s = arr.slice().sort(function(a,b){{ return a-b; }});
-        var m = Math.floor(s.length/2);
-        return s.length % 2 ? s[m] : Math.round((s[m-1]+s[m])/2);
-    }}
-
-    // Pre-compute per-host summary: one row per host with median per NIC
-    // Rail per IP from rails.txt; archives without it (older collector) fall back to odd third octet = rail A
-    var ipRail = {json.dumps(data.get('ip_rail', {}))};
-    var rails = {json.dumps(rails)};
-    var clientIps = new Set({json.dumps(sorted(data.get('client_ips', [])))});
-    function railOf(ip) {{ if (ipRail[ip]) return ipRail[ip]; if (rails.length !== 2) return rails[0]; var parts = ip.split('.'); return parseInt(parts[2]) % 2 === 1 ? 'A' : 'B'; }}
-    // a cross-rail run measures a path, not either NIC: kept out of the per-rail medians, shown as its own column
-    function isCross(r) {{ return railOf(r.src) !== railOf(r.dst); }}
-    var railTiers = {json.dumps(badge_tiers)};
-    function railBadge(v, rl) {{ var t = railTiers[rl]; return v >= t.G ? 'badge-ok' : v >= t.F ? 'badge-func' : v >= t.S ? 'badge-slow' : 'badge-down'; }}
-    var downIps = new Set({json.dumps(data['down_ips'])});
-
-    // Build per-host data: map all known IPs (from LLDP/driver) to hosts, include down NICs as 0; clients have their own card
-    var perHost = {{}};
-    function newHost(h) {{ var o = {{ host: h, r: {{}}, xGbps: [], xRetr: 0, xGB: 0 }}; rails.forEach(function(x) {{ o.r[x] = {{ ip: '', g: [], retr: 0, gb: 0 }}; }}); return o; }}
-    // First, seed every host's NIC IPs from the ip->host map
-    Object.keys(ipHost).forEach(function(ip) {{
-        if (clientIps.has(ip)) return;
-        var h = ipHost[ip];
-        if (!perHost[h]) perHost[h] = newHost(h);
-        if (perHost[h].r[railOf(ip)]) perHost[h].r[railOf(ip)].ip = ip;
-    }});
-    // Then attribute test results to hosts
-    allData.forEach(function(r) {{
-        var retr = r.retransmits || 0;
-        var gb = r.gbytes || 0;
-        var x = isCross(r);
-        [r.src, r.dst].forEach(function(ip) {{
-            var h = ipHost[ip] || ip;
-            if (!perHost[h]) perHost[h] = newHost(h);
-            var n = perHost[h].r[railOf(ip)];
-            if (x) {{ perHost[h].xGbps.push(r.gbps); perHost[h].xRetr += retr; perHost[h].xGB += gb; }}
-            else if (n) {{ n.g.push(r.gbps); n.retr += retr; n.gb += gb; }}
-        }});
-    }});
-    // Status, as in the collector summary: the worst column, each its mean judged at its rail's cut-offs (Cross at
-    // the slowest rail's); (cross) = only Cross is that bad; (1rail) = a rail without same-rail runs ((no C) with 3+ rails).
-    function hostStatus(h) {{
-        function lv(arr, rl) {{ if (!arr.length) return -1; var m = arr.reduce(function(a, b) {{ return a + b; }}, 0) / arr.length, t = railTiers[rl]; return m >= t.F ? 0 : m >= t.S ? 1 : 2; }}
-        var lvs = rails.map(function(rl) {{ return lv(h.r[rl].g, rl); }});
-        var x = lv(h.xGbps, 'X'), ws = Math.max.apply(null, lvs), w = Math.max(ws, x);
-        if (w < 0) return '-';
-        var miss = rails.filter(function(rl, i) {{ return lvs[i] < 0; }});
-        return ['OK', 'SLOW', 'CRITICAL'][w] + (ws >= 0 && w > ws ? '(cross)' : '') + (!miss.length ? '' : rails.length === 2 ? '(1rail)' : '(no ' + miss.join(',') + ')');
-    }}
+    // One row per data NIC, backends and clients alike, computed in Python as in the collector summary
+    var nicRows = {nic_rows_json};
+    var nicCols = {nic_cols_json};
     function statusBadge(s) {{ return '<span class="badge ' + (s.indexOf('OK') === 0 ? 'badge-ok' : s.indexOf('SLOW') === 0 ? 'badge-slow' : s === '-' ? '' : 'badge-down') + '">' + s + '</span>'; }}
-    var hostRows = [];
-    Object.values(perHost).forEach(function(h) {{
-        var nics = rails.map(function(rl) {{
-            var n = h.r[rl], down = !!(n.ip && downIps.has(n.ip));
-            return {{ rl: rl, ip: n.ip || '-', name: ipNic[n.ip] || 'NIC ' + rl, down: down, med: down ? 0 : (n.g.length ? median(n.g) : 0), retr: n.retr, gb: n.gb }};
-        }});
-        var downs = nics.filter(function(n) {{ return n.down; }});
-        var nicDown = downs.map(function(n) {{ return n.name; }}).join(' & ');
-        var gbps = downs.length ? null : Math.round(nics.reduce(function(a, n) {{ return a + n.med; }}, 0) / nics.length);
-        var totalRetr = nics.reduce(function(a, n) {{ return a + n.retr; }}, 0) + h.xRetr;
-        var totalGB = nics.reduce(function(a, n) {{ return a + n.gb; }}, 0) + h.xGB;
-        var xMed = h.xGbps.length ? median(h.xGbps) : null;
-        hostRows.push({{ host: h.host, status: hostStatus(h), gbps: gbps, nicDown: nicDown, nics: nics, xMed: xMed, totalRetr: totalRetr, totalGB: totalGB }});
-    }});
+    function colCell(v) {{ if (!v) return '-'; return v.lv === null ? String(v.g) : '<span class="badge ' + ['badge-ok', 'badge-slow', 'badge-down'][v.lv] + '">' + v.g + '</span>'; }}
+    function nicLow(r) {{ var m = null; nicCols.forEach(function(k) {{ var v = r.cols[k]; if (v && (m === null || v.g < m)) m = v.g; }}); return m; }}
 
-    function nicBadge(val, isDown, rl) {{
-        if (isDown) return '<span class="badge badge-down">DOWN</span>';
-        return '<span class="badge ' + railBadge(val, rl) + '">' + val + '</span>';
-    }}
     // Format retransmits with % of estimated total segments (GBytes * 1e9 / 1448 MSS)
     function retrFmt(retr, gb) {{
         if (retr === 0) return '0';
@@ -1125,27 +1064,19 @@ $(document).ready(function() {{
             $('#allResultsTable tbody').html(tbody);
             rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [[7, 'asc']] }}));
         }} else {{
-            var total = hostRows.length;
-            hostRows.forEach(function(r) {{
+            var total = nicRows.length;
+            nicRows.forEach(function(r) {{
                 if (rawExcludedHosts.has(r.host)) return;
-                if (rawLastThreshold > 0 && (r.gbps === null || r.gbps < rawLastThreshold)) return;
-                tbody += '<tr><td></td><td>' + r.host + '</td><td>' + statusBadge(r.status) + '</td>';
-                if (r.gbps === null) {{
-                    tbody += '<td><span class="badge badge-down">NA</span> <small style="color:#e94560;">' + r.nicDown + ' down</small></td>';
-                }} else {{
-                    tbody += '<td><span class="badge ' + gbpsBadge(r.gbps) + '">' + r.gbps + '</span></td>';
-                }}
-                tbody += '<td>' + retrFmt(r.totalRetr, r.totalGB) + '</td>';
-                r.nics.forEach(function(n) {{
-                    tbody += '<td>' + n.ip + '</td><td>' + n.name + '</td><td>' + nicBadge(n.med, n.down, n.rl) + '</td><td>' + retrFmt(n.retr, n.gb) + '</td>';
-                }});
-                if (rails.length > 1) tbody += '<td>' + (r.xMed === null ? '-' : nicBadge(r.xMed, false, 'X')) + '</td>';
-                tbody += '</tr>';
+                var low = nicLow(r);
+                if (rawLastThreshold > 0 && (low === null || low < rawLastThreshold)) return;
+                tbody += '<tr><td></td><td>' + r.host + '</td><td>' + statusBadge(r.status) + '</td><td>' + r.role + '</td><td>' + r.nic + '</td><td>' + r.ip + '</td>';
+                nicCols.forEach(function(k) {{ tbody += '<td>' + colCell(r.cols[k]) + '</td>'; }});
+                tbody += '<td>' + (r.retr === 0 ? '0' : '<span class="badge badge-down">' + r.retr.toLocaleString() + '</span>' + (r.retr_pct === null ? '' : ' <small style="color:#8899aa;">(' + r.retr_pct + '%)</small>')) + '</td><td>' + (r.expect === null ? '-' : r.expect) + '</td></tr>';
                 shown++;
             }});
-            $('#allResultsTable thead tr').html({json.dumps(host_head)});
+            $('#allResultsTable thead tr').html({json.dumps(nic_head)});
             $('#allResultsTable tbody').html(tbody);
-            rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [[3, 'asc']] }}));
+            rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [] }}));
         }}
         document.getElementById('rawFilterCount').textContent =
             (rawExcludedHosts.size > 0 ? rawExcludedHosts.size + ' excluded, ' : '') +
@@ -1994,13 +1925,86 @@ def _iperf_row(line):
     unit_scale = {'': 1e-9, 'K': 1e-6, 'M': 1e-3, 'G': 1, 'T': 1024, 'P': 1048576}
     gbytes = int(round(bval * unit_scale.get(bunit, 1)))
     r = {'src': m.group(1), 'dst': m.group(2),
-         'gbytes': gbytes, 'gbps': round(float(m.group(5)), 1),
+         'gbytes': gbytes, 'bytes': bval * 1024 ** ' KMGTP'.index(bunit or ' '),   # iperf3 byte units are 1024-based, as the collector reads them
+         'gbps': round(float(m.group(5)), 1),
          'retransmits': int(m.group(6)) if m.group(6) else 0,
          'cpu': m.group(7) or ''}   # sender/receiver iperf3 CPU %, absent before -V
     sh = re.search(r'\sshare:(\d+)', line)   # client runs: flows on that backend NIC at once
     if sh:
         r['share'] = int(sh.group(1))
     return r
+
+
+def _nic_rows(data, ip_to_host, ip_to_nic):
+    """One row per data NIC, backends and clients alike (Frank 10-25), as the collector summary: columns S (backend
+    to backend, same rail), X (rail to rail), CO/CI (client<->backend waves, this NIC sending/receiving), FO/FI (all
+    at once); each run judged at its expected rate, Status the worst column, (cross) when only X is that bad."""
+    meta = data['metadata']
+    ok, slow = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
+    ipr, rr, L = data.get('ip_rail', {}), data.get('rail_rate', {}), data['line_rate']
+    cl = data.get('clients') or {}
+    rows = {}
+    def row(key, role, host, nic, mtu, state, rail='-'):
+        rows.setdefault(key, {'ip': key if not key.startswith('none_') else '-', 'role': role, 'host': host, 'nic': nic, 'rail': rail, 'c': {},
+                              'retr': 0, 'gb': 0, 'bytes': 0, 'exp': None, 'mtu': _int(mtu) or 1500, 'state': state or 'ok'})
+    # every expected data NIC (rails.txt, clients.txt), an unusable one too; older archives: the IPs seen
+    for host, x, nic, ip, mtu, state in data.get('backend_nics', []):
+        row(ip if ip != 'none' else f'none_{host}_{x}', 'backend', host, nic, mtu, state, x)
+    for ip in ipr:
+        if ip != 'none':
+            row(ip, 'backend', ip_to_host.get(ip, ip), ip_to_nic.get(ip, ''), 0, 'ok', ipr[ip])
+    for n in cl.get('nics', []):
+        row(n['ip'] if n['ip'] != 'none' else f"none_{n['host']}_{n['nic']}", 'client', n['host'], n['nic'], n.get('mtu'), n.get('state'))
+    rl = float(meta.get('retr_pct') or 0.1)
+    def add(ip, col, g, ex):
+        if ip not in rows:
+            return
+        r = rows[ip]; c = r['c'].setdefault(col, [0.0, 0, 0.0, 0])
+        c[0] += g; c[1] += 1
+        if ex > 0:
+            c[2] += 100 * g / ex; c[3] += 1; r['exp'] = ex if r['exp'] is None else min(r['exp'], ex)
+    def sent(x):
+        if x['src'] in rows:
+            r = rows[x['src']]; r['retr'] += x.get('retransmits', 0); r['gb'] += x.get('gbytes', 0); r['bytes'] += x.get('bytes', 0)
+    for x in data['iperf_results']:
+        sent(x)
+        a, b = rr.get(ipr.get(x['src'])) or L, rr.get(ipr.get(x['dst'])) or L
+        same = ipr.get(x['src']) == ipr.get(x['dst'])
+        for ip in (x['src'], x['dst']):
+            add(ip, 'S' if same else 'X', x['gbps'], a if same else min(a, b))
+    for f in cl.get('flows', []):
+        sent(f)
+        p = 'F' if f['phase'].startswith('F') else 'C'
+        add(f['src'], p + 'O', f['gbps'], f['expected']); add(f['dst'], p + 'I', f['gbps'], f['expected'])
+    cols = ['S', 'X'] + (['CO', 'CI', 'FO', 'FI'] if cl else [])
+    down = set(data.get('down_ips', []))
+    out = []
+    for r in rows.values():
+        vals, w, wn, lo = {}, -1, -1, None
+        for k in cols:
+            c = r['c'].get(k)
+            if not c:
+                vals[k] = None
+                continue
+            lv = None
+            if c[3]:
+                p = c[2] / c[3]; lv = 0 if p >= ok else 1 if p >= slow else 2
+                lo = p if lo is None else min(lo, p); w = max(w, lv)
+                if k != 'X':
+                    wn = max(wn, lv)
+            vals[k] = {'g': round(c[0] / c[1], 1), 'lv': lv}
+        ran = any(vals.values())
+        segs = r['bytes'] / (r['mtu'] - 52 if r['mtu'] > 52 else 1448)   # as the collector: bytes sent / MSS
+        rp = 100 * r['retr'] / segs if segs else None
+        st = (('DOWN' if r['ip'] in down else r['state'].replace('_', ' ') if r['state'] != 'ok' else 'no result') if not ran
+              else ('-' if w < 0 else ['OK', 'SLOW', 'CRITICAL'][w] + ('(cross)' if wn >= 0 and w > wn else ''))
+              + ('(retr)' if rp is not None and rp > rl else ''))
+        out.append({'ip': r['ip'], 'role': r['role'], 'host': r['host'], 'nic': r['nic'], 'rail': r['rail'], 'cols': vals, 'retr': r['retr'],
+                    'gb': r['gb'], 'retr_pct': round(rp, 3) if rp is not None else None,
+                    'expect': round(r['exp'], 1) if r['exp'] else None, 'status': st,
+                    'rank': 7 if not ran else -1 if w < 0 else 2 * w + (rp is not None and rp > rl), 'lo': lo or 0})
+    out.sort(key=lambda r: (-r['rank'], r['lo'], r['host'], r['nic']))
+    return out, cols
 
 
 def _clients(data, read_file):
@@ -2112,6 +2116,10 @@ def parse_tar_archive(filepath):
         rails = [chr(65 + i) for i in range(min(26, _int(data['metadata'].get('rail_count')) or 2))]
     data['rails'] = rails
     rail_rows = [l.split() for l in rails_lines[1:] if len(l.split()) >= len(rhead)]
+    # every backend data NIC, an unusable one too: (host, rail, nic, ip, mtu, state) for the per data NIC view
+    data['backend_nics'] = [(p[0], x, p[rcol[f'Rail_{x}_NIC']], p[rcol[f'Rail_{x}_IP']], p[rcol.get(f'MTU_{x}', -1)] if f'MTU_{x}' in rcol else '-',
+                             p[rcol[f'State_{x}']] if f'State_{x}' in rcol else 'ok')
+                            for p in rail_rows for x in rails if f'Rail_{x}_NIC' in rcol and f'Rail_{x}_IP' in rcol]
 
     # Clients (clients=1 only): one clients.txt row per client data NIC, read by header
     data['clients'], data['client_ips'] = None, set()

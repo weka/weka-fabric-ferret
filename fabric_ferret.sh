@@ -95,6 +95,8 @@ Optional (default)
                    NIC speed for all, so a rail that came up slow everywhere shows as slow
   FF_OK_PCT        OK at or above this % of link speed (75)
   FF_SLOW_PCT      SLOW at or above this %, CRITICAL below (50)
+  FF_RETR_PCT      a data NIC whose TCP retransmits exceed this % of the segments it sent gets (retr) on its
+                   Status; throughput still decides OK/SLOW/CRITICAL (0.1)
                    Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
                    way per pair between two rails (with more than two rails, the rail pair rotates each
                    pairing cycle). Host Status = the worst of its rail columns and Cross;
@@ -1735,6 +1737,43 @@ clients_iter() {
     return 0
 }
 
+# NIC_SUM_AWK: one row per data NIC, backends and clients alike (Frank 10-25). Columns: Same (backend to backend,
+# same rail), Cross (rail to rail), CB_Out / CB_In (client<->backend waves, this NIC sending / receiving), All_Out /
+# All_In (the all-at-once phase). Each run is judged at its expected rate: its rail's line (Cross: the slower rail's),
+# a client run min(client line, backend rail line / flows sharing that backend NIC). Status: each column's average
+# share of expected, worst; (cross) = only Cross is that bad. Retr: TCP retransmits over the runs this NIC sent;
+# Retr_%: of the segments it sent (bytes / (MTU - 52)); (retr) when above rl (FF_RETR_PCT). A NIC with no runs shows
+# its rail state (no address, link down) or no_result. Files: data NIC map (key role host nic rail line_gbps mtu
+# state; key = ip, or none_<host>_<rail> without one), backend results, client results. Prints a sort key first.
+NIC_SUM_AWK='
+BEGIN { n = split(lines, q, " "); for (i = 1; i <= n; i++) { split(q[i], kv, "="); L[kv[1]] = kv[2] + 0 }; N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL"; nc = split(cl > 0 ? "S X CO CI FO FI" : "S X", C, " ") }   # no clients: no client columns
+FNR == 1 { f++ }
+f == 1 { ro[$1] = $2; ho[$1] = $3; ni[$1] = $4; ra[$1] = $5; ln[$1] = $6 + 0; mtu[$1] = $7 + 0; stt[$1] = $8; ips[++ni_n] = $1; next }
+/^### / { ph = ""; for (i = 2; i <= NF; i++) if ($i ~ /^phase:/) ph = substr($i, 7); next }
+{ s = $1; d = $2; g = -1; sh = 1; rx = 0; bv = 0
+  for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1) + 0; if ($i ~ /^share:/) sh = substr($i, 7) + 0; if ($i ~ /^retransmits:/) rx = substr($i, 13) + 0
+                              if ($i ~ /^[KMGT]?Bytes$/ && !bv) bv = $(i-1) * (substr($i, 1, 1) == "K" ? 1024 : substr($i, 1, 1) == "M" ? 1048576 : substr($i, 1, 1) == "G" ? 1073741824 : substr($i, 1, 1) == "T" ? 1099511627776 : 1) }
+  if (g < 0 || !(s in ro) || !(d in ro)) next
+  rt[s] += rx; by[s] += bv
+  if (f == 2) { if (ra[s] == ra[d]) { ex = L[ra[s]]; add(s, "S", g, ex); add(d, "S", g, ex) }
+                else { ex = L[ra[s]]; if (L[ra[d]] < ex) ex = L[ra[d]]; add(s, "X", g, ex); add(d, "X", g, ex) }; next }
+  c = (ro[s] == "client") ? s : d; b = (c == s) ? d : s
+  ex = L[ra[b]] > 0 ? L[ra[b]] / (sh > 0 ? sh : 1) : 0; if (ln[c] > 0 && (ex == 0 || ln[c] < ex)) ex = ln[c]
+  p = (ph ~ /^F/) ? "F" : "C"; add(s, p "O", g, ex); add(d, p "I", g, ex) }
+function add(ip, col, g, ex) { sum[ip, col] += g; cnt[ip, col]++; if (ex > 0) { pct[ip, col] += 100 * g / ex; pc[ip, col]++; if (!((ip) in mx) || ex < mx[ip]) mx[ip] = ex } }
+END {
+    print "0 0 Role Host NIC IP Same Cross" (cl > 0 ? " CB_Out CB_In All_Out All_In" : "") " Retr Retr_% Expect Status"
+    for (k = 1; k <= ni_n; k++) { ip = ips[k]; w = -1; wn = -1; lo = 1e9; o = ""; any = 0
+        for (j = 1; j <= nc; j++) { col = C[j]
+            if (!cnt[ip, col]) { o = o " -"; continue }
+            any = 1; o = o sprintf(" %.1f", sum[ip, col] / cnt[ip, col])
+            if (pc[ip, col]) { pv = pct[ip, col] / pc[ip, col]; if (pv < lo) lo = pv; lv = pv >= ok ? 0 : (pv >= slow ? 1 : 2)
+                               if (lv > w) w = lv; if (col != "X" && lv > wn) wn = lv } }
+        sg = by[ip] / (mtu[ip] > 52 ? mtu[ip] - 52 : 1448); rp = sg > 0 ? 100 * rt[ip] / sg : 0
+        st = !any ? (stt[ip] != "" && stt[ip] != "ok" ? stt[ip] : "no_result") : (w < 0 ? "-" : N[w] (wn >= 0 && w > wn ? "(cross)" : "")) (any && rp > rl ? "(retr)" : "")
+        printf "%d %.1f %s %s %s %s%s %d %s %s %s\n", (!any ? 7 : (w < 0 ? -1 : 2 * w + (rp > rl))), (lo < 1e9 ? lo : 0), ro[ip], ho[ip], ni[ip], (ip ~ /^none_/ ? "-" : ip), o, rt[ip],
+               (sg > 0 ? sprintf("%.3f", rp) : "-"), (ip in mx ? sprintf("%g", mx[ip]) : "-"), st } }'
+
 # client_summary: per client data NIC, its runs each way judged at min(client line, backend rail line / share)
 # Files: client map (ip host nic line_gbps), rail map (ip host rail), client results.
 CLIENT_SUM_AWK='
@@ -1844,7 +1883,7 @@ cleanup() {
 
 # Every FF_* setting this tool reads. Any other FF_* in the environment is a typo that would be silently
 # ignored (a dropped letter, say), so it stops the run. A regress test keeps the list complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 
 # edit_distance a b: Levenshtein distance, for the "did you mean" hint
 edit_distance() {
@@ -1885,7 +1924,8 @@ main() {
 
     : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=root}"
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
-    : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}"
+    : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}" "${FF_RETR_PCT:=0.1}"
+    [[ $FF_RETR_PCT =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "FF_RETR_PCT must be a number (% of TCP segments sent), got '$FF_RETR_PCT'"
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
@@ -2511,38 +2551,23 @@ main() {
         echo " $LABEL DATA PLANE VALIDATION SUMMARY: $(date)"
         echo "=================================================================="
         local map=$WORK/ipmap
+        # data NIC map: ip role host nic rail line_gbps (clients: FF_CLIENT_GBPS, else the NIC's own speed, 0 = unknown)
+        if (( ${#CLI[@]} )); then
+            awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, $1, $3, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' \
+                "$COLLECT_DIR/clients.txt" > "$WORK/cmap"
+        else : > "$WORK/cmap"; fi
+        # every expected data NIC gets a row, an unusable one too (no address, link down): key ip line_gbps mtu state
+        local k r; : > "$WORK/cres0"
+        { for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+              echo "$( [[ ${RIP[$k,$r]} == none ]] && echo "none_${T_HOST[$k]}_$(rail_letter $r)" || echo "${RIP[$k,$r]}") backend ${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r) ${LINE[r]:-0} ${RMTU[$k,$r]:-1500} ${RSTATE[$k,$r]// /_}"; done; done
+          (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 {s = $7; sub(/Mb\/s/, "", s)
+              print ($4 == "none" ? "none_" $1 "_" $3 : $4), "client", $1, $3, "-", (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0)), ($5 ~ /^[0-9]+$/ ? $5 : 1500), $6}' "$COLLECT_DIR/clients.txt"; } > "$WORK/dnmap"
+        if grep -q 'Gbits/sec' "$RESULTS" || { (( ${#CLI[@]} )) && grep -q 'Gbits/sec' "$CRESULTS"; }; then
+            echo "Throughput per data NIC, backends and clients, worst first (Gbps; Same: backend to backend on its rail$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate")$( (( ${#CLI[@]} )) && echo "; CB_Out / CB_In: client<->backend runs this NIC sent / received; All_: the all-at-once phase"); Expect: the lowest expected rate over its runs; Status: each column's average share of its expected rate, worst, (retr) when Retr_% is above $FF_RETR_PCT (FF_RETR_PCT); Retr: TCP retransmits over the runs it sent, Retr_% of the segments it sent; a NIC with no runs shows its rail state):"
+            awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" -v rl="$FF_RETR_PCT" -v cl=${#CLI[@]} "$NIC_SUM_AWK" "$WORK/dnmap" "$RESULTS" "$( (( ${#CLI[@]} )) && echo "$CRESULTS" || echo "$WORK/cres0")" \
+                | { read -r hdr; echo "$hdr"; sort -k1,1nr -k2,2n -k4,4V; } | cut -d' ' -f3- | column -t | sed 's/^/  /'
+        fi
         if grep -q 'Gbits/sec' "$RESULTS"; then
-            local cols; cols=$(for r in "${RAILS[@]}"; do printf '%sRail_%s' "$( (( r )) && echo /)" "$(rail_letter $r)"; done)
-            echo "Per-host throughput, worst first (Gbps; $cols: same-rail runs$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate"); Retr: TCP retransmits over the runs it sent):"
-            # A cross-rail run measures a path, not either rail (routes decide which NIC carries it), so it gets its own
-            # column. Status: the worst column, each its average judged at its own line rate (Cross: the slower rail's);
-            # (cross) = only Cross is that bad, the same-rail paths were better.
-            grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" '
-                BEGIN { nr = split(lines, q, " "); lx = 0; zero = 0
-                        for (i = 1; i <= nr; i++) { split(q[i], kv, "="); R[i] = kv[1]; L[kv[1]] = kv[2] + 0
-                                                    if (i == 1 || kv[2] + 0 < lx) lx = kv[2] + 0; if (kv[2] + 0 == 0) zero = 1 }
-                        L["X"] = lx; nc = nr + (nr > 1); if (nr > 1) R[nc] = "X" }
-                NR==FNR { host[$1]=$2; rail[$1]=$3; next }
-                { for (i = 1; i <= NF; i++) if ($i == "Gbits/sec") { s = $(i-1) + 0; break }
-                  for (i = 1; i <= NF; i++) if ($i ~ /^retransmits:/) rt[host[$1]] += substr($i, 13) + 0
-                  for (j = 1; j <= 2; j++) { ip = $j; r = rail[$1] == rail[$2] ? rail[ip] : "X"
-                                             sum[host[ip], r] += s; cnt[host[ip], r]++; seen[host[ip]] = 1 } }
-                END {
-                    N[0] = "OK"; N[1] = "SLOW"; N[2] = "CRITICAL"
-                    hd = "Host Avg_Gbps"; for (c = 1; c <= nr; c++) hd = hd " Rail_" R[c]; if (nr > 1) hd = hd " Cross"; print hd " Retr Status"
-                    for (h in seen) {
-                        t = 0; m = 0; w = 0; ws = -1; o = ""; miss = ""
-                        for (c = 1; c <= nc; c++) { r = R[c]; v[r] = cnt[h,r] ? sum[h,r] / cnt[h,r] : -1
-                            if (v[r] >= 0) { t += v[r]; m++; g = L[r] ? 100 * v[r] / L[r] : 0; lv = g >= ok ? 0 : (g >= slow ? 1 : 2)
-                                             if (lv > w) w = lv; if (r != "X" && lv > ws) ws = lv }
-                            else if (r != "X") miss = miss r
-                            o = o " " (v[r] < 0 ? "-" : sprintf("%.1f", v[r])) }
-                        avg = t / m
-                        st = zero ? "-" : N[w] (ws >= 0 && w > ws ? "(cross)" : "")
-                        if (miss != "" && nr == 2) st = st "(1rail)"; else if (miss != "") st = st "(no " miss ")"
-                        printf "%s %.1f%s %d %s\n", h, avg, o, rt[h], st
-                    }
-                }' "$map" - | { read -r hdr; echo "$hdr"; sort -k2 -n; } | column -t | sed 's/^/  /'
             cross_summary "$map" "$RESULTS"
             uplink_summary "$map" "$LLDP_DATA" "$NIC_DIAG" "$RESULTS"
         else
@@ -2585,14 +2610,10 @@ main() {
         fi
         if (( ${#CLI[@]} )); then
             echo ""
-            # client map: ip host nic line_gbps (FF_CLIENT_GBPS, else the NIC's own speed, 0 = unknown)
-            awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, $1, $3, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' \
-                "$COLLECT_DIR/clients.txt" > "$WORK/cmap"
             cat "$WORK/ipmap" > "$WORK/cipmap"; awk '{print $1, $2, "client"}' "$WORK/cmap" >> "$WORK/cipmap"
             if grep -q 'Gbits/sec' "$CRESULTS"; then
-                echo "Clients, per data NIC (Gbps; C->B: client to backend, B->C: backend to client, All_: the all-at-once phase; Expect: the lowest of min(client line, backend rail line / flows sharing that backend NIC) over its runs; Status: each direction's average share of its expected rate, worst; Retr: TCP retransmits over the runs it sent):"
+                echo "Clients (per client NIC rows are in the per data NIC table above):"
                 awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$CLIENT_SUM_AWK" "$WORK/cmap" "$WORK/ipmap" "$CRESULTS" > "$WORK/csum"
-                grep -v '^#TOTAL' "$WORK/csum" | { read -r hdr; echo "$hdr"; sort -V; } | column -t | sed 's/^/  /'
                 awk 'function bw(g) { return g >= 1000 ? sprintf("%.2f Tbps", g / 1000) : sprintf("%.1f Gbps", g) }
                      $1 == "#TOTAL" {printf "  All at once, %s: %s flows, %s in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, bw($4), ($6 > 1 ? sprintf(" on average over %d iterations (lowest %s)", $6, bw($5)) : "")}' "$WORK/csum"
                 # client leaves: the client runs against each leaf's side
@@ -2679,6 +2700,7 @@ main() {
         fi
         echo "ok_pct=$FF_OK_PCT"
         echo "slow_pct=$FF_SLOW_PCT"
+        echo "retr_pct=$FF_RETR_PCT"
         echo "spines=${FF_SPINES:-none}"
         echo "spine_links=${FF_SPINE_LINKS:-none}"
         echo "spine_gbps=${FF_SPINE_GBPS:-none}"
