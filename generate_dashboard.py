@@ -1934,7 +1934,7 @@ def _clients_html(data):
 def _uplinks_html(u):
     if not u:
         return ''
-    t = lambda g: f'{g / 1000:.2f} T'
+    t = lambda g: f'{g / 1000:.2f} T' if g >= 1000 else f'{g:.1f} G'
     rows = ''
     J = u['C'] or u.get('Cc')   # any leaf judged: Declared/Busiest/Oversubscribed/Verdict columns
     for r in u['rows']:

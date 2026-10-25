@@ -120,6 +120,11 @@ EOF
 
 die() { echo "ERROR: $*" >&2; echo "RESULT coverage=STOPPED ($*)" >&2; exit 2; }
 log() { echo "# $*" >&2; }
+# phase_start / phase_end name / phase_skip name: phase_times.txt rows "iter phase start end" (UTC), to line
+# the tool's counters up with switch and monitoring data
+phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); }
+phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }
+phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 
 # ---------- target expansion (pure bash, no ssh) ----------
 
@@ -1296,7 +1301,7 @@ UPLINK_AWK='
 function med(s,   n, v, i, j, t) { n = split(s, v, " "); if (!n) return -1
     for (i = 2; i <= n; i++) { t = v[i] + 0; for (j = i - 1; j >= 1 && v[j] + 0 > t; j--) v[j + 1] = v[j]; v[j + 1] = t }
     return n % 2 ? v[(n + 1) / 2] + 0 : (v[n / 2] + v[n / 2 + 1]) / 2 }
-function tb(g) { return sprintf("%.2f T", g / 1000) }
+function tb(g) { return g >= 1000 ? sprintf("%.2f T", g / 1000) : sprintf("%.1f G", g) }
 BEGIN { nr = split(lines, lq, " "); for (i = 1; i <= nr; i++) { split(lq[i], kv, "="); L[kv[1]] = kv[2] + 0; if (i == 1 || kv[2] + 0 < lx) lx = kv[2] + 0 } }
 FNR == 1 { f++ }
 f == 1 { rail[$1] = $3; if ($3 == "client") cl[$1] = 1; else nip++; next }
@@ -1377,13 +1382,15 @@ udp_phases() {
     collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"
     for u in 1 2; do
         PHASE=U$u; PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
-        if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; continue; fi
-        [[ $u == 1 ]] && log "Phase U1: UDP $(same_desc) at once (-b 0)" || log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0)"
+        if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; phase_skip U2; continue; fi
+        phase_start
+        [[ $u == 1 ]] && log "Phase U1: UDP $(same_desc) at once (-b 0), start $PT0" || log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0), start $PT0"
         echo "### iteration:${ITER} phase:${PHASE}" >> "$UDP_RESULTS"
         if [[ $u == 1 ]]; then
             for (( p = 0; p < ${#PC[@]}; p++ )); do p1_paths $p run udp; done
             wait
         else xwaves "$UDP_RESULTS" udp; fi
+        phase_end $PHASE
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local b=$WORK/udp.$u
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"
@@ -1510,15 +1517,16 @@ client_phase() {
     for (( t = 0; t < ${#TK[@]}; t++ )); do cl_check ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir; done
     wait
     CL_PLANNED=$(( CL_PLANNED + ${#TK[@]} ))
-    local bad; bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' ')
-    log "Client phase $P ($( [[ $dir == c2b ]] && echo "clients -> backends" || echo "backends -> clients")$( [[ $P == F? ]] && echo ", all at once")): ${#TK[@]} runs in $nw wave$( (( nw > 1 )) && echo s); path checks $(( ${#TK[@]} - bad )) OK, $bad excluded"
-    # runs no wave could take (no usable backend on their rail) are recorded once, as skips
-    for (( t = 0; t < ${#TK[@]}; t++ )); do (( TW[t] < 0 )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir 0 0 $P; done
     local pre=$WORK/cdrops_pre.$ITER.$P post=$WORK/cdrops_post.$ITER.$P
     if (( ! FF_SKIP_IPERF )); then   # the same reads as a backend phase: drops, host receive and priority counters
         collect_drops "$pre" "${ELIG[@]}" "${CLI[@]}"
         collect_counters "$HOSTCTR_SCRIPT" "$pre.hc"; collect_counters "$PRIO_SCRIPT" "$pre.prio"
     fi
+    phase_start
+    local bad; bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' ')
+    log "Client phase $P ($( [[ $dir == c2b ]] && echo "clients -> backends" || echo "backends -> clients")$( [[ $P == F? ]] && echo ", all at once")): ${#TK[@]} runs in $nw wave$( (( nw > 1 )) && echo s); path checks $(( ${#TK[@]} - bad )) OK, $bad excluded$( (( FF_SKIP_IPERF )) || echo "; start $PT0")"
+    # runs no wave could take (no usable backend on their rail) are recorded once, as skips
+    for (( t = 0; t < ${#TK[@]}; t++ )); do (( TW[t] < 0 )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir 0 0 $P; done
     for (( w = 0; w < nw; w++ )); do
         PHASE_OUT=$WORK/cphase.$ITER.$P.$w; : > "$PHASE_OUT"
         (( FF_SKIP_IPERF )) || echo "### client iteration:$ITER phase:$P$( (( nw > 1 )) && echo " wave:$(( w + 1 ))/$nw")" >> "$CRESULTS"
@@ -1531,6 +1539,7 @@ client_phase() {
         lock_all touch
     done
     (( FF_SKIP_IPERF )) && return 0
+    phase_end $P
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
     (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
@@ -1560,7 +1569,7 @@ clients_iter() {
     (( ${#CLI[@]} )) || return 0
     client_plan $ITER
     (( CL_K <= CL_K0 )) || log "WARNING: iteration $ITER plans $CL_K client flows on one backend NIC, more than the $CL_K0 servers started; the extra runs fail"
-    log "---- Clients, iteration $ITER: $( (( CL_WAVES )) && echo "$CL_NW waves each way, at most $CL_R client NIC$( (( CL_R > 1 )) && echo s) per backend NIC")$( (( CL_WAVES && CL_FULL )) && echo ", then ")$( (( CL_FULL )) && echo "all at once each way") ----"
+    log "---- Clients, iteration $ITER: $( (( CL_WAVES )) && echo "$CL_NW wave$( (( CL_NW > 1 )) && echo s) each way, at most $CL_R client NIC$( (( CL_R > 1 )) && echo s) per backend NIC")$( (( CL_WAVES && CL_FULL )) && echo ", then ")$( (( CL_FULL )) && echo "all at once each way") ----"
     (( CL_WAVES )) && { client_phase C1; client_phase C2; }
     (( CL_FULL )) && { client_phase F1; client_phase F2; }
     return 0
@@ -2174,6 +2183,7 @@ main() {
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
+    echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
     # rail IP -> host/rail, and host_nic -> host, for the summary and UDP loss placement
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
@@ -2241,15 +2251,17 @@ main() {
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
         if (( FF_SKIP_IPERF )); then
-            log "Observation window: ${FF_DURATION}s with no test load (FF_SKIP_IPERF=1); the counter changes below are the cluster's own traffic"
-            sleep "$FF_DURATION"
+            phase_start
+            log "Observation window: ${FF_DURATION}s with no test load (FF_SKIP_IPERF=1), start $PT0; the counter changes below are the cluster's own traffic"
+            sleep "$FF_DURATION"; phase_end obs
             collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.obs"; hostctr_delta "iter${ITER}_obs" "$hc_prev" "$WORK/hc.obs"
             hc_log "the observation window" "$WORK/hc.obs"
         else
             for PHASE in 1 2; do
                 PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
-                if [[ $PHASE == 2 && $CROSS != on ]]; then log "Phase 2: skipped (cross-rail $CROSS)"; continue; fi
-                [[ $PHASE == 1 ]] && log "Phase 1: $(same_desc) at once" || log "Phase 2: cross-rail, $(cross_desc) at once"
+                if [[ $PHASE == 2 && $CROSS != on ]]; then log "Phase 2: skipped (cross-rail $CROSS)"; phase_skip 2; continue; fi
+                phase_start
+                [[ $PHASE == 1 ]] && log "Phase 1: $(same_desc) at once, start $PT0" || log "Phase 2: cross-rail, $(cross_desc) at once, start $PT0"
                 if [[ $PHASE == 1 ]]; then
                     echo "### iteration:${ITER} phase:${PHASE}" >> "$RESULTS"
                     for (( p = 0; p < ${#PC[@]}; p++ )); do
@@ -2258,6 +2270,7 @@ main() {
                     wait
                     column -t < "$PHASE_OUT" | tee -a "$RESULTS"
                 else xwaves "$RESULTS"; fi
+                phase_end $PHASE
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
                 [[ $errs -gt 0 ]] && log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above)"
                 collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.$PHASE"; hostctr_delta "iter${ITER}_p$PHASE" "$hc_prev" "$WORK/hc.$PHASE"; hc_prev=$WORK/hc.$PHASE
@@ -2410,7 +2423,8 @@ main() {
                 echo "Clients, per data NIC (Gbps; C->B: client to backend, B->C: backend to client, All_: the all-at-once phase; Expect: the lowest of min(client line, backend rail line / flows sharing that backend NIC) over its runs; Status: each direction's average share of its expected rate, worst; Retr: TCP retransmits over the runs it sent):"
                 awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$CLIENT_SUM_AWK" "$WORK/cmap" "$WORK/ipmap" "$CRESULTS" > "$WORK/csum"
                 grep -v '^#TOTAL' "$WORK/csum" | { read -r hdr; echo "$hdr"; sort -V; } | column -t | sed 's/^/  /'
-                awk '$1 == "#TOTAL" {printf "  All at once, %s: %s flows, %.2f Tbps in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, $4 / 1000, ($6 > 1 ? sprintf(" on average over %d iterations (lowest %.2f Tbps)", $6, $5 / 1000) : "")}' "$WORK/csum"
+                awk 'function bw(g) { return g >= 1000 ? sprintf("%.2f Tbps", g / 1000) : sprintf("%.1f Gbps", g) }
+                     $1 == "#TOTAL" {printf "  All at once, %s: %s flows, %s in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, bw($4), ($6 > 1 ? sprintf(" on average over %d iterations (lowest %s)", $6, bw($5)) : "")}' "$WORK/csum"
                 # client leaves: the client runs against each leaf's side
                 uplink_summary client "$WORK/cipmap" "$LLDP_DATA" "$NIC_DIAG" "$CRESULTS"
             elif (( FF_SKIP_IPERF )); then
