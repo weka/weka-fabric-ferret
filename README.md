@@ -9,7 +9,9 @@ WEKA pre-install/offline (stopped I/O) data plane investigation and performance 
 - **Path checks:** route, ping and a full-MTU no-fragment ping on every planned path before any load.
 - **Fabric evidence:** LLDP neighbours (which leaf each NIC lands on), link speed, optics, FEC rate, priority and pause counters, NIC and kernel drops, link flaps, rail gateways, and NICs that are swapped between rails.
 - **Host side:** system info per host (OS, CPU, PCIe, NIC rings, IRQs and QoS, routes, sysctls, the kernel log over the run) and a receive-side table (drops, softnet, iperf3 CPU) with flags.
-- **Optional:** a UDP pass with loss split by where it happened, a ping mesh, leaf-spine uplink totals, and a run that skips the bandwidth tests and still does every other check.
+- **UDP pass:** after the TCP phases, the same backend and client runs over UDP at no rate cap, with loss split by where it happened (`FF_UDP=0` turns it off).
+- **Ping mesh:** before load, every backend rail IP from every other backend's and from every client data NIC (`FF_MESH=0` turns it off).
+- **Optional:** leaf-spine uplink totals, and a run that skips the bandwidth tests and still does every other check.
 
 ## Before you run it
 
@@ -103,15 +105,15 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | Setting (default) | Meaning |
 |---|---|
 | `FF_DURATION` (120) | iperf3 seconds per run; the first argument also sets it |
-| `FF_ITER` (5) | iterations. Pairing is round robin: no pair repeats, every host pair is tested after n-1 iterations (n if n is odd), and the next n-1 (n) swap client and server. `all` = two such cycles, 2(n-1) or 2n: every direction on every NIC pair, once each with one or two rails. With more rails each cross-rail phase uses one rail pair, and `all` repeats the two cycles once per rail pair, so every directed path runs and the same-rail ones run once per rail pair. With clients, `all` is at least enough iterations for every client NIC to reach every backend NIC |
+| `FF_ITER` (3) | iterations: passes of the full test set (every host and client NIC through every phase), to flush out noise and outliers. Each pass gets new partners. Pairing is round robin: no pair repeats, every host pair is tested after n-1 iterations (n if n is odd), and the next n-1 (n) swap client and server. `all` = two such cycles, 2(n-1) or 2n: every direction on every NIC pair, once each with one or two rails. With more rails each cross-rail phase uses one rail pair, and `all` repeats the two cycles once per rail pair, so every directed path runs and the same-rail ones run once per rail pair. With clients, `all` is at least enough iterations for every client NIC to reach every backend NIC |
 | `FF_STREAMS` (16) | iperf3 parallel streams, 2 or more |
 | `FF_TOS` (0) | IP TOS byte for the test traffic, 0-255 (iperf3 `-S`); e.g. 106 = DSCP 26 + ECT(0) |
 | `FF_CROSS_RAIL` (on) | `0` = the rails are separate fabrics by design: skip the cross-rail phase and leave it out of coverage. By default unrouted cross-rail paths count against coverage, since a missing inter-rail route can be the fault. With one rail there is no cross-rail phase (`cross_rail=single`) |
 | `FF_CROSS_MAX` (all at once) | run at most N cross-rail flows at once, in balanced waves, so a shared inter-rail path doesn't cap every flow |
 | `FF_SKIP_IPERF` | `1` = no iperf3 at all (see above). Path checks cover every planned path, and the counters cover one `FF_DURATION` window |
-| `FF_UDP` | `1` = after the TCP phases, run the same pairs with UDP at no rate cap (datagrams sized to the path MTU). Loss is split into receiver socket, NIC, kernel backlog and unaccounted (likely fabric) |
+| `FF_UDP` (`1`; `0` with `FF_SKIP_IPERF=1`) | `0` = off. `1` = after the TCP phases, run the same pairs, and the same client runs (phases UC1/UC2, UF1/UF2), with UDP at no rate cap (datagrams sized to the path MTU). Loss is split into receiver socket, NIC, kernel backlog and unaccounted (likely fabric) |
 | `FF_UDP_DURATION` (`FF_DURATION`) | seconds per UDP run |
-| `FF_MESH` | `1` = before load, ping every tested host's rail IPs from every other tested host (same rail and cross-rail) |
+| `FF_MESH` (`1`) | `0` = off. `1` = before load, ping every tested host's rail IPs from every other tested host (same rail and cross-rail), and every backend rail IP from every client data NIC (clients never ping each other) |
 
 ### Judging results
 

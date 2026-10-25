@@ -317,6 +317,8 @@ def generate_html(data, output_path):
                  'gateway_FAIL': 'Rail gateway not answering', 'gateway_MTU': 'Rail gateway answers small pings only',
                  'mesh_unreachable': 'Rail IP unreachable in the mesh',
                  'mesh_no_replies': 'Rail IP gets no replies in the mesh',
+                 'mesh_client_unreachable': 'Rail IP unreachable from clients in the mesh',
+                 'mesh_client_no_replies': 'Client IP gets no replies from the backends in the mesh',
                  'client_route_undeclared': 'Client reaches a backend by an undeclared NIC',
                  'shared_leaf': 'Leaf shared by clients and backends (judged as a backend leaf)',
                  'client_mtu_mismatch': 'Client MTU differs from the backends'}
@@ -324,7 +326,9 @@ def generate_html(data, output_path):
                        f"<td>{escape(a[2] if len(a) > 2 else '')}</td></tr>" for a in data.get('anomalies', []))
         bad = len(data.get('anomalies', []))
         mp = data['metadata'].get('mesh_pings')
-        mesh_txt = f" | mesh: {data['metadata'].get('mesh_failures', '?')} of {mp} pings failed" if mp else ''
+        cmp = data['metadata'].get('mesh_client_pings')
+        mesh_txt = (f" | mesh: {data['metadata'].get('mesh_failures', '?')} of {mp} pings failed"
+                    + (f" (from clients: {data['metadata'].get('mesh_client_failures', '?')} of {cmp})" if cmp and cmp != '0' else '')) if mp else ''
         preflight_html = f"""<div class="card mb-3"><div class="card-header">Preflight: rail layout and gateways |
 <b class="{'stat-bad' if bad else 'stat-good'}">{bad}</b> findings | gateways: {gw_ok} answered a full-MTU ping, {len(gw_bad)} failed, {gw_direct} rails on-link{mesh_txt}</div>
 <div class="card-body" style="max-height:300px; overflow-y:auto;">{'<p class="text-success mb-0">No rail swaps, cross-rail cabling, MTU differences or gateway failures found.</p>' if not bad else

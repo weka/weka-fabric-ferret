@@ -48,10 +48,11 @@ Clients (optional): tested against every backend rail, both ways
 
 Optional (default)
   FF_DURATION      iperf3 seconds per run (120; $1 also sets it)
-  FF_ITER          iterations, round-robin pairing: no pair repeats, every host pair
-                   is tested after n-1 iterations (n if n is odd); the next n-1 swap client
+  FF_ITER          passes of the full test set (every host and client NIC, every phase), to flush out
+                   noise and outliers; each pass gets new partners, round robin: no pair repeats, every
+                   host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
                    and server, so every direction on every NIC pair runs after 2(n-1).
-                   all = 2(n-1) (5)
+                   all = 2(n-1) (3)
   FF_STREAMS       iperf3 parallel streams, >=2 (16)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
@@ -59,16 +60,17 @@ Optional (default)
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
                    window of the cluster's own traffic. The busy check reports but doesn't stop the run.
-  FF_UDP=1         after the TCP phases, run the same pairs with UDP and no rate cap
+  FF_UDP (1)       after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
                    (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into
                    receiver socket, NIC, kernel backlog and unaccounted (likely fabric).
                    With FF_TOS the whole TOS byte, ECN bits included, is sent.
   FF_UDP_DURATION  seconds per UDP run (FF_DURATION)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
                    kill each other's iperf3 servers and both get garbage)
-  FF_MESH=1        before load, ping every tested host's rail IPs from every other one's (same rail and
-                   cross-rail; tested hosts only, so other clusters on shared subnets are never
-                   probed). Failures go to mesh_failures.txt and the Preflight card.
+  FF_MESH (1)      before load, ping every tested host's rail IPs from every other one's (same rail and
+                   cross-rail), and every backend rail IP from every client data NIC (clients never
+                   ping each other); tested hosts only, so other clusters on shared subnets are never
+                   probed. Failures go to mesh_failures.txt and the Preflight card. 0 = off.
   FF_CROSS_RAIL=0  the rails are separate fabrics by design: skip the cross-rail phase and leave it
                    out of the coverage count. Default: test it; unrouted cross-rail paths count
                    as skipped (PARTIAL), since missing inter-rail routes can be the fault. When every
@@ -856,7 +858,8 @@ lock_all() {  # touch | release on every tested host and client (only our own lo
     wait
 }
 
-# FF_MESH=1: every usable rail IP of each tested host pings every other tested host's usable rail IPs.
+# FF_MESH=1: every usable rail IP of each tested host pings every other tested host's usable rail IPs,
+# and every usable client data NIC IP pings every backend rail IP.
 mesh_check() {
     local k j r total=0 a b
     local -A host_of=()
@@ -876,29 +879,69 @@ mesh_check() {
             ( rbash "${T_TARGET[$k]}" "$a" "$b" "${dst[@]}" <<<"$MESH_SCRIPT" > "$WORK/mesh.$k.$q" 2>&1 ) &
         done
     done
+    # clients: every usable client data NIC pings every backend rail IP (clients never ping each other)
+    local ctotal=0; local -A chost_of=(); local -a bdst=("${!host_of[@]}")
+    for k in "${CLI[@]}"; do
+        local -a src=()
+        for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j && { src+=("${CIP[$k,$j]}"); chost_of[${CIP[$k,$j]}]=${T_HOST[$k]}; }; done
+        (( ${#src[@]} && ${#bdst[@]} )) || continue
+        ctotal=$(( ctotal + ${#src[@]} * ${#bdst[@]} ))
+        for (( q = 0; q < ${#src[@]}; q += 2 )); do
+            a=${src[q]}; b=${src[q+1]:-none}
+            throttle
+            ( rbash "${T_TARGET[$k]}" "$a" "$b" "${bdst[@]}" <<<"$MESH_SCRIPT" > "$WORK/cmesh.$k.$q" 2>&1 ) &
+        done
+    done
+    (( ${#CLI[@]} )) && log "Mesh: and the ${#chost_of[@]} client data NIC IPs ping every backend rail IP..."
     wait
     cat "$WORK"/mesh.* 2>&1 | awk '$1 == "MESHFAIL" {print $2, $3}' | while read -r s d; do
         echo "${host_of[$s]:-?} $s ${host_of[$d]:-?} $d"
-    done | sort -V > "$COLLECT_DIR/mesh_failures.txt"
-    local fails; fails=$(wc -l < "$COLLECT_DIR/mesh_failures.txt" | tr -d ' ')
-    log "Mesh: $total pings, $fails failed"
-    MESH_PINGS=$total; MESH_FAILS=$fails
+    done | sort -V > "$WORK/mesh_b"
+    : > "$WORK/mesh_c"
+    if (( ${#CLI[@]} )); then
+        cat "$WORK"/cmesh.* 2>&1 | awk '$1 == "MESHFAIL" {print $2, $3}' | while read -r s d; do
+            echo "${chost_of[$s]:-?} $s ${host_of[$d]:-?} $d client"
+        done | sort -V > "$WORK/mesh_c"
+    fi
+    cat "$WORK/mesh_b" "$WORK/mesh_c" > "$COLLECT_DIR/mesh_failures.txt"
+    local fails cfails; fails=$(wc -l < "$COLLECT_DIR/mesh_failures.txt" | tr -d ' '); cfails=$(wc -l < "$WORK/mesh_c" | tr -d ' ')
+    total=$(( total + ctotal ))
+    log "Mesh: $total pings, $fails failed$( (( ${#CLI[@]} )) && echo " (from clients: $cfails of $ctotal)")"
+    MESH_PINGS=$total; MESH_FAILS=$fails; MESH_CPINGS=$ctotal; MESH_CFAILS=$cfails
     (( fails )) || return 0
-    local ip; for ip in "${!host_of[@]}"; do echo "$ip ${host_of[$ip]}"; done > "$WORK/meship"
-    # A source whose pings fail to every peer gets no replies at all (its inbound ICMP or rail is
-    # blocked): report it once as the source and keep its failures out of the destination counts.
-    # Otherwise a destination failing from many sources points at that rail.
-    # Peers of an IP = every rail IP except its own host's; sources of a destination likewise,
-    # minus the silent sources on other hosts.
-    awk 'FNR == 1 {f++}
-         f == 1 {hof[$1] = $2; c[$2]++; all++; next}
-         {m++; s[m] = $2; d[m] = $4; fs[$2]++}
-         END {
-             for (x in fs) if (fs[x] >= all - c[hof[x]]) {dead[x] = 1; nd++; deadon[hof[x]]++}
-             for (x in dead) printf "%s mesh_no_replies rail IP %s got no reply from any of its %d peers (inbound ICMP blocked or rail down on that host)\n", hof[x], x, all - c[hof[x]]
-             for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
-             for (x in n) printf "%s mesh_unreachable rail IP %s did not answer %d of %d pinging rail IPs\n", hof[x], x, n[x], all - c[hof[x]] - (nd - deadon[hof[x]])
-         }' "$WORK/meship" "$COLLECT_DIR/mesh_failures.txt" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
+    : > "$WORK/mesh_anom"
+    if (( cfails )); then
+        # A client IP failing to every backend rail IP gets no replies at all; otherwise a backend rail IP
+        # failing from many client IPs points at that rail as clients reach it
+        local ip; for ip in "${!chost_of[@]}"; do echo "$ip ${chost_of[$ip]}"; done > "$WORK/cmeship"
+        awk -v nb=${#bdst[@]} 'FNR == 1 {f++}
+             f == 1 {hof[$1] = $2; nc++; next}
+             {m++; s[m] = $2; d[m] = $4; dh[$4] = $3; fs[$2]++}
+             END {
+                 for (x in fs) if (fs[x] >= nb) {dead[x] = 1; nd++}
+                 for (x in dead) printf "%s mesh_client_no_replies client IP %s got no reply from any of the %d backend rail IPs (inbound ICMP blocked, or no route to the rails)\n", hof[x], x, nb
+                 for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
+                 for (x in n) printf "%s mesh_client_unreachable rail IP %s did not answer %d of %d client IPs\n", dh[x], x, n[x], nc - nd
+             }' "$WORK/cmeship" "$WORK/mesh_c" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
+    fi
+    if [[ -s $WORK/mesh_b ]]; then
+        local ip; for ip in "${!host_of[@]}"; do echo "$ip ${host_of[$ip]}"; done > "$WORK/meship"   # backends only
+        # A source whose pings fail to every peer gets no replies at all (its inbound ICMP or rail is
+        # blocked): report it once as the source and keep its failures out of the destination counts.
+        # Otherwise a destination failing from many sources points at that rail.
+        # Peers of an IP = every rail IP except its own host's; sources of a destination likewise,
+        # minus the silent sources on other hosts.
+        awk 'FNR == 1 {f++}
+             f == 1 {hof[$1] = $2; c[$2]++; all++; next}
+             {m++; s[m] = $2; d[m] = $4; fs[$2]++}
+             END {
+                 for (x in fs) if (fs[x] >= all - c[hof[x]]) {dead[x] = 1; nd++; deadon[hof[x]]++}
+                 for (x in dead) printf "%s mesh_no_replies rail IP %s got no reply from any of its %d peers (inbound ICMP blocked or rail down on that host)\n", hof[x], x, all - c[hof[x]]
+                 for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
+                 for (x in n) printf "%s mesh_unreachable rail IP %s did not answer %d of %d pinging rail IPs\n", hof[x], x, n[x], all - c[hof[x]] - (nd - deadon[hof[x]])
+             }' "$WORK/meship" "$WORK/mesh_b" | sort -k2,2 -k7,7rn > "$WORK/mesh_banom"
+        cat "$WORK/mesh_banom" "$WORK/mesh_anom" > "$WORK/mesh_all"; mv "$WORK/mesh_all" "$WORK/mesh_anom"
+    fi
     cat "$WORK/mesh_anom" >> "$COLLECT_DIR/rail_anomalies.txt"
     log "WARNING: mesh findings (silent sources first, then destinations, worst first):"
     sed 's/^/#   /' "$WORK/mesh_anom" | head -n 10 >&2
@@ -1254,7 +1297,7 @@ END { for (k in L) { nk = DR[k] - BK[k]; if (nk < 0) nk = 0; nk += DO[k]
       printf "%d %d %d %d %d %d %d\n", lost, sent, sock, nic, back, un, ov }'
 
 udp_attr() {  # [iterN Ux] -> "lost sent socket nic backlog unaccounted over"
-    awk -v t="$1" "$UDP_ATTR_AWK" "$WORK/ipmap" "$WORK/nicmap" "$UDP_RESULTS" \
+    awk -v t="$1" "$UDP_ATTR_AWK" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
         "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt"
 }
 
@@ -1394,18 +1437,25 @@ udp_phases() {
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local b=$WORK/udp.$u
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"
-        # deltas: "iterN Uu host dInErrors dRcvbufErrors dSndbufErrors dSoftnet" and "iterN Uu host_nic drx doob"
-        awk -v t="iter$ITER $PHASE" 'NR==FNR {for (i = 2; i <= 5; i++) p[$1, i] = $i; next}
-            ($1, 2) in p {printf "%s %s", t, $1; for (i = 2; i <= 5; i++) printf " %d", $i - p[$1, i]; print ""}' \
-            "$a.host" "$b.host" >> "$COLLECT_DIR/udp_host_counters.txt"
-        awk -v t="iter$ITER $PHASE" 'NR==FNR {rx[$1] = $3; oob[$1] = $5; next} ($1 in rx) {
-                drx = ($3 ~ /^[0-9]+$/ && rx[$1] ~ /^[0-9]+$/) ? $3 - rx[$1] : 0
-                doob = ($5 ~ /^[0-9]+$/ && oob[$1] ~ /^[0-9]+$/) ? $5 - oob[$1] : 0
-                print t, $1, drx, doob }' "$a.nic" "$b.nic" >> "$COLLECT_DIR/udp_nic_drops.txt"
-        local r; read -r -a r <<<"$(udp_attr "iter$ITER $PHASE")"
-        log "  $PHASE loss: ${r[0]} of ${r[1]} datagrams lost ($(awk -v l="${r[0]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * l / s : 0}')%): receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
+        udp_close $PHASE "$a" "$b"
         a=$b
     done
+}
+
+# udp_close phase pre post: the phase's host and NIC counter deltas, appended to udp_host_counters.txt
+# ("iterN phase host dInErrors dRcvbufErrors dSndbufErrors dSoftnet") and udp_nic_drops.txt ("iterN phase host_nic drx doob"),
+# then its loss line
+udp_close() {
+    local ph=$1 a=$2 b=$3 r
+    awk -v t="iter$ITER $ph" 'NR==FNR {for (i = 2; i <= 5; i++) p[$1, i] = $i; next}
+        ($1, 2) in p {printf "%s %s", t, $1; for (i = 2; i <= 5; i++) printf " %d", $i - p[$1, i]; print ""}' \
+        "$a.host" "$b.host" >> "$COLLECT_DIR/udp_host_counters.txt"
+    awk -v t="iter$ITER $ph" 'NR==FNR {rx[$1] = $3; oob[$1] = $5; next} ($1 in rx) {
+            drx = ($3 ~ /^[0-9]+$/ && rx[$1] ~ /^[0-9]+$/) ? $3 - rx[$1] : 0
+            doob = ($5 ~ /^[0-9]+$/ && oob[$1] ~ /^[0-9]+$/) ? $5 - oob[$1] : 0
+            print t, $1, drx, doob }' "$a.nic" "$b.nic" >> "$COLLECT_DIR/udp_nic_drops.txt"
+    read -r -a r <<<"$(udp_attr "iter$ITER $ph")"
+    log "  $ph loss: ${r[0]} of ${r[1]} datagrams lost ($(awk -v l="${r[0]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * l / s : 0}')%): receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
 }
 
 # ---------- clients ----------
@@ -1485,7 +1535,7 @@ cl_check() {
 # record), appended to $PHASE_OUT as "src,dst,<result> share:N". c2b runs from the client to port FF_PORT+slot
 # on the backend; b2c from the backend to the client's one server.
 cl_run() {
-    local key=$1 ck=$2 cj=$3 b=$4 r=$5 dir=$6 slot=$7 share=$8 ph=$9 st src dst from port
+    local key=$1 ck=$2 cj=$3 b=$4 r=$5 dir=$6 slot=$7 share=$8 ph=$9 mode=${10:-tcp} st src dst from port
     if [[ $dir == c2b ]]; then src=${CIP[$ck,$cj]}; dst=${RIP[$b,$r]:-none}; from=${T_TARGET[$ck]}; port=$(( FF_PORT + slot ))
     else src=${RIP[$b,$r]:-none}; dst=${CIP[$ck,$cj]}; from=${T_TARGET[$b]}; port=$FF_PORT; fi
     (( b >= 0 )) || { src=${CIP[$ck,$cj]}; dst=none; }
@@ -1497,6 +1547,15 @@ cl_run() {
         return
     fi
     if (( FF_SKIP_IPERF )); then echo "$src $dst" >> "$WORK/cpaths_ok"; return; fi
+    if [[ $mode == udp ]]; then   # as run_path: the largest datagram neither end's MTU fragments
+        local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
+        local len=$(( (m1 < m2 ? m1 : m2) - 28 ))
+        ( out=$(timeout $(( FF_UDP_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+                  "$src" "$dst" "$port" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
+          [[ -n $out ]] || out="ERROR timeout or ssh failure"
+          echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &
+        return
+    fi
     ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
               "$src" "$dst" "$port" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
@@ -1506,14 +1565,16 @@ cl_run() {
 # client_phase P: P = C1/C2 (waves; client->backend, backend->client) or F1/F2 (all at once). Path checks
 # first, then the runs, wave by wave, with the drop counters of every client and backend around the phase.
 client_phase() {
-    local P=$1 dir t w nw pfx; dir=c2b; [[ $P == ?2 ]] && dir=b2c
+    local P=$1 dir t w nw pfx; dir=c2b; [[ $P == ?2 ]] && dir=b2c   # $2 = udp: the phase's UDP twin, U$P
     local -a TK TJ TR TB TW TS TH
     if [[ $P == C? ]]; then TK=("${CT_K[@]}"); TJ=("${CT_J[@]}"); TR=("${CT_R[@]}"); TB=("${CT_B[@]}"); TW=("${CT_W[@]}"); TS=("${CT_S[@]}"); TH=("${CT_H[@]}"); nw=$CL_NW
     else TK=("${FT_K[@]}"); TJ=("${FT_J[@]}"); TR=("${FT_R[@]}"); TB=("${FT_B[@]}"); TS=("${FT_S[@]}"); TH=("${FT_H[@]}"); nw=1
          for (( t = 0; t < ${#TK[@]}; t++ )); do TW[t]=$(( TB[t] >= 0 ? 0 : -1 )); done; fi
     (( ${#TK[@]} )) || return 0
     pfx=$(tr 'A-Z' 'a-z' <<<"$P")
-    PATHS=$WORK/paths.client.$ITER.$P; mkdir -p "$PATHS"
+    PATHS=$WORK/paths.client.$ITER.$P
+    if [[ $2 == udp ]]; then client_udp_waves; return; fi
+    mkdir -p "$PATHS"
     for (( t = 0; t < ${#TK[@]}; t++ )); do cl_check ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir; done
     wait
     CL_PLANNED=$(( CL_PLANNED + ${#TK[@]} ))
@@ -1564,6 +1625,30 @@ client_phase() {
     fi
 }
 
+# client_udp_waves (from client_phase, on its tasks): the UDP twin U$P of client phase P, the same runs and
+# waves, reusing P's path checks; UDP host and NIC counters around it, as U1/U2
+client_udp_waves() {
+    local U=U$P a=$WORK/cudp.$ITER.$P.pre b=$WORK/cudp.$ITER.$P.post
+    collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"
+    phase_start
+    log "Client phase $U ($( [[ $dir == c2b ]] && echo "clients -> backends" || echo "backends -> clients")$( [[ $P == F? ]] && echo ", all at once"), UDP -b 0): ${#TK[@]} runs in $nw wave$( (( nw > 1 )) && echo s); start $PT0"
+    for (( w = 0; w < nw; w++ )); do
+        PHASE_OUT=$WORK/cphase.$ITER.$U.$w; : > "$PHASE_OUT"
+        echo "### iteration:$ITER phase:$U$( (( nw > 1 )) && echo " wave:$(( w + 1 ))/$nw")" >> "$UDP_RESULTS"
+        for (( t = 0; t < ${#TK[@]}; t++ )); do
+            (( TW[t] == w )) && cl_run ${pfx}_$t ${TK[t]} ${TJ[t]} ${TB[t]} ${TR[t]} $dir ${TS[t]} ${TH[t]} $U udp
+        done
+        wait
+        column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
+        lock_all touch
+    done
+    phase_end $U
+    local errs; errs=$(cat "$WORK"/cphase.$ITER.$U.* | grep -c ",ERROR")
+    (( errs > 0 )) && log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above)"
+    collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"
+    udp_close $U "$a" "$b"
+}
+
 # clients_iter: this iteration's client phases (backends moved on by one from the last iteration)
 clients_iter() {
     (( ${#CLI[@]} )) || return 0
@@ -1572,6 +1657,10 @@ clients_iter() {
     log "---- Clients, iteration $ITER: $( (( CL_WAVES )) && echo "$CL_NW wave$( (( CL_NW > 1 )) && echo s) each way, at most $CL_R client NIC$( (( CL_R > 1 )) && echo s) per backend NIC")$( (( CL_WAVES && CL_FULL )) && echo ", then ")$( (( CL_FULL )) && echo "all at once each way") ----"
     (( CL_WAVES )) && { client_phase C1; client_phase C2; }
     (( CL_FULL )) && { client_phase F1; client_phase F2; }
+    if [[ $FF_UDP == 1 ]]; then   # the UDP twins, after the TCP phases as U1/U2 follow phases 1/2
+        (( CL_WAVES )) && { client_phase C1 udp; client_phase C2 udp; }
+        (( CL_FULL )) && { client_phase F1 udp; client_phase F2 udp; }
+    fi
     return 0
 }
 
@@ -1723,14 +1812,15 @@ main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
 
-    : "${FF_ITER:=5}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=root}"
+    : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=root}"
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}"
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
     [[ $1 =~ ^[0-9]+$ ]] && FF_DURATION=$1
-    : "${FF_DURATION:=120}" "${FF_UDP:=0}" "${FF_MESH:=0}" "${FF_SKIP_IPERF:=0}"
+    : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
+    [[ -z $FF_UDP ]] && FF_UDP=$(( ! FF_SKIP_IPERF ))   # UDP by default, except with no load
     : "${FF_UDP_DURATION:=$FF_DURATION}"
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
@@ -2192,10 +2282,15 @@ main() {
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
         [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]}_${RNIC[$k,$r]} ${T_HOST[$k]} $(rail_letter $r)"
     done; done > "$WORK/nicmap"
+    # the same with the client data NICs, for the UDP receivers
+    local j; { cat "$WORK/ipmap"; for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do
+        [[ ${CIP[$k,$j]} != none ]] && echo "${CIP[$k,$j]} ${T_HOST[$k]} client"; done; done; } > "$WORK/uipmap"
+    { cat "$WORK/nicmap"; for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do
+        echo "${T_HOST[$k]}_${CNIC[$k,$j]} ${T_HOST[$k]} client"; done; done; } > "$WORK/unicmap"
     UDP_RESULTS=$COLLECT_DIR/iperf3_udp_results.txt
     if [[ $FF_UDP == 1 ]]; then
         : > "$UDP_RESULTS"; : > "$COLLECT_DIR/udp_host_counters.txt"; : > "$COLLECT_DIR/udp_nic_drops.txt"
-        log "UDP pass on: phases U1/U2 after the TCP phases, ${FF_UDP_DURATION}s each, no rate cap"
+        log "UDP pass on: phases U1/U2 after the TCP phases$( (( ${#CLI[@]} )) && echo ", and a UDP twin of each client phase (UC1/UC2, UF1/UF2) after the client TCP phases"), ${FF_UDP_DURATION}s each, no rate cap"
     fi
     CRESULTS=$COLLECT_DIR/client_results.txt; CL_PLANNED=0
     if (( ${#CLI[@]} )); then
@@ -2203,7 +2298,6 @@ main() {
         local ncn=0; for k in "${CLI[@]}"; do ncn=$(( ncn + CN[$k] )); done
         log "Clients: ${#CLI[@]} clients, $ncn data NICs, to $NR rail$( (( NR > 1 )) && echo s) of ${#ELIG[@]} backends (FF_CLIENT_RATIO=$FF_CLIENT_RATIO), each iteration after the backend phases; each iteration moves every client NIC on to the next backend"
         log "Client NIC to backend NIC coverage: in $FF_ITER iterations each client NIC reaches $(( FF_ITER < CL_ALL ? FF_ITER : CL_ALL )) of $CL_ALL backend NICs$( (( CL_WAVES && !CL_FULL )) && echo " per rail")$( (( FF_ITER < CL_ALL )) && echo " (every client NIC to every backend NIC needs FF_ITER=$CL_ALL, or FF_ITER=all)")"
-        [[ $FF_UDP == 1 ]] && log "UDP pass: backends only; the client runs are TCP"
     fi
     local cross_decided=; [[ $CROSS == on ]] || cross_decided=1
     for (( ITER = 1; ITER <= FF_ITER; ITER++ )); do
@@ -2405,7 +2499,7 @@ main() {
                       h = host[$2]; gs[h] += g; c[h]++; l[h] += x[1]; s[h] += x[2] }
                     END { print "Host Avg_Gbps Lost/Sent Loss_%"
                           for (h in c) printf "%s %.1f %d/%d %.3f\n", h, gs[h] / c[h], l[h], s[h], s[h] ? 100 * l[h] / s[h] : 0 }' \
-                    "$map" - | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
+                    "$WORK/uipmap" - | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
                 local r; read -r -a r <<<"$(udp_attr "")"
                 echo "  Lost datagrams ${r[0]} of ${r[1]}: receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted (likely fabric) ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
             else
@@ -2537,6 +2631,8 @@ main() {
         echo "nic_diag_lines=$(wc -l < "$NIC_DIAG" | tr -d ' ')"
         echo "mesh_pings=${MESH_PINGS:-}"
         echo "mesh_failures=${MESH_FAILS:-}"
+        echo "mesh_client_pings=${MESH_CPINGS:-}"
+        echo "mesh_client_failures=${MESH_CFAILS:-}"
         echo "tool=fabric_ferret"
     } > "$COLLECT_DIR/metadata.txt"
     for k in "${ELIG[@]}"; do
