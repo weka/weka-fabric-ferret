@@ -61,8 +61,11 @@ Optional (default)
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
                    window of the cluster's own traffic. The busy check reports but doesn't stop the run.
   FF_UDP (1)       after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
-                   (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into
-                   receiver socket, NIC, kernel backlog and unaccounted (likely fabric).
+                   (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into sender
+                   TX (never left the sender's NIC: kernel and port tx packet counts, udp_tx.txt),
+                   receiver socket, NIC, kernel backlog and unaccounted. Uncapped UDP has no
+                   backoff: where what the senders sent into a NIC exceeds its line, 1 - line/offered
+                   is expected loss (udp_expected.txt); only unaccounted loss beyond it is flagged.
                    With FF_TOS the whole TOS byte, ECN bits included, is sent.
   FF_UDP_DURATION  seconds per UDP run (FF_DURATION)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
@@ -534,6 +537,32 @@ out=$(iperf3 --connect-timeout 5000 -u -b 0 -l "$6" -c "$2" -B "$1" -p "$3" -P "
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
 else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+EOF
+
+# Sender-side packet counts per data NIC: "host_nic ip kernel_tx wire_tx". kernel_tx = packets the kernel handed
+# the driver (sysfs, every driver); wire_tx = packets the port sent (mlx5 tx_packets_phy). A bond or VLAN has no
+# port: its lower devices' sum, down to 3 levels ("na" if any has no port counter; a VLAN parent's count includes
+# its other traffic, which can only hide a shortfall). FF_SYSFS (default /sys) is a test hook.
+read -r -d '' TXCTR_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}
+wire() {
+    local p l s=0 n=0 d=${2:-0}
+    p=$(ethtool -S "$1" 2>&1 | awk '$1=="tx_packets_phy:" {print $2; exit}')
+    case $p in ''|*[!0-9]*|0) ;; *) echo "$p"; return ;; esac   # 0: an mlx5 VF has the counter but no port behind it
+    [ "$d" -lt 3 ] || { echo na; return; }
+    for l in "$sys/class/net/$1"/lower_*; do
+        [ -e "$l" ] || continue
+        p=$(wire "${l##*lower_}" $(( d + 1 ))); case $p in ''|*[!0-9]*) echo na; return ;; esac
+        s=$(( s + p )); n=$(( n + 1 ))
+    done
+    if [ "$n" -gt 0 ]; then echo "$s"; else echo na; fi
+}
+for nic in "$@"; do
+    [ "$nic" = - ] && continue
+    ip=$(ip -o -4 addr show dev "$nic" 2>&1 | awk '{split($4,a,"/"); print a[1]; exit}')
+    k=$(cat "$sys/class/net/$nic/statistics/tx_packets" 2>&1); case $k in ''|*[!0-9]*) k=na ;; esac
+    echo "${h}_${nic} ${ip:-none} $k $(wire "$nic")"
+done
 EOF
 
 # Host-side UDP loss counters: "host InErrors RcvbufErrors SndbufErrors softnet_dropped".
@@ -1278,26 +1307,33 @@ client_rx() {
 # UDP loss placement, the same rule as the dashboard: per phase and receiving host,
 # unaccounted = lost - (that host's InErrors + backlog drops + rail-NIC drops), floored at 0. The kernel
 # also adds backlog drops to rx_dropped, so NIC = max(0, rx_dropped - backlog) + rx_out_of_buffer.
-# Files: ipmap (ip host rail), nicmap (host_nic host rail), UDP results, host counters, NIC drops.
-# -v t="iterN Ux" limits it to one phase. Prints: lost sent socket nic backlog unaccounted over (over: buckets beyond the loss).
+# Sender TX = datagrams the sender NIC never put on the wire (udp_expected.txt, by run, charged to the run's
+# receiver), taken out before unaccounted. Expected = what overload alone loses of what reached the wire;
+# beyond = unaccounted above it, per host.
+# Files: udp_expected.txt, ipmap (ip host rail), nicmap (host_nic host rail), UDP results, host counters, NIC drops.
+# -v t="iterN Ux" limits it to one phase. Prints: lost sent socket nic backlog unaccounted over expected beyond tx
+# (over: buckets beyond the loss).
 UDP_ATTR_AWK='
-FNR == 1 { f++ }
-f == 1 { host[$1] = $2; next }
-f == 2 { nh[$1] = $2; next }
-f == 3 { if (/^### /) { split($2, a, ":"); split($3, b, ":"); ph = "iter" a[2] " " b[2]; next }
+FNR == 1 { for (i = 1; i < ARGC; i++) if (ARGV[i] == FILENAME) f = i }   # by name: an empty file must not shift the rest
+f == 1 { E[$1 " " $2 " " $3 " " $4 " " $5] = $8; TR[$1 " " $2 " " $3 " " $4 " " $5] = $12 + 0; next }
+f == 2 { host[$1] = $2; next }
+f == 3 { nh[$1] = $2; next }
+f == 4 { if (/^### /) { split($2, a, ":"); split($3, b, ":"); ph = "iter" a[2] " " b[2]; wv = ($4 ~ /^wave:/) ? substr($4, 6) : "-"; next }
          if (t != "" && ph != t) next
          n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\/[0-9]+$/) { split($i, x, "/"); n = 1 }
          if (!n) next
-         split($1, s, ","); k = ph SUBSEP host[s[2]]; L[k] += x[1]; sent += x[2]; next }
-f == 4 { k = $1 " " $2 SUBSEP $3; SK[k] += $4; BK[k] += $7; next }
-f == 5 { k = $1 " " $2 SUBSEP nh[$3]; DR[k] += $4; DO[k] += $5 }
+         split($1, s, ","); k = ph SUBSEP host[s[2]]; L[k] += x[1]; sent += x[2]; r = ph " " wv " " s[1] " " s[2]
+         TX[k] += TR[r]; X[k] += E[r] * (x[2] - TR[r]); next }
+f == 5 { k = $1 " " $2 SUBSEP $3; SK[k] += $4; BK[k] += $7; next }
+f == 6 { k = $1 " " $2 SUBSEP nh[$3]; DR[k] += $4; DO[k] += $5 }
 END { for (k in L) { nk = DR[k] - BK[k]; if (nk < 0) nk = 0; nk += DO[k]
-                     lost += L[k]; sock += SK[k]; nic += nk; back += BK[k]
-                     u = L[k] - SK[k] - nk - BK[k]; if (u > 0) un += u; else ov -= u }
-      printf "%d %d %d %d %d %d %d\n", lost, sent, sock, nic, back, un, ov }'
+                     lost += L[k]; sock += SK[k]; nic += nk; back += BK[k]; ex += X[k]; tx += TX[k]
+                     u = L[k] - TX[k] - SK[k] - nk - BK[k]; if (u > 0) un += u; else ov -= u
+                     if (u - X[k] > 0) bey += u - X[k] }
+      printf "%d %d %d %d %d %d %d %d %d %d\n", lost, sent, sock, nic, back, un, ov, ex + 0.5, bey, tx }'
 
-udp_attr() {  # [iterN Ux] -> "lost sent socket nic backlog unaccounted over"
-    awk -v t="$1" "$UDP_ATTR_AWK" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
+udp_attr() {  # [iterN Ux] -> "lost sent socket nic backlog unaccounted over expected beyond tx"
+    awk -v t="$1" "$UDP_ATTR_AWK" "$COLLECT_DIR/udp_expected.txt" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
         "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt"
 }
 
@@ -1422,7 +1458,7 @@ uplink_summary() {
 # counters read around each phase so lost datagrams can be placed.
 udp_phases() {
     local u p ck sk a=$WORK/udp.0
-    collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"
+    collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"; collect_counters "$TXCTR_SCRIPT" "$a.tx"
     for u in 1 2; do
         PHASE=U$u; PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
         if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; phase_skip U2; continue; fi
@@ -1436,7 +1472,7 @@ udp_phases() {
         phase_end $PHASE
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local b=$WORK/udp.$u
-        collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"
+        collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
         udp_close $PHASE "$a" "$b"
         a=$b
     done
@@ -1454,8 +1490,43 @@ udp_close() {
             drx = ($3 ~ /^[0-9]+$/ && rx[$1] ~ /^[0-9]+$/) ? $3 - rx[$1] : 0
             doob = ($5 ~ /^[0-9]+$/ && oob[$1] ~ /^[0-9]+$/) ? $5 - oob[$1] : 0
             print t, $1, drx, doob }' "$a.nic" "$b.nic" >> "$COLLECT_DIR/udp_nic_drops.txt"
+    # "iterN phase host_nic ip d_kernel_tx d_wire_tx" ("-" = not read)
+    awk -v t="iter$ITER $ph" 'NR==FNR {k[$1] = $3; w[$1] = $4; next} ($1 in k) {
+            dk = ($3 ~ /^[0-9]+$/ && k[$1] ~ /^[0-9]+$/) ? $3 - k[$1] : "-"
+            dw = ($4 ~ /^[0-9]+$/ && w[$1] ~ /^[0-9]+$/) ? $4 - w[$1] : "-"
+            print t, $1, $2, dk, dw }' "$a.tx" "$b.tx" >> "$COLLECT_DIR/udp_tx.txt"
+    udp_expect
     read -r -a r <<<"$(udp_attr "iter$ITER $ph")"
-    log "  $ph loss: ${r[0]} of ${r[1]} datagrams lost ($(awk -v l="${r[0]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * l / s : 0}')%): receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
+    log "  $ph loss: ${r[0]} of ${r[1]} datagrams lost ($(awk -v l="${r[0]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * l / s : 0}')%): sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
+    log "  $ph expected from overload: ${r[7]} ($(awk -v e="${r[7]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * e / s : 0}')%); unaccounted beyond it (likely fabric): ${r[8]}"
+}
+
+# udp_expect: udp_expected.txt, per UDP run "iterN phase wave src dst offered rx expected lost sent gbps tx".
+# tx = this run's share of the datagrams its sender NIC never put on the wire in that phase (udp_tx.txt):
+# stack = sent - kernel tx packets, NIC = kernel tx - wire tx, each floored at 0 (other traffic only adds
+# packets, so a shortfall is real), shared over the NIC's runs by datagrams sent, at most the run's loss.
+# offered = what the runs sending to that dst at once (same phase and wave) put on the wire: each run's
+# received Gbps x (sent - tx) / delivered; rx = the dst's line rate; expected = 1 - rx/offered when
+# offered > rx (uncapped UDP has no backoff: that much is lost to overload alone), else 0. A run that
+# delivered nothing, or a dst line rate not known: offered "-", expected 0, so no loss is excused.
+UDP_EXPECT_AWK='
+FNR == 1 { for (i = 1; i < ARGC; i++) if (ARGV[i] == FILENAME) f = i }
+f == 1 { ln[$1] = $2 + 0; next }
+f == 2 { k = $1 " " $2 SUBSEP $4; if ($5 ~ /^[0-9]+$/) TK[k] = $5; if ($6 ~ /^[0-9]+$/) TW[k] = $6; next }
+/^### / { split($2, a, ":"); split($3, b, ":"); p = "iter" a[2] " " b[2]; g = p " " (($4 ~ /^wave:/) ? substr($4, 6) : "-"); next }
+/receiver/ { split($1, s, ","); n++; G[n] = g; P[n] = p; S[n] = s[1]; D[n] = s[2]
+             for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") R[n] = $(i-1); if ($i ~ /^[0-9]+\/[0-9]+$/) { split($i, x, "/"); Lo[n] = x[1]; Se[n] = x[2] } }
+             SP[p SUBSEP s[1]] += Se[n] }
+END { for (i = 1; i <= n; i++) { q = P[i] SUBSEP S[i]; sh = 0
+          if (q in TK) { sh = SP[q] - TK[q]; if (sh < 0) sh = 0; if (q in TW && TK[q] > TW[q]) sh += TK[q] - TW[q] }
+          t = SP[q] ? sh * Se[i] / SP[q] : 0; if (t > Lo[i]) t = Lo[i]; T[i] = t
+          k = G[i] SUBSEP D[i]
+          if (Se[i] > Lo[i] && R[i] > 0) off[k] += R[i] * (Se[i] - t) / (Se[i] - Lo[i]); else unk[k] = 1 }
+      for (i = 1; i <= n; i++) { k = G[i] SUBSEP D[i]; rx = ln[D[i]]; ok = rx > 0 && !(k in unk)
+          ex = (ok && off[k] > rx) ? 1 - rx / off[k] : 0
+          printf "%s %s %s %s %s %.4f %d %d %s %d\n", G[i], S[i], D[i], (ok ? off[k] : "-"), ((rx > 0) ? rx : "-"), ex, Lo[i], Se[i], R[i], T[i] + 0.5 } }'
+udp_expect() {
+    awk "$UDP_EXPECT_AWK" "$WORK/iplines" "$COLLECT_DIR/udp_tx.txt" "$UDP_RESULTS" > "$COLLECT_DIR/udp_expected.txt"
 }
 
 # ---------- clients ----------
@@ -1629,7 +1700,7 @@ client_phase() {
 # waves, reusing P's path checks; UDP host and NIC counters around it, as U1/U2
 client_udp_waves() {
     local U=U$P a=$WORK/cudp.$ITER.$P.pre b=$WORK/cudp.$ITER.$P.post
-    collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"
+    collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"; collect_counters "$TXCTR_SCRIPT" "$a.tx"
     phase_start
     log "Client phase $U ($( [[ $dir == c2b ]] && echo "clients -> backends" || echo "backends -> clients")$( [[ $P == F? ]] && echo ", all at once"), UDP -b 0): ${#TK[@]} runs in $nw wave$( (( nw > 1 )) && echo s); start $PT0"
     for (( w = 0; w < nw; w++ )); do
@@ -1645,7 +1716,7 @@ client_udp_waves() {
     phase_end $U
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$U.* | grep -c ",ERROR")
     (( errs > 0 )) && log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above)"
-    collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"
+    collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
     udp_close $U "$a" "$b"
 }
 
@@ -2287,9 +2358,13 @@ main() {
         [[ ${CIP[$k,$j]} != none ]] && echo "${CIP[$k,$j]} ${T_HOST[$k]} client"; done; done; } > "$WORK/uipmap"
     { cat "$WORK/nicmap"; for k in "${CLI[@]}"; do for (( j = 0; j < CN[$k]; j++ )); do
         echo "${T_HOST[$k]}_${CNIC[$k,$j]} ${T_HOST[$k]} client"; done; done; } > "$WORK/unicmap"
+    # ip -> line rate (Gbps, 0 = unknown), the receiving side of the UDP overload floor: a backend rail IP its
+    # rail's line, a client data NIC FF_CLIENT_GBPS or its own speed
+    { for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do [[ ${RIP[$k,$r]} != none ]] && echo "${RIP[$k,$r]} ${LINE[r]:-0}"; done; done
+      (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' "$COLLECT_DIR/clients.txt"; } > "$WORK/iplines"
     UDP_RESULTS=$COLLECT_DIR/iperf3_udp_results.txt
     if [[ $FF_UDP == 1 ]]; then
-        : > "$UDP_RESULTS"; : > "$COLLECT_DIR/udp_host_counters.txt"; : > "$COLLECT_DIR/udp_nic_drops.txt"
+        : > "$UDP_RESULTS"; : > "$COLLECT_DIR/udp_host_counters.txt"; : > "$COLLECT_DIR/udp_nic_drops.txt"; : > "$COLLECT_DIR/udp_expected.txt"; : > "$COLLECT_DIR/udp_tx.txt"
         log "UDP pass on: phases U1/U2 after the TCP phases$( (( ${#CLI[@]} )) && echo ", and a UDP twin of each client phase (UC1/UC2, UF1/UF2) after the client TCP phases"), ${FF_UDP_DURATION}s each, no rate cap"
     fi
     CRESULTS=$COLLECT_DIR/client_results.txt; CL_PLANNED=0
@@ -2493,15 +2568,16 @@ main() {
             echo ""
             if grep -q 'Gbits/sec' "$UDP_RESULTS"; then
                 echo "UDP (-b 0) by receiving host: avg Gbps per run, datagrams lost/sent, loss %:"
-                grep 'Gbits/sec' "$UDP_RESULTS" | awk -F'[, ]+' '
-                    NR==FNR { host[$1]=$2; next }
-                    { for (i = 1; i <= NF; i++) { if ($i == "Gbits/sec") g = $(i-1); if ($i ~ /^[0-9]+\/[0-9]+$/) split($i, x, "/") }
-                      h = host[$2]; gs[h] += g; c[h]++; l[h] += x[1]; s[h] += x[2] }
-                    END { print "Host Avg_Gbps Lost/Sent Loss_%"
-                          for (h in c) printf "%s %.1f %d/%d %.3f\n", h, gs[h] / c[h], l[h], s[h], s[h] ? 100 * l[h] / s[h] : 0 }' \
-                    "$WORK/uipmap" - | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
+                echo "  Expected_% = the loss the offered load alone guarantees: what the senders sent into a NIC above its line rate"
+                # udp_expected.txt: iterN phase wave src dst offered rx expected lost sent gbps tx
+                awk 'NR == FNR { host[$1] = $2; next }
+                    { h = host[$5]; gs[h] += $11; c[h]++; l[h] += $9; s[h] += $10; e[h] += $8 * ($10 - $12) }
+                    END { print "Host Avg_Gbps Lost/Sent Loss_% Expected_%"
+                          for (h in c) printf "%s %.1f %d/%d %.3f %.3f\n", h, gs[h] / c[h], l[h], s[h], s[h] ? 100 * l[h] / s[h] : 0, s[h] ? 100 * e[h] / s[h] : 0 }' \
+                    "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
                 local r; read -r -a r <<<"$(udp_attr "")"
-                echo "  Lost datagrams ${r[0]} of ${r[1]}: receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted (likely fabric) ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
+                echo "  Lost datagrams ${r[0]} of ${r[1]}: sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
+                echo "  Expected from overload: ${r[7]}; unaccounted beyond it (likely fabric): ${r[8]}"
             else
                 echo "  No UDP results collected."
             fi
