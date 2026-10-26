@@ -197,6 +197,46 @@ python3 generate_dashboard.py <run>.tgz [output.html] [--compare <older run>.tgz
 - Prints a `PROBLEM:` line for each problem it finds in the data (PARTIAL coverage, fewer clients or client paths tested than planned, link flaps, unread counters and the like) and exits 3, so scripts can tell a clean run (exit 0) from one to read.
 - Renders bundles from older fabric_sleuth runs too.
 
+## Temperatures only: thermals_capture.sh
+
+A standalone script that reads temperatures alone, without fabric_ferret's network tests. It uses the same hwmon and BMC reader, the same flags and the same `FF_HOSTS` syntax. Read only: each host reads `/sys/class/hwmon` (no package needed) and, where it is installed, `ipmitool sensor`. Root runs ipmitool directly; any other `FF_SSH_USER` runs it with `sudo -n`. Nothing is installed, loaded or changed.
+
+```bash
+FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh                    # one snapshot -> thermcap_<label>_<UTC>.jsonl
+FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh -v                 # also list the addresses that took no ssh connection
+FF_HOSTS=@hosts.txt ./thermals_capture.sh -o jsonl,html,md    # any of jsonl (default), html, md
+FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -i 30 -d 600        # a sample every 30 s for 10 min (flags rise)
+ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
+./thermals_capture.sh -t targets.csv -o md                    # targets from a file: hosts and BMCs, logins
+```
+
+`-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments.
+- `host`: an ssh target. It can be an IP, a hostname, a CIDR or a range, as in `FF_HOSTS`. It is read like any other host: hwmon, plus in-band ipmitool.
+- `bmc`: one BMC address (no CIDR or range). It is read out of band from the machine running the script, with `ipmitool -I lanplus ... sensor`.
+- With no login, the current user is used. With no password, a host is reached by key (passwordless) ssh, and a BMC gets an empty password. The password is everything after the third comma.
+- Passwords never appear on a command line or in any output. ssh gets its password through the environment: `sshpass -e` if sshpass is installed, otherwise `SSH_ASKPASS`, which needs OpenSSH 8.4 or later on the machine running the script. ipmitool gets its password through `-E`.
+- The script warns if a file that holds passwords can be read by group or others; `chmod 600` it.
+- Targets come from `FF_HOSTS` or from `-t`, never both.
+- `FF_HOSTS` hosts are reached as `FF_SSH_USER` with key (passwordless) ssh and `sudo -n`.
+- On a `-t` host line with a non-root login and a password, ipmitool runs with `sudo -S` and that password. The password is sent over the ssh session's input stream, never on a command line.
+- A line that names one host sets that host's login and password even if an earlier range line covered it.
+- `FF_IPMI=0` turns off in-band ipmitool only; `bmc` lines are always read.
+
+```text
+# type,host,login,pw
+host,10.1.0.11,admin,s3cret
+host,10.1.0.0/28,ops
+host,node07
+bmc,10.1.100.11,ADMIN,bmc-pass
+```
+
+- The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (first, max and last value, with the sensor's flag), `nodata` and `result`.
+- The HTML and Markdown files carry the summary. The HTML is a single self-contained file.
+- The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
+- Empty addresses are left out of every count and file. An empty address is one that came from a CIDR or range (in `FF_HOSTS` or on a `-t` host line) and took no ssh connection (timed out, refused, no route) in any sample. `RESULT ... empty=N` counts them, and `-v` lists them on stderr. An IP or hostname listed on its own is always reported, and so is a ranged address that answers but fails (auth refused, say).
+- A host or source that gives no reading is listed with the reason. Reasons include unreachable, cut off, no hwmon sensors, ipmitool not installed or timed out, and sudo refused. A host with no data is never shown as cool.
+- The last line is `RESULT data=COMPLETE|PARTIAL|NONE ...`. Exit codes: 0 = complete, 3 = partial, 4 = no reading at all, 2 = bad input.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE).
