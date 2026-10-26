@@ -218,7 +218,14 @@ for p in /usr/bin/nvidia-smi /usr/local/bin/nvidia-smi /usr/local/nvidia/bin/nvi
 done
 case $nv in /run/nvidia/driver/*) nvl=/run/nvidia/driver/usr/lib64:/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/run/nvidia/driver/usr/lib/aarch64-linux-gnu ;; esac
 gp=${FF_PROCFS:-/proc}/driver/nvidia/gpus   # FF_PROCFS: test hook, as FF_SYSFS
-if [ -z "$nv" ] && [ -d "$gp" ] && [ -n "$(ls "$gp" 2>&1)" ]; then echo "@@GPU $h none nvidia_driver_loaded_but_no_nvidia-smi_found"; fi
+if [ -z "$nv" ] && [ -d "$gp" ] && [ -n "$(ls "$gp" 2>&1)" ]; then echo "@@GPU $h none nvidia_driver_loaded_but_no_nvidia-smi_found"
+elif [ -z "$nv" ]; then   # no driver either: NVIDIA (vendor 0x10de) display or 3D controllers (class 0x03xxxx) on the PCI bus
+    ng=0; for p in "$sys"/bus/pci/devices/*; do
+        [ -r "$p/vendor" ] && [ "$(cat "$p/vendor" 2>&1)" = 0x10de ] || continue
+        case $(cat "$p/class" 2>&1) in 0x0300*|0x0302*) ng=$(( ng + 1 )) ;; esac
+    done
+    [ "$ng" -gt 0 ] && echo "@@GPU $h none ${ng}_nvidia_gpus_on_pci_but_no_nvidia-smi_or_driver_here"
+fi
 if [ -n "$nv" ]; then
     if [ -n "$(command -v timeout)" ]; then g=$(LD_LIBRARY_PATH=$nvl timeout "${2:-60}" "$nv" -q -d TEMPERATURE 2>&1); else g=$(LD_LIBRARY_PATH=$nvl "$nv" -q -d TEMPERATURE 2>&1); fi; grc=$?
     r=$(printf '%s\n' "$g" | awk -v h="$h" 'function v(s) { sub(/^[^:]*: */, "", s); sub(/ *C *$/, "", s); return s ~ /^-?[0-9.]+$/ ? s : "-" }
@@ -431,8 +438,9 @@ END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C
 # ---------- output ----------
 
 # Type by what a sensor measures, whatever read it: GPUs (nvidia-smi, amdgpu) are gpu; a BMC sensor is typed by its
-# name (inlet/ambient, gpu/hbm/nvlink/hgx, nvme/ssd/m.2/drive, dimm/mem, nic/aoc/ocp/cx/port, cpu/proc/soc, else
-# other); hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
+# name, first match wins: inlet/ambient; VRM/PSU/board/FPGA/HMC/HSC/PLX/PEX/PCH/SAS other; nic/aoc/ocp/cx<n>/port
+# (so an HGX ConnectX is a NIC); gpu/hbm/nvlink/nvsw; nvme/ssd/m.2/drive; dimm/mem; cpu/proc/soc; else other.
+# hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
 # then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged).
 TYPE_AWK='
 FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
@@ -440,7 +448,7 @@ FNR == 1 { print $0, "Min_C"; next }
 $6 == "none" { print $0, "-"; next }
 { s = tolower($6)
   if ($2 == "gpu") $3 = "gpu"
-  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /gpu|hbm|nvlink|nvsw|hgx/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
+  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /vrm|vr_|psu|board|fpga|hmc|hsc|plx|pex|pch|sas/ ? "other" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /gpu|hbm|nvlink|nvsw/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
   else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
   else if ($4 ~ /^drivetemp/) $3 = "nvme"
   else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
@@ -560,7 +568,11 @@ main { flex: 1 1 auto; min-width: 0; padding: 14px 16px 32px; }
 .wrap::-webkit-scrollbar-thumb { background: var(--mut); border-radius: 6px; border: 3px solid var(--surface-2); }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { background: var(--head); color: var(--head-ink); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+thead { position: sticky; top: 0; z-index: 2; }
+th { background: var(--head); color: var(--head-ink); font-weight: 600; }
+th.grp { text-align: center; border-left: 2px solid var(--surface); }
+th .chip { font-weight: 400; opacity: 0.75; font-size: 12px; margin-left: 6px; }
+th.gs, td.gs { border-left: 2px solid var(--line); }
 td.crit { background: var(--critbg); color: var(--crit); font-weight: 600; } td.high { background: var(--highbg); color: var(--high); font-weight: 600; }
 td.near { background: var(--nearbg); color: var(--near); } td.rise { background: var(--risebg); color: var(--rise); }
 th.n, td.n { text-align: right; }
@@ -608,9 +620,11 @@ read -r -d '' HTML_TAIL <<'EOF'
     if (num) { var v = c.getAttribute("data-v"); return v === null || v === "" ? null : parseFloat(v); }
     return c.textContent;
   }
+  // the sortable headers carry data-col, their column index (a device group header above them doesn't sort)
   Array.prototype.forEach.call(document.querySelectorAll("table.sortable"), function (t) {
-    var ths = t.tHead.rows[0].cells;
-    Array.prototype.forEach.call(ths, function (th, i) {
+    var ths = t.tHead.querySelectorAll("th[data-col]");
+    Array.prototype.forEach.call(ths, function (th) {
+      var i = parseInt(th.getAttribute("data-col"), 10);
       th.addEventListener("click", function () {
         var dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1, num = th.classList.contains("n");
         if (num && !th.hasAttribute("aria-sort")) dir = -1;   // first click on a number: hottest first
@@ -638,20 +652,24 @@ read -r -d '' HTML_TAIL <<'EOF'
 EOF
 
 # The page body: header, nav and panels. Inputs: hostmax, view, temps_summary.txt, pivot ("group type chip dev sensor
-# host value high crit", sorted), hosts (sorted). Strings are already [A-Za-z0-9_.:=-]; e() escapes anyway.
+# host value high crit flag", sorted), hosts (sorted). Strings are already [A-Za-z0-9_.:=-]; e() escapes anyway.
+# A type table has a row of device groups over the sensors when any column has a device (gs[j] = 1 where a group
+# starts); a sensor's crit goes under its name when every host has the same one, else into each cell.
 HTML_AWK='
 function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); gsub(/"/, "\\&quot;", s); return s }
 function fc(f) { return f ~ /^crit/ ? "crit" : f ~ /^high/ ? "high" : f ~ /^near/ ? "near" : f ~ /rise/ ? "rise" : "" }
 function f1(x) { return x == "-" ? x : sprintf("%.1f", x) }
 function num(x) { return x == "-" ? "" : x }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
-FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr></thead>"; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th data-col=\"" (i - 1) "\"" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr></thead>"; next }
     ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
 FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
 FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
-    s = $3 ":" $5; c = s "@" $4
-    if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cs[p, nc[p]] = s; cd[p, nc[p]] = $4 }
-    cell[p, c, $6] = ($4 != "-" ? $4 " / " : "") f1($7) " / " f1($9); cv[p, c, $6] = $7; cf[p, c, $6] = fc($10); has[p, $6] = 1; pc[p]++; next }
+    c = $3 ":" $5 "@" $4
+    if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cchip[p, nc[p]] = $3; cd[p, nc[p]] = $4; cs[p, nc[p]] = sname($1, $5); cr[p, c] = f1($9) }
+    else if (cr[p, c] != f1($9)) crmix[p, c] = 1
+    cell[p, c, $6] = f1($7); ccr[p, c, $6] = f1($9); cv[p, c, $6] = $7; cf[p, c, $6] = fc($10); has[p, $6] = 1; pc[p]++; next }
+function sname(g, s) { if (g == "bmc") sub(/_[Tt]emp$/, "", s); gsub(/_/, " ", s); return s }
 { ho[++nho] = $1 }
 function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
     for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\" data-v=\"" num(p[i]) "\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
@@ -670,7 +688,7 @@ END {
     print "<section class=\"panel\" id=\"p-overview\"><h2>Overview</h2>"
     printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : "")
     if (nn) { print "<div class=\"card nodata\"><h3>No temperature data (never read as cool)</h3><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
-    if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th><th class=\"n\">Inlet</th><th class=\"n\">CPU</th><th class=\"n\">GPU</th><th class=\"n\">Mem</th><th class=\"n\">NVMe</th><th class=\"n\">NIC</th><th class=\"n\">Other</th><th>Flags</th></tr></thead><tbody>"
+    if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th class=\"n\" data-col=\"1\">Inlet</th><th class=\"n\" data-col=\"2\">CPU</th><th class=\"n\" data-col=\"3\">GPU</th><th class=\"n\" data-col=\"4\">Mem</th><th class=\"n\" data-col=\"5\">NVMe</th><th class=\"n\" data-col=\"6\">NIC</th><th class=\"n\" data-col=\"7\">Other</th><th data-col=\"8\">Flags</th></tr></thead><tbody>"
         for (i = 1; i <= nh; i++) { split(hm[i], q, " ")
             w = q[9] ~ /crit/ ? "crit" : q[9] ~ /high/ ? "high" : q[9] ~ /near/ ? "near" : q[9] ~ /rise/ ? "rise" : ""
             s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td class=\"host\">" e(q[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\" data-v=\"" num(q[j]) "\">" q[j] "</td>"
@@ -679,13 +697,18 @@ END {
     if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
     print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
     for (i = 1; i <= np; i++) { p = pord[i]
-        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is device / %s / Crit in &deg;C; flagged readings are shaded. Click a header to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "Max" : "Temp")
-        s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th>"
-        for (j = 1; j <= nc[p]; j++) s = s "<th class=\"n\">" e(cs[p, j]) (cd[p, j] != "-" ? "<span class=\"dev\">" e(cd[p, j]) "</span>" : "") "</th>"
+        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "highest reading" : "reading")
+        two = 0; for (j = 1; j <= nc[p]; j++) { gs[j] = (j == 1 || cd[p, j] != cd[p, j - 1] || cchip[p, j] != cchip[p, j - 1]); if (cd[p, j] != "-") two = 1 }
+        s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\"" (two ? " rowspan=\"2\"" : "") ">Host</th>"
+        if (two) { for (j = 1; j <= nc[p]; j = k) { for (k = j + 1; k <= nc[p] && !gs[k]; k++) ; s = s "<th class=\"grp\" colspan=\"" (k - j) "\">" (cd[p, j] != "-" ? e(cd[p, j]) "<span class=\"chip\">" e(cchip[p, j]) "</span>" : e(cchip[p, j])) "</th>" }
+            s = s "</tr><tr>" }
+        for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+            s = s "<th class=\"n" (gs[j] ? " gs" : "") "\" data-col=\"" j "\">" e(cs[p, j]) "<span class=\"dev\">" (((p, c) in crmix) ? "temp / crit" : (cr[p, c] == "-" ? "no crit" : "crit " cr[p, c])) "</span></th>" }
         print s "</tr></thead><tbody>"
         for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
             s = "<tr><td class=\"host\">" e(x) "</td>"
-            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; s = s (((p, c, x) in cell) ? "<td class=\"n" (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" e(cell[p, c, x]) "</td>" : "<td class=\"n\" data-v=\"\">-</td>") }
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; k = "n" (gs[j] ? " gs" : "")
+                s = s (((p, c, x) in cell) ? "<td class=\"" k (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : "") "</td>" : "<td class=\"" k "\" data-v=\"\">-</td>") }
             print s "</tr>" }
         print "</tbody></table></div></section>" }
     print "</main></div>" }'
@@ -828,11 +851,11 @@ main() {
     awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
     awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
     awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
-    # the html's per-type tables: "group type chip dev sensor host value high crit", BMC first, then by type, chip,
-    # device and sensor (version order: Core_2 before Core_10); hosts in version order
+    # the html's per-type tables: "group type chip dev sensor host value high crit flag", BMC first, then by type,
+    # chip, device and sensor (version order, any case: Core_2 before Core_10, asic before Module0); hosts likewise
     awk 'BEGIN { split("inlet cpu gpu mem nvme nic other", t, " "); for (i = 1; i <= 7; i++) r[t[i]] = i }
-         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], g, $3, $4, $5, $6, $1, $8, $10, $11, $12 }' \
-        "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k4,4 -k5,5V -k6,6V | cut -d' ' -f3- > "$WORK/pivot"
+         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], $4, $5, tolower($6), g, $3, $4, $5, $6, $1, $8, $10, $11, $12 }' \
+        "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k3,3 -k4,4V -k5,5V | cut -d' ' -f6- > "$WORK/pivot"
     awk 'NR > 1 && $6 != "none" {print $1}' "$WORK/temps_summary.txt" | sort -u | sort -V > "$WORK/hostorder"
     local sensors flagged nodata hwd res rc
     read -r sensors flagged nodata hwd < <(awk 'NR > 1 && $6 != "none" {s++; if ($12 != "-") f++; if (!($1 in h)) {h[$1] = 1; hw++}} NR > 1 && $12 ~ /^nodata/ {d++}
