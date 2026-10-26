@@ -59,6 +59,8 @@ nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts a
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
+When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
+unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
 (r = hosts with at least one reading, t = targets less the U unreachable); exit 0 = COMPLETE, 3 = PARTIAL (some host or source gave no data),
 4 = NONE (no reading at all), 2 = bad input. Ctrl-C or TERM while sampling stops after the current sample and
@@ -630,6 +632,10 @@ main() {
     done
     for f in "${out[@]}"; do log "Wrote $f"; done
     log "To copy here from a jump host: scp '$(hostname -f 2>&1):$(cd "$(dirname "${out[0]}")" && pwd)/${base##*/}.*' ."
+    # the closing count: unreachable (no ssh connection) and unavailable (reachable, no reading at all)
+    if (( ${#UNREACH[@]} || nt - hwd )); then
+        echo "Unreachable: ${#UNREACH[@]} (no ssh connection$( (( ${#UNREACH[@]} && ! verbose )) && echo "; -v lists them")), unavailable: $(( nt - hwd )) (connected, no readings)" >&2
+    fi
     echo "RESULT data=$res hosts=$hwd/$nt sensors=$sensors flagged=$flagged nodata=$nodata unreachable=${#UNREACH[@]}" >&2
     exit $rc
 }

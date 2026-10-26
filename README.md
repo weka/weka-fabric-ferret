@@ -235,6 +235,7 @@ bmc,10.1.100.11,ADMIN,bmc-pass
 - The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
 - Unreachable targets are left out of every count and file, silently unless `-v` is given, which lists them on stderr. A target is unreachable when it took no ssh connection in any sample: timed out, refused, no route, or name not found. `RESULT ... unreachable=N` counts them. A target that connects but then fails (auth refused, say) is always reported.
 - A host or source that gives no reading is listed with the reason. Reasons include unreachable, cut off, no hwmon sensors, ipmitool not installed or timed out, and sudo refused. A host with no data is never shown as cool.
+- When either count is above zero, the line before the last says how many targets were unreachable (no ssh connection) and how many were unavailable (connected, but gave no reading at all).
 - The last line is `RESULT data=COMPLETE|PARTIAL|NONE ...`. Exit codes: 0 = complete, 3 = partial, 4 = no reading at all, 2 = bad input.
 
 ## License
