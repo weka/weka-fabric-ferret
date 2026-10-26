@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # fabric_ferret: backend-to-backend (any number of rails) and client-to-backend iperf3 fabric check.
 # Hosts and rails come from env vars (see usage); output is a .tgz bundle
 # that generate_dashboard.py turns into an HTML dashboard.

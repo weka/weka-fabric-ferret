@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Built by ./build from src/ (README, Source): edit src/, never this file.
 # fabric_ferret: backend-to-backend (any number of rails) and client-to-backend iperf3 fabric check.
 # Hosts and rails come from env vars (see usage); output is a .tgz bundle
