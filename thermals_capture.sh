@@ -210,8 +210,17 @@ done
 # (high = Max Operating, crit = Shutdown; newer drivers give these as T.Limit margins instead, turned absolute:
 # margin = degrees left to T.Limit, so high = current + margin - max-op offset, crit = current + margin - shutdown
 # offset), "@@GPU host none <why>" if it fails
-if [ -n "$(command -v nvidia-smi)" ]; then
-    if [ -n "$(command -v timeout)" ]; then g=$(timeout "${2:-60}" nvidia-smi -q -d TEMPERATURE 2>&1); else g=$(nvidia-smi -q -d TEMPERATURE 2>&1); fi; grc=$?
+# nvidia-smi: PATH, the usual install dirs, then the GPU operator's driver root (with its own libraries). A loaded
+# driver (/proc/driver/nvidia/gpus) with no nvidia-smi anywhere is a no-data row, never silence.
+nv=$(command -v nvidia-smi); nvl=
+for p in /usr/bin/nvidia-smi /usr/local/bin/nvidia-smi /usr/local/nvidia/bin/nvidia-smi /run/nvidia/driver/usr/bin/nvidia-smi; do
+    [ -n "$nv" ] && break; [ -x "$p" ] && nv=$p
+done
+case $nv in /run/nvidia/driver/*) nvl=/run/nvidia/driver/usr/lib64:/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/run/nvidia/driver/usr/lib/aarch64-linux-gnu ;; esac
+gp=${FF_PROCFS:-/proc}/driver/nvidia/gpus   # FF_PROCFS: test hook, as FF_SYSFS
+if [ -z "$nv" ] && [ -d "$gp" ] && [ -n "$(ls "$gp" 2>&1)" ]; then echo "@@GPU $h none nvidia_driver_loaded_but_no_nvidia-smi_found"; fi
+if [ -n "$nv" ]; then
+    if [ -n "$(command -v timeout)" ]; then g=$(LD_LIBRARY_PATH=$nvl timeout "${2:-60}" "$nv" -q -d TEMPERATURE 2>&1); else g=$(LD_LIBRARY_PATH=$nvl "$nv" -q -d TEMPERATURE 2>&1); fi; grc=$?
     r=$(printf '%s\n' "$g" | awk -v h="$h" 'function v(s) { sub(/^[^:]*: */, "", s); sub(/ *C *$/, "", s); return s ~ /^-?[0-9.]+$/ ? s : "-" }
         function out() { if (g < 0) return
             if (gh == "-" && gc != "-" && tm != "-" && to != "-") gh = gc + tm - to
@@ -500,7 +509,9 @@ END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\
 
 # A self-contained page (no network): a left nav (after the cs plugin dashboards) with Overview, then BMC / IPMI and
 # OS (hwmon, nvidia-smi), each broken down by type. A type panel is one row per host and one column per
-# chip:sensor@dev, each cell "Temp / High / Crit" (Max with -d). The tables are static HTML, so the page reads and
+# chip:sensor on one device (the same device on every host), each cell "dev / Temp / Crit" (Max with -d), flagged
+# cells shaded.
+# The tables are static HTML, so the page reads and
 # prints without script; the inline script only switches panels and sorts a table on a header click.
 read -r -d '' HTML_HEAD <<'EOF'
 <!doctype html>
@@ -512,14 +523,16 @@ read -r -d '' HTML_HEAD <<'EOF'
 <style>
 :root { --bg: #fbfbfa; --surface: #ffffff; --surface-2: #f2f1ed; --fg: #1d1f21; --fg-2: #52514e; --mut: #6b6a66;
   --line: #dcdcd8; --accent: #2a78d6; --crit: #b3261e; --critbg: #fde7e5; --high: #b45309; --highbg: #fdf0e1;
-  --near: #8a6d00; --nearbg: #fbf6dc; --rise: #5b4bb7; --risebg: #eeebfb; --ok: #1e7d3c; }
+  --near: #8a6d00; --nearbg: #fbf6dc; --rise: #5b4bb7; --risebg: #eeebfb; --ok: #1e7d3c;
+  --head: #dce9f9; --head-ink: #173b66; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #17181a; --surface: #1f2124;
   --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd; --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef;
   --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366; --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14;
-  --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; } }
+  --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; --head: #1d3350; --head-ink: #cfe2fb; } }
 :root[data-theme="dark"] { --bg: #17181a; --surface: #1f2124; --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd;
   --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef; --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366;
-  --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14; --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; }
+  --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14; --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f;
+  --head: #1d3350; --head-ink: #cfe2fb; }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
 header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
@@ -527,7 +540,7 @@ h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 16px; margin: 4px 0 10p
 .mut { color: var(--mut); }
 .body { display: flex; align-items: flex-start; }
 #nav { position: sticky; top: 0; flex: 0 0 200px; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px;
-  max-height: 100vh; overflow-y: auto; }
+  max-height: 100vh; overflow-y: auto; scrollbar-width: thin; }
 #nav button { font: inherit; text-align: left; cursor: pointer; background: transparent; border: 0; border-radius: 6px;
   color: var(--fg-2); padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 #nav button:hover { background: var(--surface-2); color: var(--fg); }
@@ -538,16 +551,24 @@ main { flex: 1 1 auto; min-width: 0; padding: 14px 16px 32px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 12px; }
 .res { font-weight: 600; } .res.COMPLETE { color: var(--ok); } .res.PARTIAL, .res.NONE { color: var(--crit); }
 .nodata { border-color: var(--crit); } .nodata h3 { color: var(--crit); margin-top: 0; }
-.wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+/* a table scrolls inside its own box, no taller than the window, so its sideways scrollbar is always on screen;
+   the scrollbars are styled, so they show even where the system hides them until you scroll */
+.wrap { overflow: auto; max-height: calc(100vh - 150px); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); scrollbar-width: auto; scrollbar-color: var(--mut) var(--surface-2); }
+.wrap::-webkit-scrollbar { width: 12px; height: 12px; }
+.wrap::-webkit-scrollbar-track { background: var(--surface-2); }
+.wrap::-webkit-scrollbar-thumb { background: var(--mut); border-radius: 6px; border: 3px solid var(--surface-2); }
 table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-th { background: var(--surface-2); font-weight: 600; position: sticky; top: 0; }
+th { background: var(--head); color: var(--head-ink); font-weight: 600; position: sticky; top: 0; z-index: 1; }
+td.crit { background: var(--critbg); color: var(--crit); font-weight: 600; } td.high { background: var(--highbg); color: var(--high); font-weight: 600; }
+td.near { background: var(--nearbg); color: var(--near); } td.rise { background: var(--risebg); color: var(--rise); }
 th.n, td.n { text-align: right; }
 table.sortable th { cursor: pointer; user-select: none; }
 table.sortable th[aria-sort="ascending"]::after { content: " \25B2"; font-size: 10px; }
 table.sortable th[aria-sort="descending"]::after { content: " \25BC"; font-size: 10px; }
 td.host, th.host { position: sticky; left: 0; background: var(--surface); z-index: 1; }
-th.host { background: var(--surface-2); z-index: 2; }
+th.host { background: var(--head); z-index: 2; }
 th .dev { display: block; font-weight: 400; color: var(--mut); font-size: 12px; }
 tr.crit td { background: var(--critbg); color: var(--crit); } tr.high td { background: var(--highbg); color: var(--high); }
 tr.near td { background: var(--nearbg); color: var(--near); } tr.rise td { background: var(--risebg); color: var(--rise); }
@@ -568,8 +589,9 @@ read -r -d '' HTML_TAIL <<'EOF'
   "use strict";
   var nav = document.getElementById("nav");
   var panels = Array.prototype.slice.call(document.querySelectorAll("section.panel"));
+  // a panel's element id is "p-" + its name, so the #name in the URL never makes the browser jump to it
   function show(id) {
-    panels.forEach(function (p) { p.hidden = p.id !== id; });
+    panels.forEach(function (p) { p.hidden = p.id !== "p-" + id; });
     Array.prototype.forEach.call(nav.querySelectorAll("button[data-panel]"), function (b) {
       b.setAttribute("aria-selected", b.getAttribute("data-panel") === id ? "true" : "false");
     });
@@ -608,7 +630,7 @@ read -r -d '' HTML_TAIL <<'EOF'
     });
   });
   var want = location.hash.slice(1);
-  show(want && document.getElementById(want) ? want : "overview");
+  show(want && document.getElementById("p-" + want) ? want : "overview");
 })();
 </script>
 </body>
@@ -627,8 +649,9 @@ FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; 
     ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
 FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
 FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
-    c = $3 ":" $5 ($4 != "-" ? "@" $4 : ""); if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cs[p, nc[p]] = $3 ":" $5; cd[p, nc[p]] = $4 }
-    cell[p, c, $6] = f1($7) " / " f1($8) " / " f1($9); cv[p, c, $6] = $7; has[p, $6] = 1; pc[p]++; next }
+    s = $3 ":" $5; c = s "@" $4
+    if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cs[p, nc[p]] = s; cd[p, nc[p]] = $4 }
+    cell[p, c, $6] = ($4 != "-" ? $4 " / " : "") f1($7) " / " f1($9); cv[p, c, $6] = $7; cf[p, c, $6] = fc($10); has[p, $6] = 1; pc[p]++; next }
 { ho[++nho] = $1 }
 function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
     for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\" data-v=\"" num(p[i]) "\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
@@ -644,7 +667,7 @@ END {
             if (!hdrdone) { print "<div class=\"navgroup\">" gname[gk] "</div>"; hdrdone = 1 }
             print "<button type=\"button\" data-panel=\"" p "\" aria-selected=\"false\"><span>" tname[pt[p]] "</span><span class=\"count\">" pc[p] "</span></button>" } }
     print "</nav><main>"
-    print "<section class=\"panel\" id=\"overview\"><h2>Overview</h2>"
+    print "<section class=\"panel\" id=\"p-overview\"><h2>Overview</h2>"
     printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : "")
     if (nn) { print "<div class=\"card nodata\"><h3>No temperature data (never read as cool)</h3><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
     if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th><th class=\"n\">Inlet</th><th class=\"n\">CPU</th><th class=\"n\">GPU</th><th class=\"n\">Mem</th><th class=\"n\">NVMe</th><th class=\"n\">NIC</th><th class=\"n\">Other</th><th>Flags</th></tr></thead><tbody>"
@@ -656,13 +679,13 @@ END {
     if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
     print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
     for (i = 1; i <= np; i++) { p = pord[i]
-        printf "<section class=\"panel\" id=\"%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is %s / High / Crit in &deg;C. Click a header to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "Max" : "Temp")
+        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is device / %s / Crit in &deg;C; flagged readings are shaded. Click a header to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "Max" : "Temp")
         s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th>"
-        for (j = 1; j <= nc[p]; j++) s = s "<th class=\"n\">" e(cs[p, j]) (cd[p, j] != "-" ? "<span class=\"dev\">@" e(cd[p, j]) "</span>" : "") "</th>"
+        for (j = 1; j <= nc[p]; j++) s = s "<th class=\"n\">" e(cs[p, j]) (cd[p, j] != "-" ? "<span class=\"dev\">" e(cd[p, j]) "</span>" : "") "</th>"
         print s "</tr></thead><tbody>"
         for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
             s = "<tr><td class=\"host\">" e(x) "</td>"
-            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; s = s (((p, c, x) in cell) ? "<td class=\"n\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] "</td>" : "<td class=\"n\" data-v=\"\">-</td>") }
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; s = s (((p, c, x) in cell) ? "<td class=\"n" (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" e(cell[p, c, x]) "</td>" : "<td class=\"n\" data-v=\"\">-</td>") }
             print s "</tr>" }
         print "</tbody></table></div></section>" }
     print "</main></div>" }'
@@ -808,7 +831,7 @@ main() {
     # the html's per-type tables: "group type chip dev sensor host value high crit", BMC first, then by type, chip,
     # device and sensor (version order: Core_2 before Core_10); hosts in version order
     awk 'BEGIN { split("inlet cpu gpu mem nvme nic other", t, " "); for (i = 1; i <= 7; i++) r[t[i]] = i }
-         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], g, $3, $4, $5, $6, $1, $8, $10, $11 }' \
+         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], g, $3, $4, $5, $6, $1, $8, $10, $11, $12 }' \
         "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k4,4 -k5,5V -k6,6V | cut -d' ' -f3- > "$WORK/pivot"
     awk 'NR > 1 && $6 != "none" {print $1}' "$WORK/temps_summary.txt" | sort -u | sort -V > "$WORK/hostorder"
     local sensors flagged nodata hwd res rc
