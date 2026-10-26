@@ -199,13 +199,19 @@ python3 generate_dashboard.py <run>.tgz [output.html] [--compare <older run>.tgz
 
 ## Temperatures only: thermals_capture.sh
 
-A standalone script that reads temperatures alone, without fabric_ferret's network tests. It uses the same hwmon and BMC reader, the same flags and the same `FF_HOSTS` syntax. Read only: each host reads `/sys/class/hwmon` (no package needed) and, where it is installed, `ipmitool sensor`. Root runs ipmitool directly; any other `FF_SSH_USER` runs it with `sudo -n`. Nothing is installed, loaded or changed.
+A standalone script that reads temperatures alone, without fabric_ferret's network tests. It uses the same hwmon and BMC reader, the same flags and the same `FF_HOSTS` syntax. It is read only and installs, loads and changes nothing. Each host reads three sources:
+- `/sys/class/hwmon`, which needs no package.
+- `nvidia-smi -q -d TEMPERATURE`, where installed, for NVIDIA GPUs, which hwmon doesn't show.
+- `ipmitool sensor`, where installed, for the BMC. Root runs ipmitool directly; any other `FF_SSH_USER` runs it with `sudo -n`.
+
+Every sensor is typed by what it measures, whichever source read it: inlet, cpu, gpu, mem, nvme, nic or other. A BMC sensor is typed by its name; for example, `HGX_GPU_Temp` is gpu and `NVMe_SSDA_Temp` is nvme. The per-host summary shows the hottest reading of each type.
 
 ```bash
 FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh                    # one snapshot -> thermcap_<label>_<UTC>.jsonl
 FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh -v                 # also list the addresses that took no ssh connection
 FF_HOSTS=@hosts.txt ./thermals_capture.sh -o jsonl,html,md    # any of jsonl (default), html, md
-FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -i 30 -d 600        # a sample every 30 s for 10 min (flags rise)
+FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -d 60            # read now and 60 s later: first/min/max/last, rise flag
+FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -d 600 -i 30      # a reading every 30 s for 10 min
 ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
 ./thermals_capture.sh -t targets.csv -o md                    # targets from a file: hosts and BMCs, logins
 ```
@@ -230,7 +236,7 @@ host,node07
 bmc,10.1.100.11,ADMIN,bmc-pass
 ```
 
-- The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (first, max and last value, with the sensor's flag), `nodata` and `result`.
+- The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (type and first, min, max and last value, with the sensor's flag), `nodata` and `result`.
 - The HTML and Markdown files carry the summary. The HTML is a single self-contained file.
 - The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
 - Unreachable targets are left out of every count and file, silently unless `-v` is given, which lists them on stderr. A target is unreachable when it took no ssh connection in any sample: timed out, refused, no route, or name not found. `RESULT ... unreachable=N` counts them. A target that connects but then fails (auth refused, say) is always reported.

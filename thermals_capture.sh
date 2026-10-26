@@ -7,15 +7,17 @@ THERMALS_VERSION=1.0
 
 usage() {
     cat <<'EOF'
-Usage: FF_HOSTS=<targets> ./thermals_capture.sh [-o jsonl,html,md] [-i interval_s -d duration_s] [-v]
+Usage: FF_HOSTS=<targets> ./thermals_capture.sh [-o jsonl,html,md] [-d seconds [-i seconds]] [-v]
        ./thermals_capture.sh -t file [options]           (targets from the file alone)
        ./thermals_capture.sh --list [-t file]            (print expanded targets, no ssh)
 Targets come from FF_HOSTS or from -t, not both.
 From a jump host (settings ride in the remote command):
        ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o jsonl,md" < thermals_capture.sh
        The run ends by printing the scp line for the file(s) it left on the jump host.
-Read only: each host reads /sys/class/hwmon (CPU, NVMe, NIC…; no package needed) and, where ipmitool is
-installed, `ipmitool sensor` (the BMC: inlet, exhaust…). Nothing is installed, loaded or changed.
+Read only: each host reads /sys/class/hwmon (CPU, NVMe, NIC…; no package needed), where they are installed
+`nvidia-smi -q -d TEMPERATURE` (NVIDIA GPUs, which hwmon doesn't show) and `ipmitool sensor` (the BMC: inlet,
+GPU board, drives, DIMMs…). Nothing is installed, loaded or changed. Every sensor is typed by what it measures
+(inlet, cpu, gpu, mem, nvme, nic, other), whichever of the three read it.
 
 Options
   -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). type is host or bmc. A line
@@ -32,8 +34,9 @@ Options
                    even if an earlier range line covered it. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<label>_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html, md: the summary)
-  -i SECONDS       sample every SECONDS for -d SECONDS (both or neither); default: one snapshot
-  -d SECONDS       how long to sample; the first sample is at 0 and the last at or before SECONDS
+  -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
+                   each sensor's first, min, max and last (and the rise flag)
+  -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
   -v               list on stderr the unreachable targets: those that took no ssh connection (timed out, refused,
                    no route, name not found) in any sample. They are always left out of the counts and files,
                    silently without -v (RESULT unreachable=N counts them). A target that connects but fails
@@ -199,6 +202,26 @@ for d in "$sys"/class/hwmon/hwmon*; do
     done
 done
 [ "$n" -gt 0 ] || echo "@@HWMON $h - - none - - -"
+# NVIDIA GPUs (not in hwmon), read only: nvidia-smi -q -d TEMPERATURE as "@@GPU host gpu<i> core|memory c high crit"
+# (high = Max Operating, crit = Shutdown; newer drivers give these as T.Limit margins instead, turned absolute:
+# margin = degrees left to T.Limit, so high = current + margin - max-op offset, crit = current + margin - shutdown
+# offset), "@@GPU host none <why>" if it fails
+if [ -n "$(command -v nvidia-smi)" ]; then
+    if [ -n "$(command -v timeout)" ]; then g=$(timeout "${2:-60}" nvidia-smi -q -d TEMPERATURE 2>&1); else g=$(nvidia-smi -q -d TEMPERATURE 2>&1); fi; grc=$?
+    r=$(printf '%s\n' "$g" | awk -v h="$h" 'function v(s) { sub(/^[^:]*: */, "", s); sub(/ *C *$/, "", s); return s ~ /^-?[0-9.]+$/ ? s : "-" }
+        function out() { if (g < 0) return
+            if (gh == "-" && gc != "-" && tm != "-" && to != "-") gh = gc + tm - to
+            if (gx == "-" && gc != "-" && tm != "-" && ts != "-") gx = gc + tm - ts
+            if (gc != "-") print "@@GPU", h, "gpu" g, "core", gc, gh, gx; if (mc != "-") print "@@GPU", h, "gpu" g, "memory", mc, mh, "-" }
+        /^GPU [0-9A-Fa-f]+:/ { out(); g++; gc = gh = gx = mc = mh = tm = to = ts = "-"; next }
+        /GPU T\.Limit Temp/ { tm = v($0); next } /GPU Max Operating T\.Limit Temp/ { to = v($0); next } /GPU Shutdown T\.Limit Temp/ { ts = v($0); next }
+        /T\.Limit/ { next }
+        /GPU Current Temp/ { gc = v($0) } /GPU Max Operating Temp/ { gh = v($0) } /GPU Shutdown Temp/ { gx = v($0) }
+        /Memory Current Temp/ { mc = v($0) } /Memory Max Operating Temp/ { mh = v($0) }
+        BEGIN { g = -1 } END { out() }')
+    if [ -n "$r" ]; then echo "$r"
+    else echo "@@GPU $h none rc=${grc}_$(printf '%s' "$g" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
+fi
 [ "$1" = ipmi ] || exit 0
 if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
 # not root: sudo -S with the login's password when the -t file gave one (TC_PW, read from stdin ahead of this
@@ -297,6 +320,8 @@ sample() {
         awk -v t="$lab" -v host="$host" -v why="$why" -v ipmi="$([[ $MODE == ipmi ]] && echo 1 || echo 0)" '
             function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
             $1 == "@@HWMON" { hw = 1; print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
+            $1 == "@@GPU" && $3 == "none" { print t, $2, "gpu", "nvidia", "-", "none", "-", "-", "-", $4 }
+            $1 == "@@GPU" && $3 != "none" { print t, $2, "gpu", "nvidia", $3, $4, sprintf("%.1f", $5), $6, $7, "-" }
             $1 == "@@IPMI" { im = 1 }
             $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
             $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }
@@ -392,24 +417,50 @@ END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C
 
 # ---------- output ----------
 
-# per host the hottest reading of each type and its flags: "Host CPU_max NVMe_max NIC_max Other_max BMC_max Flags"
+# Type by what a sensor measures, whatever read it: GPUs (nvidia-smi, amdgpu) are gpu; a BMC sensor is typed by its
+# name (inlet/ambient, gpu/hbm/nvlink/hgx, nvme/ssd/m.2/drive, dimm/mem, nic/aoc/ocp/cx/port, cpu/proc/soc, else
+# other); hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
+# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged).
+TYPE_AWK='
+FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
+FNR == 1 { print $0, "Min_C"; next }
+$6 == "none" { print $0, "-"; next }
+{ s = tolower($6)
+  if ($2 == "gpu") $3 = "gpu"
+  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /gpu|hbm|nvlink|nvsw|hgx/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
+  else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
+  else if ($4 ~ /^drivetemp/) $3 = "nvme"
+  else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
+  print $0, sprintf("%.1f", mn[$1 SUBSEP $2 SUBSEP $4 SUBSEP $5 SUBSEP $6]) }'
+
+# per host the hottest reading of each type and its flags: "Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-" && index("," fl[$1] ",", "," $3 ":" $12 ",") == 0) fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
-    END {for (x in hs) printf "%s %s %s %s %s %s %s\n", x, (((x, "cpu") in m) ? m[x, "cpu"] : "-"), (((x, "nvme") in m) ? m[x, "nvme"] : "-"),
-         (((x, "nic") in m) ? m[x, "nic"] : "-"), (((x, "other") in m) ? m[x, "other"] : "-"), (((x, "bmc") in m) ? m[x, "bmc"] : "-"), (x in fl ? fl[x] : "-")}'
+    END {split("inlet cpu gpu mem nvme nic other", ty, " ")
+         for (x in hs) { l = x; for (i = 1; i <= 7; i++) l = l " " (((x, ty[i]) in m) ? m[x, ty[i]] : "-"); print l, (x in fl ? fl[x] : "-") } }'
+HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
+
+# the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
+# Crit Flag" (no-data rows left out; the flag is always the last column)
+VIEW_AWK='NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
+$12 ~ /^nodata/ { next }
+ns > 1 { print $1, $2, $3, $4, $5, $6, $7, $13, $8, $9, $10, $11, $12; next }
+{ print $1, $2, $3, $4, $5, $6, $8, $10, $11, $12 }'
 
 # the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data host and source
 print_summary() {
     local ts=$WORK/temps_summary.txt
     echo ""
-    echo "Temperatures, $NSAMP sample(s) (hwmon$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the samples):"
+    local fk=10 mk=7; (( NSAMP > 1 )) && { fk=13; mk=9; }   # flag and max columns of the view
+    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples")):"
     awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
          END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
     if awk 'NR > 1 && $6 != "none" {f = 1} END {exit !f}' "$ts"; then
-        { echo "Host CPU_max NVMe_max NIC_max Other_max BMC_max Flags"; awk "$HOST_MAX_AWK" "$ts" | sort -k7,7r -k1,1; } | column -t | sed 's/^/  /'
+        echo "  Hottest reading per host and type (°C):"
+        { echo "$HOST_MAX_HDR"; sort -k9,9r -k1,1 "$WORK/hostmax"; } | column -t | sed 's/^/  /'
     fi
-    if awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/ {f = 1} END {exit !f}' "$ts"; then
-        echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag):"
-        awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
+    if awk 'NR > 1 && $NF != "-" {f = 1} END {exit !f}' "$WORK/view"; then
+        echo "  Flagged sensors:"
+        { head -n 1 "$WORK/view"; awk 'NR > 1 && $NF != "-"' "$WORK/view" | sort -k${fk},${fk} -k${mk},${mk}nr; } | column -t | sed 's/^/    /'
     fi
     awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts" | sort
     echo ""
@@ -435,7 +486,7 @@ FILENAME == ARGV[3] { if (FNR == 1) {
 FNR == 1 { next }
 $12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\"why\":%s}\n", q($1), q($2), q(substr($12, 8)); next }
 { ns2++; if ($12 != "-") fl++
-  printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
+  printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"min_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($13), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
 END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'
 
 # a self-contained page (no script, no network): the same content as the stderr summary plus every sensor
@@ -443,11 +494,12 @@ HTML_AWK='
 function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
 function fc(f) { return f ~ /^crit/ ? "crit" : f ~ /^high/ ? "high" : f ~ /^near/ ? "near" : f ~ /rise/ ? "rise" : "" }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th>" $i "</th>"; hdr = hdr "</tr>"; next }
+    ns++; all[ns] = $0; if ($NF != "-") { nf++; fr[nf] = $0 } next }
 FNR == 1 { next }
 $12 ~ /^nodata/ { nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
-{ ns++; if ($12 != "-") { nf++; fr[nf] = $0 } all[ns] = $0 }
-function row(l,   p, i, s, c) { split(l, p, " "); c = fc(p[12]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
-    for (i = 1; i <= 12; i++) s = s "<td" (i >= 7 && i <= 11 ? " class=\"n\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
+function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
+    for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
 END {
     print "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
     print "<title>Thermals " e(label) "</title><style>"
@@ -458,15 +510,15 @@ END {
     print ".wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}td.n{text-align:right}"
     print "tr.crit td{background:var(--critbg);color:var(--crit)}tr.high td{background:var(--highbg);color:var(--high)}tr.near td{background:var(--nearbg);color:var(--near)}tr.rise td{background:var(--risebg);color:var(--rise)}"
     print ".nodata{border-color:var(--crit)}.nodata h2{color:var(--crit);margin-top:0}.res{font-weight:600}.res.COMPLETE{color:var(--ok)}.res.PARTIAL,.res.NONE{color:var(--crit)}</style></head><body><main>"
-    printf "<h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %d sample(s) &middot; hwmon%s &middot; thermals_capture %s</div>\n", e(label), e(start), e(end), nsamp, (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
+    printf "<h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
     printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data</div>\n", res, res, hwd, nt, ns, nf, nn
     if (nn) { print "<div class=\"card nodata\"><h2>No temperature data (never read as cool)</h2><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
-    if (nh) { print "<h2>Hottest reading per host and type (&deg;C)</h2><div class=\"wrap\"><table><tr><th>Host</th><th>CPU</th><th>NVMe</th><th>NIC</th><th>Other</th><th>BMC</th><th>Flags</th></tr>"
+    if (nh) { print "<h2>Hottest reading per host and type (&deg;C)</h2><div class=\"wrap\"><table><tr><th>Host</th><th>Inlet</th><th>CPU</th><th>GPU</th><th>Mem</th><th>NVMe</th><th>NIC</th><th>Other</th><th>Flags</th></tr>"
         for (i = 1; i <= nh; i++) { split(hm[i], p, " ")
-            w = p[7] ~ /crit/ ? "crit" : p[7] ~ /high/ ? "high" : p[7] ~ /near/ ? "near" : p[7] ~ /rise/ ? "rise" : ""
-            printf "<tr%s><td>%s</td><td class=\"n\">%s</td><td class=\"n\">%s</td><td class=\"n\">%s</td><td class=\"n\">%s</td><td class=\"n\">%s</td><td>%s</td></tr>\n", (w != "" ? " class=\"" w "\"" : ""), e(p[1]), p[2], p[3], p[4], p[5], p[6], e(p[7]) }
+            w = p[9] ~ /crit/ ? "crit" : p[9] ~ /high/ ? "high" : p[9] ~ /near/ ? "near" : p[9] ~ /rise/ ? "rise" : ""
+            s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td>" e(p[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\">" p[j] "</td>"
+            print s "<td>" e(p[9]) "</td></tr>" }
         print "</table></div>" }
-    hdr = "<tr><th>Host</th><th>Source</th><th>Type</th><th>Chip</th><th>Dev</th><th>Sensor</th><th>First</th><th>Max</th><th>Last</th><th>High</th><th>Crit</th><th>Flag</th></tr>"
     if (nf) { print "<h2>Flagged sensors</h2><div class=\"wrap\"><table>" hdr; for (i = 1; i <= nf; i++) print row(fr[i]); print "</table></div>" }
     if (ns) { print "<h2>Every sensor</h2><div class=\"wrap\"><table>" hdr; for (i = 1; i <= ns; i++) print row(all[i]); print "</table></div>" }
     print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high; rise = up more than " rise "&deg;C over the samples.</p></main></body></html>" }'
@@ -474,17 +526,17 @@ END {
 # the same summary as Markdown (GitHub tables): result, no-data list, per-host maxima, flagged sensors, every sensor
 MD_AWK='
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "|"; al = "|"; for (i = 1; i <= NF; i++) { hdr = hdr " " $i " |"; al = al (i >= 7 && i < NF ? "--:|" : "---|") } hdr = hdr "\n" al; next }
+    ns++; all[ns] = $0; if ($NF != "-") { nf++; fr[nf] = $0 } next }
 FNR == 1 { next }
 $12 ~ /^nodata/ { nd[++nn] = "- **" $1 "** " $2 ": " substr($12, 8); next }
-{ ns++; if ($12 != "-") { nf++; fr[nf] = $0 } all[ns] = $0 }
-function row(l,   p, i, s) { split(l, p, " "); s = "|"; for (i = 1; i <= 12; i++) s = s " " (i == 12 && p[i] != "-" ? "**" p[i] "**" : p[i]) " |"; return s }
+function row(l,   p, i, n, s) { n = split(l, p, " "); s = "|"; for (i = 1; i <= n; i++) s = s " " (i == n && p[i] != "-" ? "**" p[i] "**" : p[i]) " |"; return s }
 END {
-    printf "# Thermals: %s\n\n%s to %s UTC · %d sample(s) · hwmon%s · thermals_capture %s\n\n", label, start, end, nsamp, (ipmi ? " + BMC (ipmitool)" : ""), ver
+    printf "# Thermals: %s\n\n%s to %s UTC · %s · hwmon + nvidia-smi%s · thermals_capture %s\n\n", label, start, end, (nsamp > 1 ? nsamp " samples" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), ver
     printf "**%s** · %d of %d hosts gave readings · %d sensors · %d flagged · %d no-data\n", res, hwd, nt, ns, nf, nn
     if (nn) { print "\n## No temperature data (never read as cool)\n"; for (i = 1; i <= nn; i++) print nd[i] }
-    if (nh) { print "\n## Hottest reading per host and type (°C)\n\n| Host | CPU | NVMe | NIC | Other | BMC | Flags |\n|---|--:|--:|--:|--:|--:|---|"
-        for (i = 1; i <= nh; i++) { split(hm[i], p, " "); printf "| %s | %s | %s | %s | %s | %s | %s |\n", p[1], p[2], p[3], p[4], p[5], p[6], (p[7] == "-" ? "-" : "**" p[7] "**") } }
-    hdr = "| Host | Source | Type | Chip | Dev | Sensor | First | Max | Last | High | Crit | Flag |\n|---|---|---|---|---|---|--:|--:|--:|--:|--:|---|"
+    if (nh) { print "\n## Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
+        for (i = 1; i <= nh; i++) { split(hm[i], p, " "); s = "| " p[1] " |"; for (j = 2; j <= 8; j++) s = s " " p[j] " |"; print s " " (p[9] == "-" ? "-" : "**" p[9] "**") " |" } }
     if (nf) { print "\n## Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
     if (ns) { print "\n## Every sensor\n\n" hdr; for (i = 1; i <= ns; i++) print row(all[i]) }
     print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high; rise = up more than " rise "°C over the samples." }'
@@ -546,9 +598,13 @@ main() {
         [[ $v == jsonl || $v == html || $v == md ]] || die "-o takes a comma-separated list of jsonl, html, md; got '$v' in '$fmt'"
         [[ -n ${seen[$v]+x} ]] || { seen[$v]=1; FMTS+=("$v"); }
     done
-    [[ -n $iv$du ]] && { [[ -n $iv && -n $du ]] || die "-i and -d go together (sample every -i seconds for -d seconds)"; }
-    for v in iv du; do [[ -z ${!v} || ( ${!v} =~ ^[0-9]+$ && ${!v} -gt 0 ) ]] || die "-${v:0:1} must be a positive whole number of seconds, got '${!v}'"; done
-    [[ -z $du ]] || (( du >= iv )) || die "-d ($du) must be at least -i ($iv)"
+    # -d 0 (default): one point-in-time read. -d N: a read now and one N seconds later (min/max), or every -i seconds
+    : "${du:=0}"
+    [[ $du =~ ^[0-9]+$ ]] || die "-d must be a whole number of seconds (0 = one reading), got '$du'"
+    [[ -z $iv || ( $iv =~ ^[0-9]+$ && $iv -gt 0 ) ]] || die "-i must be a positive whole number of seconds, got '$iv'"
+    [[ -z $iv ]] || (( du > 0 )) || die "-i needs -d (how long to sample)"
+    (( du > 0 )) && : "${iv:=$du}"
+    [[ -z $iv ]] || (( du >= iv )) || die "-d ($du) must be at least -i ($iv)"
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
@@ -580,7 +636,7 @@ main() {
 
     local start end n=0 t0 next sp k
     start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    log "Reading temperatures on ${#TARGETS[@]} host(s)$( (( ${#BMCS[@]} )) && echo " and ${#BMCS[@]} BMC(s) out of band"): hwmon$( (( FF_IPMI )) && echo " and BMC (ipmitool, ${FF_IPMI_TIMEOUT}s)")$([[ -n $iv ]] && echo ", every ${iv}s for ${du}s" || echo ", one snapshot"); read only"
+    log "Reading temperatures on ${#TARGETS[@]} host(s)$( (( ${#BMCS[@]} )) && echo " and ${#BMCS[@]} BMC(s) out of band"): hwmon, nvidia-smi$( (( FF_IPMI )) && echo ", BMC (ipmitool, timeout ${FF_IPMI_TIMEOUT}s)")$([[ -n $iv ]] && echo ", every ${iv}s for ${du}s" || echo ", one reading"); read only"
     STOP=0; trap 'STOP=1; log "Stopping after this sample (Ctrl-C again does nothing; each host read ends within its timeout)"' INT TERM HUP
     t0=$SECONDS
     while :; do
@@ -601,7 +657,10 @@ main() {
 
     # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
     awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
-    { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.txt"
+    { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
+    awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
+    awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
+    awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1 > "$WORK/hostmax"
     local sensors flagged nodata hwd res rc
     read -r sensors flagged nodata hwd < <(awk 'NR > 1 && $6 != "none" {s++; if ($12 != "-") f++; if (!($1 in h)) {h[$1] = 1; hw++}} NR > 1 && $12 ~ /^nodata/ {d++}
         END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
@@ -619,14 +678,13 @@ main() {
     local base=$FF_OUT_DIR/thermcap_${label}_$(date -u +%Y%m%dT%H%M%SZ) f out=()
     local -a common=(-v ver="$THERMALS_VERSION" -v label="$label" -v start="$start" -v end="$end" -v res="$res" -v hwd="$hwd"
                      -v nt="$nt" -v unreach="${#UNREACH[@]}" -v ipmi="$FF_IPMI" -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" -v nsamp="$NSAMP")
-    awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1 > "$WORK/hostmax"
     for v in "${FMTS[@]}"; do
         f=$base.$v
         case $v in
             jsonl) awk "${common[@]}" -v iv="$iv" -v du="$du" -v ito="$FF_IPMI_TIMEOUT" -v user="$FF_SSH_USER" "$JSONL_AWK" \
                        "$WORK/samples" "$WORK/hosts" "$WORK/temps.txt" "$WORK/temps_summary.txt" > "$f.tmp" ;;
-            html) awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/temps_summary.txt" > "$f.tmp" ;;
-            md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/temps_summary.txt" > "$f.tmp" ;;
+            html) awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" > "$f.tmp" ;;
+            md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" > "$f.tmp" ;;
         esac && mv "$f.tmp" "$f" || die "could not write $f"
         out+=("$f")
     done
