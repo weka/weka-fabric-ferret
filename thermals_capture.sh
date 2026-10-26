@@ -39,8 +39,9 @@ Options
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
   -v               list on stderr the unreachable targets: those that took no ssh connection (timed out, refused,
-                   no route, name not found) in any sample. They are always left out of the counts and files,
-                   silently without -v (RESULT unreachable=N counts them). A target that connects but fails
+                   no route, name not found) in any sample. They are always left out of the counts, the jsonl
+                   and the md, silently without -v (RESULT unreachable=N counts them; the html lists them under
+                   Not read). A target that connects but fails
                    (auth refused, cut off, no hwmon…) is always reported as no data.
   -h, --help       this text
 
@@ -546,15 +547,20 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 syste
 header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
 h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 16px; margin: 4px 0 10px; } h3 { font-size: 14px; margin: 18px 0 8px; }
 .mut { color: var(--mut); }
+a { color: var(--accent); }
 .body { display: flex; align-items: flex-start; }
 #nav { position: sticky; top: 0; flex: 0 0 200px; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px;
-  max-height: 100vh; overflow-y: auto; scrollbar-width: thin; }
+  height: 100vh; overflow-y: auto; scrollbar-width: thin; }
 #nav button { font: inherit; text-align: left; cursor: pointer; background: transparent; border: 0; border-radius: 6px;
   color: var(--fg-2); padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
 #nav button:hover { background: var(--surface-2); color: var(--fg); }
 #nav button[aria-selected="true"] { background: var(--surface); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
 #nav .count { color: var(--mut); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; }
 #nav .navgroup { color: var(--mut); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 14px 10px 4px; }
+/* Not read sits at the foot of the nav, as the cs dashboards pin their gear */
+#nav-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
+#nav-footer button { width: 100%; }
+#nav button.warn .count { color: var(--high); font-weight: 600; }
 main { flex: 1 1 auto; min-width: 0; padding: 14px 16px 32px; }
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 12px; }
 .res { font-weight: 600; } .res.COMPLETE { color: var(--ok); } .res.PARTIAL, .res.NONE { color: var(--crit); }
@@ -570,7 +576,7 @@ table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 thead { position: sticky; top: 0; z-index: 2; }
 th { background: var(--head); color: var(--head-ink); font-weight: 600; }
-th.grp { text-align: center; border-left: 2px solid var(--surface); }
+th.grp { text-align: left; border-left: 2px solid var(--surface); }
 th .chip { font-weight: 400; opacity: 0.75; font-size: 12px; margin-left: 6px; }
 th.gs, td.gs { border-left: 2px solid var(--line); }
 td.crit { background: var(--critbg); color: var(--crit); font-weight: 600; } td.high { background: var(--highbg); color: var(--high); font-weight: 600; }
@@ -589,6 +595,8 @@ tr.near td { background: var(--nearbg); color: var(--near); } tr.rise td { backg
   main { width: 100%; min-width: 0; }
   #nav { position: static; flex: 1 1 auto; width: 100%; flex-direction: row; flex-wrap: wrap; max-height: none; }
   #nav .navgroup { width: 100%; padding: 6px 10px 2px; }
+  #nav { height: auto; }
+  #nav-footer { margin-top: 0; width: 100%; }
 }
 @media print { #nav { display: none; } section.panel[hidden] { display: block !important; } }
 </style>
@@ -601,17 +609,34 @@ read -r -d '' HTML_TAIL <<'EOF'
   "use strict";
   var nav = document.getElementById("nav");
   var panels = Array.prototype.slice.call(document.querySelectorAll("section.panel"));
+  // each visible table box ends at the bottom of the window, so its sideways scrollbar is on screen
+  // and the nav ends there too, so Not read at its foot is on screen (wide layout only; narrow, the nav wraps)
+  function fitnav() {
+    if (window.innerWidth <= 860) { nav.style.height = ""; return; }
+    nav.style.height = (window.innerHeight - Math.max(0, nav.getBoundingClientRect().top)) + "px";
+  }
+  function fit() {
+    Array.prototype.forEach.call(document.querySelectorAll("section.panel:not([hidden]) .wrap"), function (w) {
+      var top = w.getBoundingClientRect().top + window.scrollY;
+      w.style.maxHeight = Math.max(160, window.innerHeight - top - 12) + "px";
+    });
+    fitnav();
+  }
+  window.addEventListener("resize", fit);
+  window.addEventListener("scroll", fitnav, { passive: true });
   // a panel's element id is "p-" + its name, so the #name in the URL never makes the browser jump to it
   function show(id) {
     panels.forEach(function (p) { p.hidden = p.id !== "p-" + id; });
+    fit();
     Array.prototype.forEach.call(nav.querySelectorAll("button[data-panel]"), function (b) {
       b.setAttribute("aria-selected", b.getAttribute("data-panel") === id ? "true" : "false");
     });
     try { history.replaceState(null, "", "#" + id); } catch (e) { /* file:// in some browsers */ }
   }
-  nav.addEventListener("click", function (ev) {
-    var b = ev.target.closest("button[data-panel]");
-    if (b) show(b.getAttribute("data-panel"));
+  document.addEventListener("click", function (ev) {   // nav buttons, and links such as the Overview's "see Not read"
+    var b = ev.target.closest("[data-panel]");
+    if (!b) return;
+    ev.preventDefault(); show(b.getAttribute("data-panel")); window.scrollTo(0, 0);
   });
   // sort on a header click: numbers by data-v (no reading always last), text naturally (host-2 before host-10)
   function val(row, i, num) {
@@ -663,14 +688,15 @@ function num(x) { return x == "-" ? "" : x }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
 FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th data-col=\"" (i - 1) "\"" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr></thead>"; next }
     ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
-FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
+FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<tr><td class=\"host\">" e($1) "</td><td>" e($2) "</td><td>" e(substr($12, 8)) "</td></tr>"; next }
 FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
     c = $3 ":" $5 "@" $4
     if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cchip[p, nc[p]] = $3; cd[p, nc[p]] = $4; cs[p, nc[p]] = sname($1, $5); cr[p, c] = f1($9) }
     else if (cr[p, c] != f1($9)) crmix[p, c] = 1
     cell[p, c, $6] = f1($7); ccr[p, c, $6] = f1($9); cv[p, c, $6] = $7; cf[p, c, $6] = fc($10); has[p, $6] = 1; pc[p]++; next }
 function sname(g, s) { if (g == "bmc") sub(/_[Tt]emp$/, "", s); gsub(/_/, " ", s); return s }
-{ ho[++nho] = $1 }
+FILENAME == ARGV[5] { ho[++nho] = $1; next }
+FILENAME == ARGV[6] { ur[++nur] = "<tr><td class=\"host\">" e($1) "</td><td>" e($2) "</td></tr>"; next }
 function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
     for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\" data-v=\"" num(p[i]) "\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
 END {
@@ -684,10 +710,10 @@ END {
         for (i = 1; i <= np; i++) { p = pord[i]; if (pg[p] != gk) continue
             if (!hdrdone) { print "<div class=\"navgroup\">" gname[gk] "</div>"; hdrdone = 1 }
             print "<button type=\"button\" data-panel=\"" p "\" aria-selected=\"false\"><span>" tname[pt[p]] "</span><span class=\"count\">" pc[p] "</span></button>" } }
+    print "<div id=\"nav-footer\"><button type=\"button\" data-panel=\"notread\" aria-selected=\"false\"" (nn + nur ? " class=\"warn\"" : "") "><span>Not read</span><span class=\"count\">" nn + nur "</span></button></div>"
     print "</nav><main>"
     print "<section class=\"panel\" id=\"p-overview\"><h2>Overview</h2>"
-    printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : "")
-    if (nn) { print "<div class=\"card nodata\"><h3>No temperature data (never read as cool)</h3><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
+    printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : ""), (nn + nur ? " &middot; <a href=\"#notread\" data-panel=\"notread\">see Not read</a>" : "")
     if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th class=\"n\" data-col=\"1\">Inlet</th><th class=\"n\" data-col=\"2\">CPU</th><th class=\"n\" data-col=\"3\">GPU</th><th class=\"n\" data-col=\"4\">Mem</th><th class=\"n\" data-col=\"5\">NVMe</th><th class=\"n\" data-col=\"6\">NIC</th><th class=\"n\" data-col=\"7\">Other</th><th data-col=\"8\">Flags</th></tr></thead><tbody>"
         for (i = 1; i <= nh; i++) { split(hm[i], q, " ")
             w = q[9] ~ /crit/ ? "crit" : q[9] ~ /high/ ? "high" : q[9] ~ /near/ ? "near" : q[9] ~ /rise/ ? "rise" : ""
@@ -711,25 +737,69 @@ END {
                 s = s (((p, c, x) in cell) ? "<td class=\"" k (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : "") "</td>" : "<td class=\"" k "\" data-v=\"\">-</td>") }
             print s "</tr>" }
         print "</tbody></table></div></section>" }
-    print "</main></div>" }'
+    print "<section class=\"panel\" id=\"p-notread\"><h2>Not read</h2>"
+    print "<h3>No temperature data (" nn ")</h3><p class=\"mut\">Reached, but a source gave no reading; never shown as cool.</p>"
+    if (nn) { print "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th data-col=\"1\">Source</th><th data-col=\"2\">Reason</th></tr></thead><tbody>"; for (i = 1; i <= nn; i++) print nd[i]; print "</tbody></table></div>" }
+    else print "<p>None.</p>"
+    print "<h3>Unreachable (" nur ")</h3><p class=\"mut\">Took no ssh connection in any sample (timed out, refused, no route, name not found); left out of every count.</p>"
+    if (nur) { print "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Target</th><th data-col=\"1\">Reason</th></tr></thead><tbody>"; for (i = 1; i <= nur; i++) print ur[i]; print "</tbody></table></div>" }
+    else print "<p>None.</p>"
+    print "</section></main></div>" }'
 
-# the same summary as Markdown (GitHub tables): result, no-data list, per-host maxima, flagged sensors, every sensor
+# Markdown, laid out like the html: contents, Overview (result, no-data list, hottest per host and type, flagged
+# sensors), then BMC / IPMI and OS, each by type, one row per host. A BMC table has a column per sensor ("HGX GPU",
+# crit in the header when every host has the same one, else in the cell). An OS table has a column per device
+# ("ibp13s0 mlx5"); its cell lists that device's sensors ("asic 41.0 · Module0 26.4"), or "max T of N sensors" past 4 of
+# them (a CPU socket's cores). A flagged reading is bold with its flag. Every single reading is in the jsonl.
 MD_AWK='
+function f1(x) { return x == "-" ? x : sprintf("%.1f", x) }
+function sname(g, s) { if (g == "bmc") sub(/_[Tt]emp$/, "", s); gsub(/_/, " ", s); return s }
+function fl(v, f) { return f == "-" || f == "" ? v : "**" v " " f "**" }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
 FILENAME == ARGV[2] { if (FNR == 1) { hdr = "|"; al = "|"; for (i = 1; i <= NF; i++) { hdr = hdr " " $i " |"; al = al (i >= 7 && i < NF ? "--:|" : "---|") } hdr = hdr "\n" al; next }
-    ns++; all[ns] = $0; if ($NF != "-") { nf++; fr[nf] = $0 } next }
-FNR == 1 { next }
-$12 ~ /^nodata/ { nd[++nn] = "- **" $1 "** " $2 ": " substr($12, 8); next }
-function row(l,   p, i, n, s) { n = split(l, p, " "); s = "|"; for (i = 1; i <= n; i++) s = s " " (i == n && p[i] != "-" ? "**" p[i] "**" : p[i]) " |"; return s }
+    ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
+FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "- **" $1 "** " $2 ": " substr($12, 8); next }
+FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
+    if ($1 == "bmc") { c = $5; if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cn[p, nc[p]] = sname($1, $5); cr[p, c] = f1($9) }
+        else if (cr[p, c] != f1($9)) crmix[p, c] = 1
+        cell[p, c, $6] = f1($7); ccr[p, c, $6] = f1($9); cf[p, c, $6] = $10 }
+    else { c = $4 " " $3; if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cn[p, nc[p]] = ($4 == "-" ? $3 : $4 " " $3) }
+        k = p SUBSEP c SUBSEP $6; n[k]++; if (n[k] == 1 || $7 + 0 > mx[k]) mx[k] = $7 + 0
+        lst[k] = lst[k] (lst[k] == "" ? "" : " · ") sname($1, $5) " " fl(f1($7), $10); if ($10 != "-") wf[k] = $10 }
+    has[p, $6] = 1; pc[p]++; next }
+{ ho[++nho] = $1 }
+function row(l,   q, i, m, s) { m = split(l, q, " "); s = "|"; for (i = 1; i <= m; i++) s = s " " (i == m && q[i] != "-" ? "**" q[i] "**" : q[i]) " |"; return s }
 END {
-    printf "# Thermals: %s\n\n%s to %s UTC · %s · hwmon + nvidia-smi%s · thermals_capture %s\n\n", label, start, end, (nsamp > 1 ? nsamp " samples" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), ver
-    printf "**%s** · %d of %d hosts gave readings · %d sensors · %d flagged · %d no-data\n", res, hwd, nt, ns, nf, nn
-    if (nn) { print "\n## No temperature data (never read as cool)\n"; for (i = 1; i <= nn; i++) print nd[i] }
-    if (nh) { print "\n## Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
-        for (i = 1; i <= nh; i++) { split(hm[i], p, " "); s = "| " p[1] " |"; for (j = 2; j <= 8; j++) s = s " " p[j] " |"; print s " " (p[9] == "-" ? "-" : "**" p[9] "**") " |" } }
-    if (nf) { print "\n## Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
-    if (ns) { print "\n## Every sensor\n\n" hdr; for (i = 1; i <= ns; i++) print row(all[i]) }
-    print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high; rise = up more than " rise "°C over the samples." }'
+    split("inlet cpu gpu mem nvme nic other", tyo, " "); split("Inlet CPU GPU Mem NVMe NIC Other", tyn, " ")
+    for (i = 1; i <= 7; i++) tname[tyo[i]] = tyn[i]
+    gname["bmc"] = "BMC / IPMI"; gname["os"] = "OS (hwmon, nvidia-smi)"; gshort["bmc"] = "BMC"; gshort["os"] = "OS"
+    printf "# Thermals: %s\n\n%s to %s UTC · %s · hwmon + nvidia-smi%s · thermals_capture %s\n\n", label, start, end, (nsamp > 1 ? nsamp " samples (tables show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), ver
+    printf "**%s** · %d of %d hosts gave readings · %d sensors · %d flagged · %d no-data%s\n", res, hwd, nt, ns, nf, nn, (unreach ? " · " unreach " unreachable (no ssh connection)" : "")
+    print "\n**Contents:** [Overview](#overview)"
+    for (g = 1; g <= 2; g++) { gk = (g == 1 ? "bmc" : "os"); s = ""
+        for (i = 1; i <= np; i++) { p = pord[i]; if (pg[p] == gk) s = s (s == "" ? "" : " · ") "[" tname[pt[p]] "](#" tolower(gshort[gk] "-" tname[pt[p]]) ") (" pc[p] ")" }
+        if (s != "") print "- " gname[gk] ": " s }
+    print "\n## Overview"
+    if (nn) { print "\n### No temperature data (never read as cool)\n"; for (i = 1; i <= nn; i++) print nd[i] }
+    if (nh) { print "\n### Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
+        for (i = 1; i <= nh; i++) { split(hm[i], q, " "); s = "| " q[1] " |"; for (j = 2; j <= 8; j++) s = s " " q[j] " |"; print s " " (q[9] == "-" ? "-" : "**" q[9] "**") " |" } }
+    if (nf) { print "\n### Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
+    print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high" (nsamp > 1 ? "; rise = up more than " rise "°C over the samples" : "") "."
+    lastg = ""
+    for (i = 1; i <= np; i++) { p = pord[i]; g = pg[p]
+        if (g != lastg) { print "\n## " gname[g]; lastg = g }
+        printf "\n### %s %s\n\n", gshort[g], tname[pt[p]]
+        s = "| Host |"; a = "|---|"
+        for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+            s = s " " cn[p, j] (g == "bmc" ? (((p, c) in crmix) ? " (temp / crit)" : (cr[p, c] == "-" ? "" : " (crit " cr[p, c] ")")) : "") " |"; a = a (g == "bmc" ? "--:|" : "---|") }
+        print s "\n" a
+        for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
+            s = "| " x " |"
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+                if (g == "bmc") s = s " " (((p, c, x) in cell) ? fl(cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : ""), cf[p, c, x]) : "-") " |"
+                else { k = p SUBSEP c SUBSEP x; s = s " " (!(k in n) ? "-" : n[k] <= 4 ? lst[k] : fl("max " f1(mx[k]) " of " n[k] " sensors", wf[k])) " |" } }
+            print s } }
+    print "\nEvery single reading is in the jsonl (-o jsonl)." }'
 
 # ---------- main ----------
 
@@ -843,6 +913,8 @@ main() {
     done
     end=$(date -u +%Y-%m-%dT%H:%M:%SZ); NSAMP=$n
     unreachable_targets
+    # "target reason" per unreachable target: the html's Not read panel lists them (stderr only with -v)
+    for i in "${UNREACH[@]}"; do echo "${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V > "$WORK/unreachlist"
     local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
 
     # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
@@ -884,9 +956,9 @@ main() {
             jsonl) awk "${common[@]}" -v iv="$iv" -v du="$du" -v ito="$FF_IPMI_TIMEOUT" -v user="$FF_SSH_USER" "$JSONL_AWK" \
                        "$WORK/samples" "$WORK/hosts" "$WORK/temps.txt" "$WORK/temps_summary.txt" > "$f.tmp" ;;
             html) { printf '%s\n' "${HTML_HEAD//@TITLE@/Thermals $label}"
-                    awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder"
+                    awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder" "$WORK/unreachlist"
                     printf '%s\n' "$HTML_TAIL"; } > "$f.tmp" ;;
-            md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" > "$f.tmp" ;;
+            md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder" > "$f.tmp" ;;
         esac && mv "$f.tmp" "$f" || die "could not write $f"
         out+=("$f")
     done
