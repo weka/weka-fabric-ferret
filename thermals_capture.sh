@@ -34,10 +34,10 @@ Options
                    thermcap_<label>_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html, md: the summary)
   -i SECONDS       sample every SECONDS for -d SECONDS (both or neither); default: one snapshot
   -d SECONDS       how long to sample; the first sample is at 0 and the last at or before SECONDS
-  -v               list on stderr the empty addresses: those from a CIDR or range (FF_HOSTS or -t) that took no ssh
-                   connection (timed out, refused, no route) in any sample. They are always left out of the
-                   counts and files (RESULT empty=N counts them). A listed IP or hostname that doesn't answer,
-                   and a ranged address that answers but fails (auth, no hwmon…), is always reported as no data.
+  -v               list on stderr the unreachable targets: those that took no ssh connection (timed out, refused,
+                   no route, name not found) in any sample. They are always left out of the counts and files,
+                   silently without -v (RESULT unreachable=N counts them). A target that connects but fails
+                   (auth refused, cut off, no hwmon…) is always reported as no data.
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
@@ -56,11 +56,11 @@ Settings (the same names as fabric_ferret.sh; default)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
 nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A host or source that
-gave no reading (unreachable, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
+connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
-Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X empty=E"
-(r = hosts with at least one reading, t = targets less the E empty addresses); exit 0 = COMPLETE, 3 = PARTIAL (some host or source gave no data),
+Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
+(r = hosts with at least one reading, t = targets less the U unreachable); exit 0 = COMPLETE, 3 = PARTIAL (some host or source gave no data),
 4 = NONE (no reading at all), 2 = bad input. Ctrl-C or TERM while sampling stops after the current sample and
 writes what was read (exit 0, 3 or 4 as above).
 EOF
@@ -281,9 +281,9 @@ sample() {
         o=$WORK/o.$n.$i; rc=$(cat "$WORK/rc.$n.$i" 2>&1)
         host=$(awk '$1 ~ /^@@(HWMON|IPMI)$/ {print $2; exit}' "$o")
         if [[ -n $host ]]; then : > "$WORK/answered.$i"; else host=${TARGETS[$i]}; fi
-        # an address from a range or CIDR that took no connection: set aside (see empty_addresses)
-        if [[ $rc == 255 && -n ${RANGED[$i]} ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
-            echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/empty.$i"; continue
+        # a target that took no connection: set aside, silent unless -v (see unreachable_targets)
+        if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
+            echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue
         fi
         echo "$n ${TARGETS[$i]} $host host ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
         case $rc in
@@ -325,7 +325,7 @@ load_target_file() {
         case $ty in
             host)
                 [[ -n $h ]] || die "-t $f line $ln: no host"
-                LITERALS[$h]=1; n0=${#TARGETS[@]}; EXPANDING="-t $f line $ln"
+                n0=${#TARGETS[@]}; EXPANDING="-t $f line $ln"
                 if [[ -n ${_SEEN[$h]+x} ]]; then   # one host already listed (FF_HOSTS, a range): this line's login/pw win
                     for k in "${!TARGETS[@]}"; do [[ ${TARGETS[$k]} == "$h" ]] && break; done
                     T_LOGIN[$k]=$lg; unset 'T_PW[k]'; [[ -n $pw ]] && T_PW[$k]=$pw; continue
@@ -344,38 +344,24 @@ load_target_file() {
     fi
 }
 
-# ssh's last error line when nothing took the connection (no host, no sshd); auth or host key failures don't match
-NO_CONNECT_RE='Connection timed out|Connection refused|No route to host|Host is unreachable|Network is unreachable|Operation timed out'
+# ssh's last error line when nothing took the connection (no host, no sshd, no route, name not found); auth and
+# host key failures don't match: a host is there
+NO_CONNECT_RE='Connection timed out|Connection refused|No route to host|Host is unreachable|Network is unreachable|Operation timed out|Could not resolve hostname|Name or service not known'
 
-# mark_ranged: RANGED[i] = 1 for a target that came only from a CIDR or range, not written out as an IP or name
-mark_ranged() {
-    local -A lit=(); local w line e i
-    for e in "${!LITERALS[@]}"; do lit[$e]=1; done
-    _words "$FF_HOSTS"; local -a top=("${WORDS[@]}")
-    for w in "${top[@]}"; do
-        if [[ $w == @* ]]; then
-            while IFS= read -r line || [[ -n $line ]]; do
-                _words "${line%%#*}"; for e in "${WORDS[@]}"; do lit[$e]=1; done
-            done < "${w#@}"
-        else lit[$w]=1; fi
-    done
-    for i in "${!TARGETS[@]}"; do [[ -n ${lit[${TARGETS[$i]}]+x} ]] || RANGED[$i]=1; done
-}
-
-# empty_addresses: a ranged target that took no connection in any sample goes to EMPTY (left out of every count
+# unreachable_targets: a target that took no ssh connection in any sample goes to UNREACH (left out of every count
 # and file; -v lists them). One that answered in another sample gets its none rows back for the samples it missed.
-empty_addresses() {
+unreachable_targets() {
     local i n why h
-    EMPTY=()
+    UNREACH=()
     for i in "${!TARGETS[@]}"; do
-        [[ -s $WORK/empty.$i ]] || continue
+        [[ -s $WORK/unreach.$i ]] || continue
         if [[ -e $WORK/answered.$i ]]; then
             h=$(awk -v t="${TARGETS[$i]}" '$2 == t && $3 != t {print $3; exit}' "$WORK/hosts"); h=${h:-${TARGETS[$i]}}
             while read -r n why; do
                 echo "s$n $h hwmon - - none - - - $why" >> "$WORK/temps.txt"
                 [[ $MODE == ipmi ]] && echo "s$n $h ipmi bmc - none - - - $why" >> "$WORK/temps.txt"
-            done < "$WORK/empty.$i"
-        else EMPTY+=("$i"); fi
+            done < "$WORK/unreach.$i"
+        else UNREACH+=("$i"); fi
     done
 }
 
@@ -436,7 +422,7 @@ FILENAME == ARGV[1] { st[$1] = $2; sord[++ns] = $1; next }
 FILENAME == ARGV[2] { k = $4 " " $2; if (!(k in tg)) { tord[++nx] = k; tt[k] = $4; tn[k] = $2; tl[k] = $5; ta[k] = $6 }
     if (!(k in tg) || tg[k] == $2) tg[k] = $3; next }
 FILENAME == ARGV[3] { if (FNR == 1) {
-        printf "{\"type\":\"run\",\"tool\":\"thermals_capture\",\"version\":%s,\"label\":%s,\"start\":%s,\"end\":%s,\"samples\":%d,\"interval_s\":%s,\"duration_s\":%s,\"ipmi\":%s,\"ipmi_timeout_s\":%s,\"temp_margin_c\":%s,\"temp_rise_c\":%s,\"ssh_user\":%s,\"targets\":%d,\"empty_addresses\":%d}\n", q(ver), q(label), q(start), q(end), ns, (iv == "" ? "null" : iv), (du == "" ? "null" : du), ipmi, ito, margin, rise, q(user), nt, empty
+        printf "{\"type\":\"run\",\"tool\":\"thermals_capture\",\"version\":%s,\"label\":%s,\"start\":%s,\"end\":%s,\"samples\":%d,\"interval_s\":%s,\"duration_s\":%s,\"ipmi\":%s,\"ipmi_timeout_s\":%s,\"temp_margin_c\":%s,\"temp_rise_c\":%s,\"ssh_user\":%s,\"targets\":%d,\"unreachable\":%d}\n", q(ver), q(label), q(start), q(end), ns, (iv == "" ? "null" : iv), (du == "" ? "null" : du), ipmi, ito, margin, rise, q(user), nt, unreach
         for (i = 1; i <= nx; i++) { k = tord[i]
             printf "{\"type\":\"host\",\"target\":%s,\"host\":%s,\"target_type\":%s,\"login\":%s,\"auth\":%s}\n", q(tn[k]), q(tg[k]), q(tt[k]), q(tl[k]), q(ta[k]) }
         for (i = 1; i <= ns; i++) printf "{\"type\":\"sample\",\"sample\":%s,\"time\":%s}\n", q(sord[i]), q(st[sord[i]])
@@ -448,7 +434,7 @@ FNR == 1 { next }
 $12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\"why\":%s}\n", q($1), q($2), q(substr($12, 8)); next }
 { ns2++; if ($12 != "-") fl++
   printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
-END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"empty\":%d}\n", q(res), hwd, nt, ns2, fl, nd, empty }'
+END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'
 
 # a self-contained page (no script, no network): the same content as the stderr summary plus every sensor
 HTML_AWK='
@@ -545,7 +531,7 @@ main() {
     [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
     [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
     # targets: FF_HOSTS (FF_SSH_USER, key ssh, sudo -n), or the -t file's host and bmc lines
-    declare -gA RANGED=() LITERALS=(); declare -ga T_LOGIN=() T_PW=() BMCS=() B_LOGIN=() B_PW=(); HAVE_PW=0
+    declare -ga T_LOGIN=() T_PW=() BMCS=() B_LOGIN=() B_PW=(); HAVE_PW=0
     TARGETS=(); _SEEN=(); INPUT_RANGES=0
     if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; done; fi
     [[ -n $tfile ]] && load_target_file "$tfile"
@@ -564,7 +550,6 @@ main() {
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
-    mark_ranged
     LOCAL_IPMITOOL=; (( ${#BMCS[@]} )) && { LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; }
     # a password ssh login: sshpass -e if installed, else SSH_ASKPASS, which works unattended from OpenSSH 8.4
     SSHPASS_CMD=; local ver
@@ -609,8 +594,8 @@ main() {
         (( STOP )) && { log "Stopped after $n sample(s)"; break; }
     done
     end=$(date -u +%Y-%m-%dT%H:%M:%SZ); NSAMP=$n
-    empty_addresses
-    local nt=$(( ${#TARGETS[@]} - ${#EMPTY[@]} + ${#BMCS[@]} ))
+    unreachable_targets
+    local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
 
     # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
     awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
@@ -620,10 +605,10 @@ main() {
         END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
     if (( sensors == 0 )); then res=NONE rc=4; elif (( nodata > 0 )); then res=PARTIAL rc=3; else res=COMPLETE rc=0; fi
     print_summary >&2
-    (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} addresses took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
-    if (( verbose && ${#EMPTY[@]} )); then
-        echo "Empty addresses: ${#EMPTY[@]} from FF_HOSTS ranges took no ssh connection in any sample (left out of every count and file):" >&2
-        for i in "${EMPTY[@]}"; do echo "  ${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/empty.$i")"; done | sort -V >&2
+    (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
+    if (( verbose && ${#UNREACH[@]} )); then
+        echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2
+        for i in "${UNREACH[@]}"; do echo "  ${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V >&2
         echo "" >&2
     fi
 
@@ -631,7 +616,7 @@ main() {
     label=$(clean "${label:-${TARGETS[0]:-${BMCS[0]}}}")
     local base=$FF_OUT_DIR/thermcap_${label}_$(date -u +%Y%m%dT%H%M%SZ) f out=()
     local -a common=(-v ver="$THERMALS_VERSION" -v label="$label" -v start="$start" -v end="$end" -v res="$res" -v hwd="$hwd"
-                     -v nt="$nt" -v empty="${#EMPTY[@]}" -v ipmi="$FF_IPMI" -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" -v nsamp="$NSAMP")
+                     -v nt="$nt" -v unreach="${#UNREACH[@]}" -v ipmi="$FF_IPMI" -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" -v nsamp="$NSAMP")
     awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1 > "$WORK/hostmax"
     for v in "${FMTS[@]}"; do
         f=$base.$v
@@ -645,7 +630,7 @@ main() {
     done
     for f in "${out[@]}"; do log "Wrote $f"; done
     log "To copy here from a jump host: scp '$(hostname -f 2>&1):$(cd "$(dirname "${out[0]}")" && pwd)/${base##*/}.*' ."
-    echo "RESULT data=$res hosts=$hwd/$nt sensors=$sensors flagged=$flagged nodata=$nodata empty=${#EMPTY[@]}" >&2
+    echo "RESULT data=$res hosts=$hwd/$nt sensors=$sensors flagged=$flagged nodata=$nodata unreachable=${#UNREACH[@]}" >&2
     exit $rc
 }
 

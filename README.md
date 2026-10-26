@@ -233,7 +233,7 @@ bmc,10.1.100.11,ADMIN,bmc-pass
 - The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (first, max and last value, with the sensor's flag), `nodata` and `result`.
 - The HTML and Markdown files carry the summary. The HTML is a single self-contained file.
 - The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
-- Empty addresses are left out of every count and file. An empty address is one that came from a CIDR or range (in `FF_HOSTS` or on a `-t` host line) and took no ssh connection (timed out, refused, no route) in any sample. `RESULT ... empty=N` counts them, and `-v` lists them on stderr. An IP or hostname listed on its own is always reported, and so is a ranged address that answers but fails (auth refused, say).
+- Unreachable targets are left out of every count and file, silently unless `-v` is given, which lists them on stderr. A target is unreachable when it took no ssh connection in any sample: timed out, refused, no route, or name not found. `RESULT ... unreachable=N` counts them. A target that connects but then fails (auth refused, say) is always reported.
 - A host or source that gives no reading is listed with the reason. Reasons include unreachable, cut off, no hwmon sensors, ipmitool not installed or timed out, and sudo refused. A host with no data is never shown as cool.
 - The last line is `RESULT data=COMPLETE|PARTIAL|NONE ...`. Exit codes: 0 = complete, 3 = partial, 4 = no reading at all, 2 = bad input.
 
