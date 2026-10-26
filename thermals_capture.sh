@@ -33,7 +33,7 @@ Options
                    stdin stream, not argv); without a pw, sudo -n. A line naming one host sets its login and pw
                    even if an earlier range line covered it. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
-                   thermcap_<label>_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html, md: the summary)
+                   thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html, md: the summary)
   -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
@@ -54,7 +54,7 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60); a whole host read is cut off 30 s after it
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
-  FF_LABEL         name in the output file names (the first host with readings)
+  FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
@@ -452,10 +452,11 @@ SRC_AWK='NR > 1 && $6 != "none" { k = $1 " " ($2 == "gpu" ? "hwmon" : $2); if (!
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)
-VIEW_AWK='NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
+VIEW_AWK='function f(x) { return x == "-" ? x : sprintf("%.1f", x) }
+NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
 $12 ~ /^nodata/ { next }
-ns > 1 { print $1, $2, $3, $4, $5, $6, $7, $13, $8, $9, $10, $11, $12; next }
-{ print $1, $2, $3, $4, $5, $6, $8, $10, $11, $12 }'
+ns > 1 { print $1, $2, $3, $4, $5, $6, f($7), f($13), f($8), f($9), f($10), f($11), $12; next }
+{ print $1, $2, $3, $4, $5, $6, f($8), f($10), f($11), $12 }'
 
 # the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data host and source
 print_summary() {
@@ -501,7 +502,7 @@ HTML_AWK='
 function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
 function fc(f) { return f ~ /^crit/ ? "crit" : f ~ /^high/ ? "high" : f ~ /^near/ ? "near" : f ~ /rise/ ? "rise" : "" }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
-FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th>" $i "</th>"; hdr = hdr "</tr>"; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr>"; next }
     ns++; all[ns] = $0; if ($NF != "-") { nf++; fr[nf] = $0 } next }
 FNR == 1 { next }
 $12 ~ /^nodata/ { nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
@@ -514,13 +515,13 @@ END {
     print "@media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#17181a;--fg:#e6e6e3;--mut:#a0a3a8;--line:#33363a;--card:#1f2124;--crit:#ff8a80;--critbg:#3d1c1a;--high:#ffb366;--highbg:#3a2a16;--near:#e6cf5c;--nearbg:#332e14;--rise:#b3a6ff;--risebg:#2a2640;--ok:#7bd88f}}"
     print "body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1200px;margin:0 auto;padding:16px}"
     print "h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}.mut{color:var(--mut)}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}"
-    print ".wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}td.n{text-align:right}"
+    print ".wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}td.n,th.n{text-align:right}"
     print "tr.crit td{background:var(--critbg);color:var(--crit)}tr.high td{background:var(--highbg);color:var(--high)}tr.near td{background:var(--nearbg);color:var(--near)}tr.rise td{background:var(--risebg);color:var(--rise)}"
     print ".nodata{border-color:var(--crit)}.nodata h2{color:var(--crit);margin-top:0}.res{font-weight:600}.res.COMPLETE{color:var(--ok)}.res.PARTIAL,.res.NONE{color:var(--crit)}</style></head><body><main>"
     printf "<h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
     printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data</div>\n", res, res, hwd, nt, ns, nf, nn
     if (nn) { print "<div class=\"card nodata\"><h2>No temperature data (never read as cool)</h2><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
-    if (nh) { print "<h2>Hottest reading per host and type (&deg;C)</h2><div class=\"wrap\"><table><tr><th>Host</th><th>Inlet</th><th>CPU</th><th>GPU</th><th>Mem</th><th>NVMe</th><th>NIC</th><th>Other</th><th>Flags</th></tr>"
+    if (nh) { print "<h2>Hottest reading per host and type (&deg;C)</h2><div class=\"wrap\"><table><tr><th>Host</th><th class=\"n\">Inlet</th><th class=\"n\">CPU</th><th class=\"n\">GPU</th><th class=\"n\">Mem</th><th class=\"n\">NVMe</th><th class=\"n\">NIC</th><th class=\"n\">Other</th><th>Flags</th></tr>"
         for (i = 1; i <= nh; i++) { split(hm[i], p, " ")
             w = p[9] ~ /crit/ ? "crit" : p[9] ~ /high/ ? "high" : p[9] ~ /near/ ? "near" : p[9] ~ /rise/ ? "rise" : ""
             s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td>" e(p[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\">" p[j] "</td>"
@@ -686,7 +687,7 @@ main() {
 
     local label=${FF_LABEL:-$(awk 'NR > 1 && $6 != "none" {print $1; exit}' "$WORK/temps_summary.txt")}
     label=$(clean "${label:-${TARGETS[0]:-${BMCS[0]}}}")
-    local base=$FF_OUT_DIR/thermcap_${label}_$(date -u +%Y%m%dT%H%M%SZ) f out=()
+    local base=$FF_OUT_DIR/thermcap_$(date -u +%Y%m%dT%H%M%SZ) f out=()
     local -a common=(-v ver="$THERMALS_VERSION" -v label="$label" -v start="$start" -v end="$end" -v res="$res" -v hwd="$hwd"
                      -v nt="$nt" -v unreach="${#UNREACH[@]}" -v ipmi="$FF_IPMI" -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" -v nsamp="$NSAMP")
     for v in "${FMTS[@]}"; do

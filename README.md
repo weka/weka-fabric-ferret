@@ -207,7 +207,7 @@ A standalone script that reads temperatures alone, without fabric_ferret's netwo
 Every sensor is typed by what it measures, whichever source read it: inlet, cpu, gpu, mem, nvme, nic or other. A BMC sensor is typed by its name; for example, `HGX_GPU_Temp` is gpu and `NVMe_SSDA_Temp` is nvme. The per-host summary shows the hottest reading of each type.
 
 ```bash
-FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh                    # one snapshot -> thermcap_<label>_<UTC>.jsonl
+FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh                    # one reading -> thermcap_<UTC>.jsonl
 FF_HOSTS=10.1.0.0/24 ./thermals_capture.sh -v                 # also list the addresses that took no ssh connection
 FF_HOSTS=@hosts.txt ./thermals_capture.sh -o jsonl,html,md    # any of jsonl (default), html, md
 FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -d 60            # read now and 60 s later: first/min/max/last, rise flag
