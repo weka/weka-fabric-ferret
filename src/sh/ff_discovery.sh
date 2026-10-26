@@ -88,8 +88,7 @@ rail_consistency() {
     [[ $RAIL_MODE == cidr ]] && (( NR >= 2 )) || return 0
     local maj k r n=0
     maj=$(for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do [[ ${RNIC[$k,$r]} != - ]] && echo "$r ${RNIC[$k,$r]}"; done; done |
-        awk -v nr=$NR '{c[$1 " " $2]++} END {for (x in c) {split(x, p, " "); if (c[x] > b[p[1]]) {b[p[1]] = c[x]; m[p[1]] = p[2]}}
-                            for (r = 0; r < nr; r++) printf "%s ", (r in m) ? m[r] : "-"}')
+        awk -v nr=$NR '#@awk ff_rail_consistency')
     if (( NR > 2 )); then   # a rail NIC that is the name most hosts use for another rail
         local -a M=($maj); local s
         for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
@@ -118,10 +117,7 @@ rail_consistency() {
 
 # "mtu host" lines -> where they differ: "most at M; N on h1 h2;" (nothing when they agree)
 mtu_odd() {
-    awk '{if (!($1 in n)) d++; n[$1]++; h[$1] = h[$1] " " $2} END {if (d < 2) exit; for (m in n) if (n[m] > b) {b = n[m]; mm = m}
-         t = 0; for (m in n) if (n[m] == b) t++
-         if (t > 1) {printf "no majority:"; for (m in n) printf " %s on%s;", m, h[m]}
-         else {printf "most at %s;", mm; for (m in n) if (m != mm) printf " %s on%s;", m, h[m]}}'
+    awk '#@awk ff_mtu_odd'
 }
 
 # Client routes: each client asks its kernel for the route to one backend IP per rail and backend subnet;
@@ -145,10 +141,7 @@ client_routes() {
     wait
     for k in "${CLI[@]}"; do
         local decl=" "; for (( j = 0; j < CN[$k]; j++ )); do decl+="${CNIC[$k,$j]} "; done
-        awk -v h="${T_HOST[$k]}" -v decl="$decl" -v rl="$(for ip in "${!rl[@]}"; do printf '%s=%s ' "$ip" "${rl[$ip]}"; done)" '
-            BEGIN { n = split(rl, q, " "); for (i = 1; i <= n; i++) { split(q[i], kv, "="); R[kv[1]] = kv[2] } }
-            $1 == "@@CROUTE" { d = $3; dc = index(decl, " " d " "); print h, (dc ? d : "-"), R[$2], $2, d, (dc ? "declared" : "undeclared"); seen = 1 }
-            END { if (!seen) print h, "-", "-", "-", "none", "unread" }' "$WORK/croute.$k"
+        awk -v h="${T_HOST[$k]}" -v decl="$decl" -v rl="$(for ip in "${!rl[@]}"; do printf '%s=%s ' "$ip" "${rl[$ip]}"; done)" '#@awk ff_client_routes' "$WORK/croute.$k"
     done | sort -V > "$WORK/croutes"
     cat "$WORK/croutes" > "$COLLECT_DIR/client_routes.txt"
     local bad; bad=$(awk '$6 == "undeclared"' "$WORK/croutes")

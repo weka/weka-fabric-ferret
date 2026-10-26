@@ -146,8 +146,7 @@ client_phase() {
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
     collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"; collect_temps "iter${ITER}_$P"
     hostctr_delta "iter${ITER}_client$P" "$pre.hc" "$post.hc"; hc_log "client phase $P" "$post.hc"
-    awk -v it="iter${ITER}_client$P" 'NR==FNR {pre[$1" "$2]=$3; next}
-        ($1" "$2) in pre && $3 > pre[$1" "$2] {print it, $1, $2, $3 - pre[$1" "$2]}' "$pre.prio" "$post.prio" > "$WORK/cprio_delta"
+    awk -v it="iter${ITER}_client$P" '#@awk ff_client_phase.prio' "$pre.prio" "$post.prio" > "$WORK/cprio_delta"
     cat "$WORK/cprio_delta" >> "$COLLECT_DIR/prio_counters.txt"
     awk 'tolower($3) !~ /byte|packet/ || $3 ~ /^rdma:/' "$WORK/cprio_delta" | sort -k4 -rn > "$WORK/cprio_events"
     if [[ -s $WORK/cprio_events ]]; then
@@ -157,8 +156,7 @@ client_phase() {
     local d; d=$(compute_drops "$pre" "$post" "iter${ITER}_client$P")
     if [[ -n $d ]]; then log "Drops during client phase $P:"; echo "$d" | awk '{NF--; print}' | column -t | sed 's/^/#   /' >&2; echo "$d" >> "$DROP_TOTALS"
     else log "No drop counter increases in client phase $P ($(wc -l < "$post" | tr -d ' ') NICs read)"; fi
-    local flaps; flaps=$(awk -v it="iter${ITER}_client$P" 'NR == FNR {c[$1] = $6; next}
-        ($1 in c) && $6 ~ /^[0-9]+$/ && c[$1] ~ /^[0-9]+$/ && $6 > c[$1] {print it, $1, $2, $6 - c[$1]}' "$pre" "$post")
+    local flaps; flaps=$(awk -v it="iter${ITER}_client$P" '#@awk ff_client_phase.flaps' "$pre" "$post")
     if [[ -n $flaps ]]; then
         log "WARNING: links went down during client phase $P (host_nic ip carrier-down count):"
         echo "$flaps" | cut -d' ' -f2- | column -t | sed 's/^/#   /' >&2; echo "$flaps" >> "$COLLECT_DIR/link_flaps.txt"

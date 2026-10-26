@@ -560,11 +560,7 @@ main() {
         IFS=, read -r -a fl <<<"$FF_LINE_GBPS"
         for r in "${RAILS[@]}"; do LINE[r]=${fl[r]:-${fl[0]}}; done
     else
-        read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" 'NR == FNR {rail[$1] = $2; next}
-            ($3 in rail) && $4 ~ /^[0-9]+Mb\/s$/ {s = $4; sub(/Mb\/s/, "", s); n[rail[$3] " " s / 1000]++}
-            END {for (k in n) {split(k, p, " "); r = p[1]; v = p[2] + 0
-                     if (n[k] > c[r] || (n[k] == c[r] && v > m[r])) {c[r] = n[k]; m[r] = v}}
-                 for (i = 1; i <= length(L); i++) printf "%s ", (substr(L, i, 1) in m) ? m[substr(L, i, 1)] : 0}' "$WORK/iprail" "$NIC_DIAG")"
+        read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" '#@awk ff_main.rail_speed' "$WORK/iprail" "$NIC_DIAG")"
         local mx=0 differ= ms=""; for r in "${RAILS[@]}"; do (( MODE[r] > mx )) && mx=${MODE[r]}; done
         for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G"; done
         (( mx )) || for r in "${RAILS[@]}"; do LINE[r]=; done
@@ -577,9 +573,7 @@ main() {
         cutoffs() { awk -v l="$1" -v o="$FF_OK_PCT" -v s="$FF_SLOW_PCT" 'BEGIN {printf "%gG (OK >= %gG, SLOW >= %gG)", l, l * o / 100, l * s / 100}'; }
         if [[ -n $same ]]; then log "Link speed for cut-offs: $(cutoffs "${LINE[0]}")"
         else log "Link speed for cut-offs: $(for r in "${RAILS[@]}"; do printf '%srail %s %s' "$( (( r )) && echo ', ')" "$(rail_letter $r)" "$(cutoffs "${LINE[r]:-0}")"; done)"; fi
-        awk -v lines="$RAIL_LINES" 'BEGIN {n = split(lines, q, " "); for (i = 1; i <= n; i++) {split(q[i], kv, "="); want[kv[1]] = kv[2] * 1000 "Mb/s"}}
-            NR == FNR {rail[$1] = $2; next}
-            $4 ~ /^[0-9]+Mb\/s$/ && ($3 in rail) && $4 != want[rail[$3]] {printf "#   %s %s %s (rail %s)\n", $1, $2, $4, rail[$3]}' \
+        awk -v lines="$RAIL_LINES" '#@awk ff_main.speed_mismatch' \
             "$WORK/iprail" "$NIC_DIAG" > "$WORK/offspeed"
         if [[ -s $WORK/offspeed ]]; then
             if [[ -n $same ]]; then log "NICs not at ${LINE[0]}G:"; else log "NICs not at their rail's speed:"; fi
@@ -600,9 +594,7 @@ main() {
     lock_all touch   # preflight can be long (mesh); refresh before load
     collect_sysinfo
     rx_config > "$WORK/rxcfg"
-    log "Rail NIC receive config: $(awk '{ n++; if (split($4, x, "/") == 2 && x[1] + 0 < x[2] + 0) r++
-        if (split($5, y, "/") == 2) { split(y[1], c, "x"); split(y[2], m, "x"); if (c[1] + 0 < m[1] + 0 || c[2] + 0 < m[2] + 0) p++ } }
-        END { printf "%d NICs read; rx ring below its maximum on %d, PCIe link below its maximum on %d", n, r, p }' "$WORK/rxcfg")"
+    log "Rail NIC receive config: $(awk '#@awk ff_main.rxcfg' "$WORK/rxcfg")"
     # --- 5. iperf3 servers ---
     ORDER=($(for k in "${ELIG[@]}"; do echo "$k ${T_HOST[$k]}"; done | sort -V -k2 | awk '{print $1}'))
     CL_K=1; (( ${#CLI[@]} )) && client_plan 1   # backend NICs that serve several client flows at once need a server each
@@ -794,21 +786,12 @@ main() {
         collect_counters "$FEC_SCRIPT" "$WORK/fec_post"
         fec_deltas "iter$ITER" $(( $(date +%s) - fec_t0 > 0 ? $(date +%s) - fec_t0 : 1 ))
         # per-priority / pause / ECN counter increases: "iterN host_nic counter delta"
-        awk -v it="iter$ITER" 'NR==FNR {pre[$1" "$2]=$3; next}
-            ($1" "$2) in pre && $3 > pre[$1" "$2] {print it, $1, $2, $3 - pre[$1" "$2]}' \
+        awk -v it="iter$ITER" '#@awk ff_main.prio' \
             "$WORK/prio_pre" "$WORK/prio_post" > "$WORK/prio_delta"
         if [[ -s $WORK/prio_delta ]]; then
             cat "$WORK/prio_delta" >> "$COLLECT_DIR/prio_counters.txt"
             # which priority carried the bytes, per rail (shows where each rail's DSCP map put the traffic)
-            log "Traffic by priority in iteration $ITER (rx+tx bytes): $(awk -v RL="${LETTERS:0:NR}" '
-                NR == FNR { rail[$1] = $3; next }
-                { l = tolower($3) } l ~ /byte/ && match(l, /pri(ority|o)?_?[0-9]/) {
-                    p = substr(l, RSTART, RLENGTH); gsub(/[^0-9]/, "", p); r = ($2 in rail) ? rail[$2] : "?"
-                    b[r " " p] += $4; n++ }
-                END { RL = RL "?"; for (r = 1; r <= length(RL); r++) { R = substr(RL, r, 1); t = ""
-                          for (p = 0; p <= 7; p++) if ((R " " p) in b) t = t sprintf(" prio%d %s", p, b[R " " p] < 5e7 ? "<0.1GB" : sprintf("%.1fGB", b[R " " p] / 1e9))
-                          if (t != "") printf "rail %s:%s  ", R, t }
-                      if (!n) printf "no per-priority byte counters" }' "$WORK/nicmap" "$WORK/prio_delta")"
+            log "Traffic by priority in iteration $ITER (rx+tx bytes): $(awk -v RL="${LETTERS:0:NR}" '#@awk ff_main.prio_traffic' "$WORK/nicmap" "$WORK/prio_delta")"
             awk 'tolower($3) !~ /byte|packet/ || $3 ~ /^rdma:/' "$WORK/prio_delta" | sort -k4 -rn > "$WORK/prio_events"
             if [[ -s $WORK/prio_events ]]; then
                 local ne; ne=$(wc -l < "$WORK/prio_events" | tr -d ' ')
@@ -828,8 +811,7 @@ main() {
             log "No drop counter increases in iteration $ITER ($(wc -l < "$DROPS_POST" | tr -d ' ') NICs read)"
         fi
         # a rail link that went down during the iteration: its runs measured a flap, not the fabric
-        local flaps; flaps=$(awk -v it="iter$ITER" 'NR == FNR {c[$1] = $6; next}
-            ($1 in c) && $6 ~ /^[0-9]+$/ && c[$1] ~ /^[0-9]+$/ && $6 > c[$1] {print it, $1, $2, $6 - c[$1]}' "$DROPS_PRE" "$DROPS_POST")
+        local flaps; flaps=$(awk -v it="iter$ITER" '#@awk ff_main.flaps' "$DROPS_PRE" "$DROPS_POST")
         if [[ -n $flaps ]]; then
             log "WARNING: rail links went down during iteration $ITER (host_nic ip carrier-down count):"
             echo "$flaps" | cut -d' ' -f2- | column -t | sed 's/^/#   /' >&2
@@ -857,13 +839,9 @@ main() {
         if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
             local ts=$COLLECT_DIR/temps_summary.txt
             echo "Temperatures (temps_summary.txt; hwmon$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
-            awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
-                 END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
+            awk '#@awk ff_main.temp_counts' "$ts"
             # per host the hottest reading of each type
-            awk 'NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-") fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
-                 END {print "Host CPU_max NVMe_max NIC_max Other_max BMC_max Flags"
-                      for (x in hs) printf "%s %s %s %s %s %s %s\n", x, (((x, "cpu") in m) ? m[x, "cpu"] : "-"), (((x, "nvme") in m) ? m[x, "nvme"] : "-"),
-                          (((x, "nic") in m) ? m[x, "nic"] : "-"), (((x, "other") in m) ? m[x, "other"] : "-"), (((x, "bmc") in m) ? m[x, "bmc"] : "-"), (x in fl ? fl[x] : "-")}' "$ts" \
+            awk '#@awk ff_main.temp_hosts' "$ts" \
                 | { read -r hdr; echo "$hdr"; sort -k7,7r -k1,1V; } | column -t | sed 's/^/  /'
             if awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/ {f = 1} END {exit !f}' "$ts"; then
                 echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag):"
@@ -885,8 +863,7 @@ main() {
         local k r; : > "$WORK/cres0"
         { for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
               echo "$( [[ ${RIP[$k,$r]} == none ]] && echo "none_${T_HOST[$k]}_$(rail_letter $r)" || echo "${RIP[$k,$r]}") backend ${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r) ${LINE[r]:-0} ${RMTU[$k,$r]:-1500} ${RSTATE[$k,$r]// /_}"; done; done
-          (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 {s = $7; sub(/Mb\/s/, "", s)
-              print ($4 == "none" ? "none_" $1 "_" $3 : $4), "client", $1, $3, "-", (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0)), ($5 ~ /^[0-9]+$/ ? $5 : 1500), $6}' "$COLLECT_DIR/clients.txt"; } > "$WORK/dnmap"
+          (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" '#@awk ff_main.client_map' "$COLLECT_DIR/clients.txt"; } > "$WORK/dnmap"
         if grep -q 'Gbits/sec' "$RESULTS" || { (( ${#CLI[@]} )) && grep -q 'Gbits/sec' "$CRESULTS"; }; then
             echo "Throughput per data NIC, backends and clients, worst first (Gbps; Same: backend to backend on its rail$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate")$( (( ${#CLI[@]} )) && echo "; CB_Out / CB_In: client<->backend runs this NIC sent / received; All_: the all-at-once phase"); Expect: the lowest expected rate over its runs; Status: each column's average share of its expected rate, worst, (retr) when Retr_% is above $FF_RETR_PCT (FF_RETR_PCT); Retr: TCP retransmits over the runs it sent, Retr_% of the segments it sent; a NIC with no runs shows its rail state):"
             awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" -v rl="$FF_RETR_PCT" -v cl=${#CLI[@]} "$NIC_SUM_AWK" "$WORK/dnmap" "$RESULTS" "$( (( ${#CLI[@]} )) && echo "$CRESULTS" || echo "$WORK/cres0")" \
@@ -920,10 +897,7 @@ main() {
                 echo "UDP (-b 0) by receiving host: avg Gbps per run, datagrams lost/sent, loss %:"
                 echo "  Expected_% = the loss the offered load alone guarantees: what the senders sent into a NIC above its line rate"
                 # udp_expected.txt: iterN phase wave src dst offered rx expected lost sent gbps tx
-                awk 'NR == FNR { host[$1] = $2; next }
-                    { h = host[$5]; gs[h] += $11; c[h]++; l[h] += $9; s[h] += $10; e[h] += $8 * ($10 - $12) }
-                    END { print "Host Avg_Gbps Lost/Sent Loss_% Expected_%"
-                          for (h in c) printf "%s %.1f %d/%d %.3f %.3f\n", h, gs[h] / c[h], l[h], s[h], s[h] ? 100 * l[h] / s[h] : 0, s[h] ? 100 * e[h] / s[h] : 0 }' \
+                awk '#@awk ff_main.udp_hosts' \
                     "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
                 local r; read -r -a r <<<"$(udp_attr "")"
                 echo "  Lost datagrams ${r[0]} of ${r[1]}: sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
@@ -939,8 +913,7 @@ main() {
             if grep -q 'Gbits/sec' "$CRESULTS"; then
                 echo "Clients (per client NIC rows are in the per data NIC table above):"
                 awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$CLIENT_SUM_AWK" "$WORK/cmap" "$WORK/ipmap" "$CRESULTS" > "$WORK/csum"
-                awk 'function bw(g) { return g >= 1000 ? sprintf("%.2f Tbps", g / 1000) : sprintf("%.1f Gbps", g) }
-                     $1 == "#TOTAL" {printf "  All at once, %s: %s flows, %s in total%s\n", ($2 == "F1" ? "clients -> backends" : "backends -> clients"), $3, bw($4), ($6 > 1 ? sprintf(" on average over %d iterations (lowest %s)", $6, bw($5)) : "")}' "$WORK/csum"
+                awk '#@awk ff_main.client_totals' "$WORK/csum"
                 # client leaves: the client runs against each leaf's side
                 uplink_summary client "$WORK/cipmap" "$LLDP_DATA" "$NIC_DIAG" "$CRESULTS"
             elif (( FF_SKIP_IPERF )); then
@@ -950,8 +923,7 @@ main() {
         fi
         # leaves that serve clients and backends (LLDP)
         if (( ${#CLI[@]} )); then
-            awk 'NR == FNR {kind[$1] = $3; next} ($3 in kind) && $4 != "unknown" && $4 != "" {if (kind[$3] == "client") c[$4]++; else b[$4]++}
-                 END {for (l in c) if (l in b) printf "%s shared_leaf switch serves %d client NICs and %d backend NICs; judged as a backend leaf\n", l, c[l], b[l]}' \
+            awk '#@awk ff_main.shared_leaf' \
                 "$WORK/cipmap" "$LLDP_DATA" >> "$COLLECT_DIR/rail_anomalies.txt"
         fi
         echo "=================================================================="

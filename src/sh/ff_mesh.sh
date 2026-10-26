@@ -54,15 +54,7 @@ mesh_check() {
         # A client IP failing to every backend rail IP gets no replies at all; otherwise a backend rail IP
         # failing from many client IPs points at that rail as clients reach it
         local ip; for ip in "${!chost_of[@]}"; do echo "$ip ${chost_of[$ip]}"; done > "$WORK/cmeship"
-        awk -v nb=${#bdst[@]} 'FNR == 1 {f++}
-             f == 1 {hof[$1] = $2; nc++; next}
-             {m++; s[m] = $2; d[m] = $4; dh[$4] = $3; fs[$2]++}
-             END {
-                 for (x in fs) if (fs[x] >= nb) {dead[x] = 1; nd++}
-                 for (x in dead) printf "%s mesh_client_no_replies client IP %s got no reply from any of the %d backend rail IPs (inbound ICMP blocked, or no route to the rails)\n", hof[x], x, nb
-                 for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
-                 for (x in n) printf "%s mesh_client_unreachable rail IP %s did not answer %d of %d client IPs\n", dh[x], x, n[x], nc - nd
-             }' "$WORK/cmeship" "$WORK/mesh_c" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
+        awk -v nb=${#bdst[@]} '#@awk ff_mesh_check.clients' "$WORK/cmeship" "$WORK/mesh_c" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
     fi
     if [[ -s $WORK/mesh_b ]]; then
         local ip; for ip in "${!host_of[@]}"; do echo "$ip ${host_of[$ip]}"; done > "$WORK/meship"   # backends only
@@ -71,15 +63,7 @@ mesh_check() {
         # Otherwise a destination failing from many sources points at that rail.
         # Peers of an IP = every rail IP except its own host's; sources of a destination likewise,
         # minus the silent sources on other hosts.
-        awk 'FNR == 1 {f++}
-             f == 1 {hof[$1] = $2; c[$2]++; all++; next}
-             {m++; s[m] = $2; d[m] = $4; fs[$2]++}
-             END {
-                 for (x in fs) if (fs[x] >= all - c[hof[x]]) {dead[x] = 1; nd++; deadon[hof[x]]++}
-                 for (x in dead) printf "%s mesh_no_replies rail IP %s got no reply from any of its %d peers (inbound ICMP blocked or rail down on that host)\n", hof[x], x, all - c[hof[x]]
-                 for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
-                 for (x in n) printf "%s mesh_unreachable rail IP %s did not answer %d of %d pinging rail IPs\n", hof[x], x, n[x], all - c[hof[x]] - (nd - deadon[hof[x]])
-             }' "$WORK/meship" "$WORK/mesh_b" | sort -k2,2 -k7,7rn > "$WORK/mesh_banom"
+        awk '#@awk ff_mesh_check.backends' "$WORK/meship" "$WORK/mesh_b" | sort -k2,2 -k7,7rn > "$WORK/mesh_banom"
         cat "$WORK/mesh_banom" "$WORK/mesh_anom" > "$WORK/mesh_all"; mv "$WORK/mesh_all" "$WORK/mesh_anom"
     fi
     cat "$WORK/mesh_anom" >> "$COLLECT_DIR/rail_anomalies.txt"
@@ -94,12 +78,7 @@ lldp_rail_check() {
         [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"
     done; done > "$railmap"
     # compared with the rail most NICs on that switch use (with two rails: the other one)
-    awk 'FNR == 1 {f++}
-         f == 1 {rail[$1 " " $2] = $3; rails[$3] = 1; next}
-         $4 != "unknown" && (($1 " " $2) in rail) {n++; h[n] = $1; nic[n] = $2; sw[n] = $4; rl[n] = rail[$1 " " $2]; c[$4 " " rl[n]]++}
-         END {for (i = 1; i <= n; i++) {o = ""; for (r in rails) if (r != rl[i] && (o == "" || c[sw[i] " " r] > c[sw[i] " " o])) o = r
-                  if (o != "" && c[sw[i] " " o] > c[sw[i] " " rl[i]])
-                      printf "%s lldp_wrong_rail rail %s NIC %s is cabled to %s, which %d other NICs reach on rail %s\n", h[i], rl[i], nic[i], sw[i], c[sw[i] " " o], o}}' \
+    awk '#@awk ff_lldp_rail_check' \
         "$railmap" "$1" > "$WORK/lldp_anom"
     if [[ -s $WORK/lldp_anom ]]; then
         log "WARNING: $(wc -l < "$WORK/lldp_anom" | tr -d ' ') rail NICs are cabled to a switch that serves the other rail (LLDP):"

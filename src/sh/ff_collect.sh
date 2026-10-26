@@ -26,10 +26,7 @@ collect_temps() {
         rbash "${T_TARGET[$k]}" "$mode" "$FF_IPMI_TIMEOUT" <<<"$TEMP_SCRIPT" >> "$out" 2>> "$RUNLOG_SSH" &
     done
     wait
-    awk -v t="$label" 'function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
-        $1 == "@@HWMON" { print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
-        $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
-        $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }' "$out" >> "$COLLECT_DIR/temps.txt"
+    awk -v t="$label" '#@awk ff_collect_temps' "$out" >> "$COLLECT_DIR/temps.txt"
 }
 
 # temp_summary: temps_summary.txt, one row per sensor over the run: "Host Source Type Chip Dev Sensor First_C Max_C
@@ -94,8 +91,7 @@ rx_one() {  # host slot sysinfo_nic_file: one rx config line (slot: rail letter,
 
 # hostctr_delta label pre post: receive counters that rose -> host_counters.txt "label host key delta"
 hostctr_delta() {
-    awk -v t="$1" 'NR == FNR {p[$1 " " $2] = $3; next}
-        ($1 " " $2) in p && $3 ~ /^[0-9]+$/ && $3 > p[$1 " " $2] {print t, $1, $2, $3 - p[$1 " " $2]}' "$2" "$3" > "$WORK/hc_delta"
+    awk -v t="$1" '#@awk ff_hostctr_delta' "$2" "$3" > "$WORK/hc_delta"
     cat "$WORK/hc_delta" >> "$COLLECT_DIR/host_counters.txt"
     # who answered this read, and with AER counters: a counter never read shows as "-" in host_rx.txt, not 0
     awk '{n[$1]++; if ($2 ~ /^aer_/) a[$1] = 1} END {for (h in n) print h, ((h in a) ? 1 : 0)}' "$3" >> "$WORK/hc_reads"

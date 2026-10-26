@@ -223,13 +223,11 @@ main() {
     awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
     # the html's per-type tables: "group type chip dev sensor host value high crit flag", BMC first, then by type,
     # chip, device and sensor (version order, any case: Core_2 before Core_10, asic before Module0); hosts likewise
-    awk 'BEGIN { split("inlet cpu gpu mem nvme nic other", t, " "); for (i = 1; i <= 7; i++) r[t[i]] = i }
-         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], $4, $5, tolower($6), g, $3, $4, $5, $6, $1, $8, $10, $11, $12 }' \
+    awk '#@awk tc_main.pivot' \
         "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k3,3 -k4,4V -k5,5V | cut -d' ' -f6- > "$WORK/pivot"
     awk 'NR > 1 && $6 != "none" {print $1}' "$WORK/temps_summary.txt" | sort -u | sort -V > "$WORK/hostorder"
     local sensors flagged nodata hwd res rc
-    read -r sensors flagged nodata hwd < <(awk 'NR > 1 && $6 != "none" {s++; if ($12 != "-") f++; if (!($1 in h)) {h[$1] = 1; hw++}} NR > 1 && $12 ~ /^nodata/ {d++}
-        END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
+    read -r sensors flagged nodata hwd < <(awk '#@awk tc_main.counts' "$WORK/temps_summary.txt")
     if (( sensors == 0 )); then res=NONE rc=4; elif (( nodata > 0 )); then res=PARTIAL rc=3; else res=COMPLETE rc=0; fi
     print_summary >&2
     # stdout: one row per host and source (the summary and the closing counts stay on stderr)

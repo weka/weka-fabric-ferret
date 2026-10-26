@@ -265,7 +265,7 @@ Those two files are built, not edited: `./build` assembles both from `src/`, and
 
 - `src/fabric_ferret.sh`, `src/thermals_capture.sh`: the spines: usage, defaults, settings checks and `main`, and where each module goes in.
 - `src/sh/*.sh`: the rest of the bash, one module per part of a run. A module both tools use has a plain name (`ipaddr`, `expand`: target expansion); one tool's own modules start `ff_` or `tc_`.
-- `src/awk/<name>.awk`: the awk programs kept in variables (`TEMP_SUM_AWK` is `temp_summary.awk`, shared by both tools). `ff_` and `tc_` mark one tool's programs.
+- `src/awk/<name>.awk`: every awk program longer than one line, named for its variable or for the function that runs it (`<function>.<role>.awk` where one runs several; `TEMP_SUM_AWK` is `temp_summary.awk`, shared by both tools). `ff_` and `tc_` mark one tool's programs. Two kinds stay where they are: those inside the scripts each host runs (heredocs, sent over ssh as written), and `rx_one`'s, which has a line ending in a backslash.
 
 In a `.sh` file `./build` reads two directives; an `.awk` file goes in as it is.
 
