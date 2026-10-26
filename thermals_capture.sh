@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Built by ./build from src/ (README, Source): edit src/, never this file.
 # thermals_capture: every hwmon temperature and the BMC's (ipmitool) on a set of hosts, read only, over ssh.
 # One snapshot by default, or a sample every -i seconds for -d seconds. Output: any of .jsonl, .html, .md.
 # Standalone companion to fabric_ferret.sh: same host syntax and FF_ settings, same reader and flags.

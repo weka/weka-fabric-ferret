@@ -257,6 +257,31 @@ bmc,10.1.100.11,ADMIN,bmc-pass
 - When either count is above zero, the line before the last says how many targets were unreachable (no ssh connection) and how many were unavailable (connected, but gave no reading at all).
 - The last line is `RESULT data=COMPLETE|PARTIAL|NONE ...`. Exit codes: 0 = complete, 3 = partial, 4 = no reading at all, 2 = bad input.
 
+## Source
+
+`fabric_ferret.sh` and `thermals_capture.sh` are one file each on purpose: each reaches a jump host by `scp` or `bash -s <`, and needs only bash, awk and ssh there.
+
+Those two files are built, not edited: `./build` assembles both from `src/`, and all of it is committed. Edit `src/`, run `./build`, then run the tests. The tests check the built files, and fail while either differs from what `./build` makes of `src/`.
+
+- `src/fabric_ferret.sh`, `src/thermals_capture.sh`: the spines: usage, defaults, settings checks and `main`, and where each module goes in.
+- `src/sh/*.sh`: the rest of the bash, one module per part of a run. A module both tools use has a plain name (`ipaddr`, `expand`: target expansion); one tool's own modules start `ff_` or `tc_`.
+- `src/awk/<name>.awk`: the awk programs kept in variables (`TEMP_SUM_AWK` is `temp_summary.awk`, shared by both tools). `ff_` and `tc_` mark one tool's programs.
+
+In a `.sh` file `./build` reads two directives; an `.awk` file goes in as it is.
+
+- A line `#@include <path>` becomes that file under `src/`, recursively.
+- `#@awk <name>`, inside an awk program's single quotes and one to a line, becomes `src/awk/<name>.awk`: its first line takes the marker's place, each later line is indented like the marker's own line (an empty one stays empty), and every `'` becomes `'\''`, so the program stays one bash string. The marker goes right after the opening quote, or alone on the next line at the program's indent.
+
+`./build` stops, naming the problem and leaving both targets alone, on:
+
+- a file it cannot read, or an awk file with no text;
+- an include cycle;
+- a second directive on a line, or anything else that looks like one;
+- a directive left in the assembly (an include not named `.sh` comes in as it is);
+- a program line ending in a backslash;
+- a target that is a directory, or a `./build <dir>` that isn't one;
+- an assembly `bash -n` rejects, which it keeps as `<target>.rejected`.
+
 ## License
 
 Apache License 2.0; see [LICENSE](LICENSE).
