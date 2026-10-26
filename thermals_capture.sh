@@ -62,6 +62,8 @@ nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts a
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
+Output: stdout gets every sensor, one row each ("Host Source Type Chip Dev Sensor Temp High Crit Flag", or First
+Min Max Last in place of Temp with -d); stderr gets the progress, the summary and the result.
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
@@ -666,6 +668,8 @@ main() {
         END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
     if (( sensors == 0 )); then res=NONE rc=4; elif (( nodata > 0 )); then res=PARTIAL rc=3; else res=COMPLETE rc=0; fi
     print_summary >&2
+    # stdout: every sensor, one row each (the summary and the closing counts stay on stderr)
+    if awk 'NR > 1 {f = 1} END {exit !f}' "$WORK/view"; then column -t "$WORK/view"; fi
     (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
     if (( verbose && ${#UNREACH[@]} )); then
         echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2
