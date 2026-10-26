@@ -97,6 +97,13 @@ Optional (default)
   FF_SLOW_PCT      SLOW at or above this %, CRITICAL below (50)
   FF_RETR_PCT      a data NIC whose TCP retransmits exceed this % of the segments it sent gets (retr) on its
                    Status; throughput still decides OK/SLOW/CRITICAL (0.1)
+  FF_TEMPS (1)     read every hwmon temperature (/sys/class/hwmon: CPU, NVMe, NIC…) on every host and client
+                   before the run and after every phase, read only; temps.txt, temps_summary.txt. 0 = off
+  FF_IPMI (1)      with FF_TEMPS, also the BMC's temperatures (inlet, exhaust…) via ipmitool sensor, once per
+                   iteration and at the end, where ipmitool is installed (needs root or sudo). 0 = off
+  FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
+  FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
+  FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
                    Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
                    way per pair between two rails (with more than two rails, the rail pair rotates each
                    pairing cycle). Host Status = the worst of its rail columns and Cross;
@@ -565,6 +572,39 @@ for nic in "$@"; do
     k=$(cat "$sys/class/net/$nic/statistics/tx_packets" 2>&1); case $k in ''|*[!0-9]*) k=na ;; esac
     echo "${h}_${nic} ${ip:-none} $k $(wire "$nic")"
 done
+EOF
+
+# Temperatures, read only: every hwmon sensor (kernel sysfs; the data lm-sensors reads, no package needed) as
+# "@@HWMON host chip dev sensor milli_c high crit" (dev: the NIC's netdev, else the device; thresholds in milli-C
+# or -), "@@HWMON host - - none - - -" when there is none. $1 = ipmi adds the BMC's readings (ipmitool sensor,
+# timeout $2) as "@@IPMI host sensor c status high crit", or "@@IPMI host none <why>". FF_SYSFS is a test hook.
+read -r -d '' TEMP_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}; n=0
+num() { case $1 in ''|*[!0-9-]*) echo -; ;; *) echo "$1" ;; esac; }
+for d in "$sys"/class/hwmon/hwmon*; do
+    [ -d "$d" ] || continue
+    chip=-; [ -r "$d/name" ] && chip=$(cat "$d/name" 2>&1); chip=$(printf '%s' "${chip:--}" | tr -c 'A-Za-z0-9_.:-' '_')
+    dev=-; l=$(readlink "$d/device" 2>&1) && dev=${l##*/}
+    for x in "$d"/device/net/*; do [ -e "$x" ] && dev=${x##*/}; break; done
+    for t in "$d"/temp*_input; do
+        [ -r "$t" ] || continue
+        b=${t%_input}; v=$(num "$(cat "$t" 2>&1)"); [ "$v" = - ] && continue
+        lb=${b##*/}; [ -r "${b}_label" ] && lb=$(cat "${b}_label" 2>&1)
+        hi=-; [ -r "${b}_max" ] && hi=$(num "$(cat "${b}_max" 2>&1)")
+        cr=-; [ -r "${b}_crit" ] && cr=$(num "$(cat "${b}_crit" 2>&1)")
+        echo "@@HWMON $h $chip $dev $(printf '%s' "$lb" | tr -c 'A-Za-z0-9_.:-' '_') $v $hi $cr"; n=$(( n + 1 ))
+    done
+done
+[ "$n" -gt 0 ] || echo "@@HWMON $h - - none - - -"
+[ "$1" = ipmi ] || exit 0
+if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
+if [ -n "$(command -v timeout)" ]; then out=$(timeout "${2:-60}" ipmitool sensor 2>&1); else out=$(ipmitool sensor 2>&1); fi; rc=$?
+# ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
+r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
+    $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ {nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm)
+        print "@@IPMI", h, nm, $2, ($4 == "" ? "-" : $4), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-")}')
+if [ -n "$r" ]; then echo "$r"
+else echo "@@IPMI $h none rc=${rc}_$(printf '%s' "$out" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
 EOF
 
 # Host-side UDP loss counters: "host InErrors RcvbufErrors SndbufErrors softnet_dropped".
@@ -1129,6 +1169,50 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
     wait
 }
 
+# collect_temps label [ipmi]: TEMP_SCRIPT on every tested host and client, appended to temps.txt as
+# "label host source chip dev sensor temp_c high_c crit_c status" (source hwmon|ipmi; sensor none = no data, why in status)
+collect_temps() {
+    (( FF_TEMPS )) || return 0
+    local label=$1 mode=-; [[ $2 == ipmi ]] && (( FF_IPMI )) && mode=ipmi
+    local out=$WORK/temps.$label k
+    : > "$out"
+    for k in "${ELIG[@]}" "${CLI[@]}"; do
+        rbash "${T_TARGET[$k]}" "$mode" "$FF_IPMI_TIMEOUT" <<<"$TEMP_SCRIPT" >> "$out" 2>> "$RUNLOG_SSH" &
+    done
+    wait
+    awk -v t="$label" 'function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
+        $1 == "@@HWMON" { print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
+        $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
+        $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }' "$out" >> "$COLLECT_DIR/temps.txt"
+}
+
+# temp_summary: temps_summary.txt, one row per sensor over the run: "Host Source Type Chip Dev Sensor First_C Max_C
+# Last_C High_C Crit_C Flag". Type cpu|nvme|nic|bmc|other. Flag (worst first): crit (at or above crit, or the BMC says
+# cr/nr), high (at or above high, or BMC nc), near (within FF_TEMP_MARGIN of high), then +rise (max - first over
+# FF_TEMP_RISE); "-" when none. A threshold of 0 counts as unset. A host/source with no reading at all gets one row,
+# Sensor none, Flag nodata:<why>.
+TEMP_SUM_AWK='
+NR == 1 { next }
+$6 == "none" { nd[$2 SUBSEP $3] = $10; next }
+{ k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; got[$2 SUBSEP $3] = 1
+  if (!(k in mx)) { fi[k] = v; mx[k] = v; ord[++n] = k } else if (v > mx[k]) mx[k] = v
+  la[k] = v; if ($8 != "-" && $8 + 0 > 0) hi[k] = $8 + 0; if ($9 != "-" && $9 + 0 > 0) cr[k] = $9 + 0; if ($3 == "ipmi") { if ($10 ~ /^(cr|nr)/) bc[k] = 2; else if ($10 ~ /^nc/ && bc[k] < 1) bc[k] = 1 } }
+function ty(src, chip, dev) { if (src == "ipmi") return "bmc"; if (chip ~ /^(coretemp|k10temp|zenpower|cpu_thermal)$/) return "cpu"
+    if (chip ~ /^nvme/) return "nvme"; if (chip ~ /^(mlx5|ice|bnxt|i40e|ixgbe|igb|tg3|qede|nfp)/ || dev ~ /^(en|eth|ib|bond)/) return "nic"; return "other" }
+END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C Flag"
+    for (i = 1; i <= n; i++) { k = ord[i]; split(k, p, SUBSEP); f = "-"
+        if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
+        else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
+        else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
+        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
+        printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
+               ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
+    for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
+temp_summary() {
+    (( FF_TEMPS )) || return 0
+    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$COLLECT_DIR/temps.txt" > "$COLLECT_DIR/temps_summary.txt"
+}
+
 # System info per tested host, split into $SI/<host>/<item> (SYSINFO_SCRIPT)
 collect_sysinfo() {
     local k f t
@@ -1475,6 +1559,7 @@ udp_phases() {
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local b=$WORK/udp.$u
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
+        collect_temps "iter${ITER}_$PHASE"
         udp_close $PHASE "$a" "$b"
         a=$b
     done
@@ -1677,7 +1762,7 @@ client_phase() {
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
     (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
-    collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"
+    collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"; collect_temps "iter${ITER}_$P"
     hostctr_delta "iter${ITER}_client$P" "$pre.hc" "$post.hc"; hc_log "client phase $P" "$post.hc"
     awk -v it="iter${ITER}_client$P" 'NR==FNR {pre[$1" "$2]=$3; next}
         ($1" "$2) in pre && $3 > pre[$1" "$2] {print it, $1, $2, $3 - pre[$1" "$2]}' "$pre.prio" "$post.prio" > "$WORK/cprio_delta"
@@ -1719,6 +1804,7 @@ client_udp_waves() {
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$U.* | grep -c ",ERROR")
     (( errs > 0 )) && log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above)"
     collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
+    collect_temps "iter${ITER}_$U"
     udp_close $U "$a" "$b"
 }
 
@@ -1883,7 +1969,7 @@ cleanup() {
 
 # Every FF_* setting this tool reads. Any other FF_* in the environment is a typo that would be silently
 # ignored (a dropped letter, say), so it stops the run. A regress test keeps the list complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 
 # edit_distance a b: Levenshtein distance, for the "did you mean" hint
 edit_distance() {
@@ -1926,6 +2012,12 @@ main() {
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}" "${FF_RETR_PCT:=0.1}"
     [[ $FF_RETR_PCT =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "FF_RETR_PCT must be a number (% of TCP segments sent), got '$FF_RETR_PCT'"
+    : "${FF_TEMPS:=1}" "${FF_IPMI:=1}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}" "${FF_IPMI_TIMEOUT:=60}"
+    [[ $FF_TEMPS == 0 || $FF_TEMPS == 1 ]] || die "FF_TEMPS must be 0 or 1, got '$FF_TEMPS'"
+    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
+    local tv; for tv in FF_TEMP_MARGIN FF_TEMP_RISE FF_IPMI_TIMEOUT; do
+        [[ ${!tv} =~ ^[0-9]+$ ]] || die "$tv must be a whole number, got '${!tv}'"
+    done
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
@@ -2385,6 +2477,7 @@ main() {
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
+    (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
     # rail IP -> host/rail, and host_nic -> host, for the summary and UDP loss placement
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
@@ -2459,11 +2552,12 @@ main() {
         collect_counters "$PRIO_SCRIPT" "$WORK/prio_pre"
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
+        collect_temps "iter${ITER}_pre" ipmi   # the BMC (inlet) once per iteration: ipmitool sensor can take tens of seconds
         if (( FF_SKIP_IPERF )); then
             phase_start
             log "Observation window: ${FF_DURATION}s with no test load (FF_SKIP_IPERF=1), start $PT0; the counter changes below are the cluster's own traffic"
             sleep "$FF_DURATION"; phase_end obs
-            collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.obs"; hostctr_delta "iter${ITER}_obs" "$hc_prev" "$WORK/hc.obs"
+            collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.obs"; hostctr_delta "iter${ITER}_obs" "$hc_prev" "$WORK/hc.obs"; collect_temps "iter${ITER}_obs"
             hc_log "the observation window" "$WORK/hc.obs"
         else
             for PHASE in 1 2; do
@@ -2483,6 +2577,7 @@ main() {
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
                 [[ $errs -gt 0 ]] && log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above)"
                 collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.$PHASE"; hostctr_delta "iter${ITER}_p$PHASE" "$hc_prev" "$WORK/hc.$PHASE"; hc_prev=$WORK/hc.$PHASE
+                collect_temps "iter${ITER}_p$PHASE"
                 hc_log "phase $PHASE" "$WORK/hc.$PHASE"
             done
         fi
@@ -2539,6 +2634,8 @@ main() {
         echo
     done
 
+    collect_temps end ipmi
+    temp_summary
     collect_klog
     host_rx "$RESULTS"
 
@@ -2551,6 +2648,29 @@ main() {
         echo " $LABEL DATA PLANE VALIDATION SUMMARY: $(date)"
         echo "=================================================================="
         local map=$WORK/ipmap
+        # heat before fabric: a hot host can cap throughput, resend and flap links on its own
+        if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
+            local ts=$COLLECT_DIR/temps_summary.txt
+            echo "Temperatures (temps_summary.txt; hwmon$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
+            awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
+                 END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
+            # per host the hottest reading of each type
+            awk 'NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-") fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
+                 END {print "Host CPU_max NVMe_max NIC_max Other_max BMC_max Flags"
+                      for (x in hs) printf "%s %s %s %s %s %s %s\n", x, (((x, "cpu") in m) ? m[x, "cpu"] : "-"), (((x, "nvme") in m) ? m[x, "nvme"] : "-"),
+                          (((x, "nic") in m) ? m[x, "nic"] : "-"), (((x, "other") in m) ? m[x, "other"] : "-"), (((x, "bmc") in m) ? m[x, "bmc"] : "-"), (x in fl ? fl[x] : "-")}' "$ts" \
+                | { read -r hdr; echo "$hdr"; sort -k7,7r -k1,1V; } | column -t | sed 's/^/  /'
+            if awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/ {f = 1} END {exit !f}' "$ts"; then
+                echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag):"
+                awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
+            fi
+            awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts"
+            echo ""
+        elif (( FF_TEMPS )); then
+            local tn; tn=$(( $(wc -l < "$COLLECT_DIR/temps.txt") - 1 ))
+            if (( tn > 0 )); then echo "Temperatures: ERROR: temps.txt has $tn readings but temps_summary.txt is empty (summary failed); read temps.txt"
+            else echo "Temperatures: NO TEMPERATURE DATA from any host (temps.txt empty)"; fi; echo ""
+        fi
         # data NIC map: ip role host nic rail line_gbps (clients: FF_CLIENT_GBPS, else the NIC's own speed, 0 = unknown)
         if (( ${#CLI[@]} )); then
             awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, $1, $3, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' \
@@ -2701,6 +2821,10 @@ main() {
         echo "ok_pct=$FF_OK_PCT"
         echo "slow_pct=$FF_SLOW_PCT"
         echo "retr_pct=$FF_RETR_PCT"
+        echo "temps=$FF_TEMPS"
+        echo "ipmi=$FF_IPMI"
+        echo "temp_margin=$FF_TEMP_MARGIN"
+        echo "temp_rise=$FF_TEMP_RISE"
         echo "spines=${FF_SPINES:-none}"
         echo "spine_links=${FF_SPINE_LINKS:-none}"
         echo "spine_gbps=${FF_SPINE_GBPS:-none}"

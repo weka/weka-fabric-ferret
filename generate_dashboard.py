@@ -395,6 +395,44 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
                          f'style="color:{border}; font-weight:700;">{head}</div><div class="card-body"><ul class="mb-0">'
                          f'{items}{nts}</ul></div></div>')
 
+    # Temperatures card, before the fabric cards: per host the hottest reading of each type, flagged sensors, hosts with no data
+    temps_html = ''
+    tps = data.get('temps', [])
+    if tps or data['metadata'].get('temps') == '1':
+        rd = [t for t in tps if t['Sensor'] != 'none']
+        nod = [t for t in tps if t['Flag'].startswith('nodata')]
+        flg = [t for t in rd if t['Flag'] != '-']
+        rank = {'crit': 0, 'high': 1, 'near': 2, 'rise': 3}
+        def fr(f):
+            return rank.get(f.split('+')[0], 4)
+        per = defaultdict(dict)
+        for t in rd:
+            per[t['Host']][t['Type']] = max(per[t['Host']].get(t['Type'], -999.0), float(t['Max_C']))
+        hflags = defaultdict(list)
+        for t in flg:
+            hflags[t['Host']].append(f"{t['Type']}:{t['Flag']}")
+        def fcls(f):
+            return 'text-danger' if fr(f) <= 1 else 'text-warning' if f != '-' else ''
+        types = ('cpu', 'nvme', 'nic', 'other', 'bmc')
+        hosts = sorted(per, key=lambda h: (min([fr(f.split(':', 1)[1]) for f in hflags[h]] or [9]), h))
+        hrows = ''.join(f"<tr><td>{escape(h)}</td>" + ''.join(f"<td>{per[h][x]:g}</td>" if x in per[h] else '<td>-</td>' for x in types)
+                        + f"<td class=\"{fcls(hflags[h][0].split(':', 1)[1]) if hflags[h] else ''}\">{escape(', '.join(hflags[h]) or '-')}</td></tr>" for h in hosts)
+        frows = ''.join(f"<tr><td>{escape(t['Host'])}</td><td>{escape(t['Type'])}</td><td>{escape(t['Chip'])} {escape(t['Dev'])}</td><td>{escape(t['Sensor'])}</td>"
+                        f"<td>{t['First_C']}</td><td>{t['Max_C']}</td><td>{t['Last_C']}</td><td>{t['High_C']}</td><td>{t['Crit_C']}</td>"
+                        f"<td class=\"{fcls(t['Flag'])}\">{escape(t['Flag'])}</td></tr>" for t in sorted(flg, key=lambda t: (fr(t['Flag']), -float(t['Max_C']))))
+        nlist = ''.join(f"<li class=\"text-warning\">{escape(t['Host'])} {escape(t['Source'])}: no temperature data ({escape(t['Flag'][7:].replace('_', ' '))})</li>" for t in nod)
+        bad = sum(1 for t in flg if fr(t['Flag']) <= 1)
+        m = data['metadata']
+        temps_html = f"""<div class="card mb-3"><div class="card-header">Temperatures — heat before fabric |
+{len(rd)} sensors on {len(per)} hosts | <b class="{'stat-bad' if bad else 'stat-warn' if flg else 'stat-good'}">{len(flg)}</b> flagged ({bad} high or crit) |
+<b class="{'stat-warn' if nod else 'stat-good'}">{len(nod)}</b> host sources with no temperature data</div>
+<div class="card-body" style="max-height:420px; overflow-y:auto;">
+<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">hwmon (CPU, NVMe, NIC…) read before the run and after every phase; BMC (ipmitool sensor: inlet, exhaust…) once per iteration and at the end. Flags: crit / high at or above the sensor's threshold (BMC: its own status), near = within {escape(m.get('temp_margin', '5'))}C of high, rise = up more than {escape(m.get('temp_rise', '10'))}C over the run. Module (optic) temperatures are in the NIC tables.</p>
+{'<ul class="mb-2">' + nlist + '</ul>' if nlist else ''}
+<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>CPU max</th><th>NVMe max</th><th>NIC max</th><th>Other max</th><th>BMC max</th><th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
+{('<p class="mb-1"><b>Flagged sensors</b></p><table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Type</th><th>Chip / device</th><th>Sensor</th><th>First</th><th>Max</th><th>Last</th><th>High</th><th>Crit</th><th>Flag</th></tr></thead><tbody>' + frows + '</tbody></table>') if frows else ''}
+</div></div>"""
+
     # UDP pass: loss placed per receiving host and phase; unaccounted = likely fabric
     udp_html = ''
     ok_rows = [u for u in data.get('udp', []) if 'error' not in u]
@@ -511,6 +549,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     </span>
 </div>
 {problems_html}
+{temps_html}
 {_clients_html(data)}{uplinks_html}
 {host_rx_html}
 {compare_html}
@@ -1069,7 +1108,8 @@ $(document).ready(function() {{
                 if (rawExcludedHosts.has(r.host)) return;
                 var low = nicLow(r);
                 if (rawLastThreshold > 0 && (low === null || low < rawLastThreshold)) return;
-                tbody += '<tr><td></td><td>' + r.host + '</td><td>' + statusBadge(r.status) + '</td><td>' + r.role + '</td><td>' + r.nic + '</td><td>' + r.ip + '</td>';
+                var heat = r.heat ? ' <span class="badge badge-down" title="' + r.heat.replace(/"/g, '&quot;') + '">HOT</span>' : '';   // heat before fabric
+                tbody += '<tr><td></td><td>' + r.host + heat + '</td><td>' + statusBadge(r.status) + '</td><td>' + r.role + '</td><td>' + r.nic + '</td><td>' + r.ip + '</td>';
                 nicCols.forEach(function(k) {{ tbody += '<td>' + colCell(r.cols[k]) + '</td>'; }});
                 tbody += '<td>' + (r.retr === 0 ? '0' : '<span class="badge badge-down">' + r.retr.toLocaleString() + '</span>' + (r.retr_pct === null ? '' : ' <small style="color:#8899aa;">(' + r.retr_pct + '%)</small>')) + '</td><td>' + (r.expect === null ? '-' : r.expect) + '</td></tr>';
                 shown++;
@@ -2002,7 +2042,9 @@ def _nic_rows(data, ip_to_host, ip_to_nic):
         out.append({'ip': r['ip'], 'role': r['role'], 'host': r['host'], 'nic': r['nic'], 'rail': r['rail'], 'cols': vals, 'retr': r['retr'],
                     'gb': r['gb'], 'retr_pct': round(rp, 3) if rp is not None else None,
                     'expect': round(r['exp'], 1) if r['exp'] else None, 'status': st,
-                    'rank': 7 if not ran else -1 if w < 0 else 2 * w + (rp is not None and rp > rl), 'lo': lo or 0})
+                    'rank': 7 if not ran else -1 if w < 0 else 2 * w + (rp is not None and rp > rl), 'lo': lo or 0,
+                    'heat': ', '.join(f"{t['Type']} {t['Sensor']} {t['Max_C']}C {t['Flag']}" for t in data.get('temps', [])
+                                      if t['Host'] == r['host'] and t['Flag'].split('+')[0] in ('crit', 'high'))})
     out.sort(key=lambda r: (-r['rank'], r['lo'], r['host'], r['nic']))
     return out, cols
 
@@ -2566,6 +2608,19 @@ def parse_tar_archive(filepath):
             problems.append(shared)
     if 'coverage' not in meta:
         notes.append('Archive from a collector without coverage counts (v1 or earlier): only result and iteration checks apply.')
+    # temperatures (temps_summary.txt): heat first, it can cap throughput, cause resends and flap links on its own
+    th = read_file('temps_summary.txt').splitlines()
+    data['temps'] = [dict(zip(th[0].split(), l.split())) for l in th[1:] if len(l.split()) >= 12] if th else []
+    hot = [t for t in data['temps'] if t['Flag'].split('+')[0] in ('crit', 'high')]
+    if hot:
+        problems.insert(0, f"Heat: {len(hot)} sensors at or above their high or critical threshold on "
+                           f"{', '.join(sorted({t['Host'] for t in hot}))} (Temperatures card). Check heat before the fabric: "
+                           'a hot host can cap throughput, resend and flap links by itself.')
+    nod = sorted({f"{t['Host']} ({t['Source']}: {t['Flag'][7:].replace('_', ' ')})" for t in data['temps'] if t['Flag'].startswith('nodata')})
+    if nod:
+        notes.append(f"No temperature data from {len(nod)} host sources, so heat can't be ruled out there: {', '.join(nod)}")
+    if meta.get('temps') == '1' and not data['temps']:
+        notes.append('Temperatures were on (FF_TEMPS=1) but the archive has no temps_summary.txt rows: heat is not ruled out anywhere.')
     data['problems'], data['notes'] = problems, notes
 
     # Cleanup

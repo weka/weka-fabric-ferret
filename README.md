@@ -7,6 +7,7 @@ WEKA pre-install/offline (stopped I/O) data plane investigation and performance 
 - **Throughput:** every backend host pair on each rail and across rails, with round-robin pairing so that, given enough iterations, every direction on every NIC pair gets tested. One rail, two rails (A, B) or more (A, B, C…).
 - **Clients (optional):** every client data NIC to every backend rail and back, in waves that keep each backend NIC to a set number of client flows at once, and optionally all clients at once. Each client's route to each rail is checked to leave by a declared data NIC.
 - **Path checks:** route, ping and a full-MTU no-fragment ping on every planned path before any load.
+- **Temperatures, before the fabric:** every hwmon sensor (CPU, NVMe, NIC) on every host and client around every phase, and the BMC's (inlet, exhaust) via ipmitool, flagged against each sensor's own thresholds and for a rise over the run. A hot host can cap throughput, cause resends and flap links on its own, so the dashboard shows heat first.
 - **Fabric evidence:** LLDP neighbours (which leaf each NIC lands on), link speed, optics, FEC rate, priority and pause counters, NIC and kernel drops, link flaps, rail gateways, and NICs that are swapped between rails.
 - **Host side:** system info per host (OS, CPU, PCIe, NIC rings, IRQs and QoS, routes, sysctls, the kernel log over the run) and a receive-side table (drops, softnet, iperf3 CPU) with flags.
 - **UDP pass:** after the TCP phases, the same backend and client runs over UDP at no rate cap, with loss split by where it happened (`FF_UDP=0` turns it off).
@@ -122,6 +123,10 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | `FF_LINE_GBPS` (the fastest rail's most common NIC speed) | link speed for the OK/SLOW cut-offs: `N` for every rail, or one per rail (`100,50`) when the rails differ by design. The default makes a rail that came up slow everywhere show as slow |
 | `FF_OK_PCT` (75) | OK at or above this % of link speed |
 | `FF_SLOW_PCT` (50) | SLOW at or above this %, CRITICAL below |
+| `FF_TEMPS` (`1`) | `0` = off. `1` = read every hwmon temperature sensor (`/sys/class/hwmon`: CPU, NVMe, NIC…; no package needed) on every host and client before the run and after every phase, read only (`temps.txt`, `temps_summary.txt`). Sensors at or above their high or critical threshold, within `FF_TEMP_MARGIN` of high, or up more than `FF_TEMP_RISE` over the run are flagged; a host with no sensors is reported as having no temperature data, never as cool |
+| `FF_IPMI` (`1`) | with `FF_TEMPS`, also the BMC's temperatures (inlet, exhaust…) via `ipmitool sensor`, once per iteration and at the end, where ipmitool is installed (needs root or sudo); `0` = off |
+| `FF_IPMI_TIMEOUT` (60) | seconds per ipmitool read |
+| `FF_TEMP_MARGIN` (5), `FF_TEMP_RISE` (10) | °C: "near" a sensor's high threshold, and a rise over the run that gets flagged |
 | `FF_RETR_PCT` (0.1) | a data NIC whose TCP retransmits exceed this % of the segments it sent (bytes sent ÷ (MTU − 52)) gets `(retr)` on its Status; throughput still decides OK/SLOW/CRITICAL |
 | `FF_SPINES`, `FF_SPINE_LINKS`, `FF_SPINE_GBPS` (none) | leaf-spine uplinks, all three or none: spines, links from each backend leaf to each spine, Gbps per link. The summary always totals each leaf's traffic to other leaves; with these set it judges the totals against the uplink capacity |
 | `FF_CLIENT_SPINE_LINKS`, `FF_CLIENT_SPINE_GBPS` (none) | the same for client leaves, both or neither, on the `FF_SPINES` spines (one spine layer). A leaf that serves clients and backends is flagged (`shared_leaf`) and judged as a backend leaf |
