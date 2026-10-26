@@ -33,7 +33,8 @@ Options
                    stdin stream, not argv); without a pw, sudo -n. A line naming one host sets its login and pw
                    even if an earlier range line covered it. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
-                   thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html, md: the summary)
+                   thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then
+                   BMC and OS tables by type, one row per host, sortable; md: the overview and every sensor)
   -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
@@ -497,39 +498,174 @@ $12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\
   printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"min_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($13), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
 END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'
 
-# a self-contained page (no script, no network): the same content as the stderr summary plus every sensor
+# A self-contained page (no network): a left nav (after the cs plugin dashboards) with Overview, then BMC / IPMI and
+# OS (hwmon, nvidia-smi), each broken down by type. A type panel is one row per host and one column per
+# chip:sensor@dev, each cell "Temp / High / Crit" (Max with -d). The tables are static HTML, so the page reads and
+# prints without script; the inline script only switches panels and sorts a table on a header click.
+read -r -d '' HTML_HEAD <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@TITLE@</title>
+<style>
+:root { --bg: #fbfbfa; --surface: #ffffff; --surface-2: #f2f1ed; --fg: #1d1f21; --fg-2: #52514e; --mut: #6b6a66;
+  --line: #dcdcd8; --accent: #2a78d6; --crit: #b3261e; --critbg: #fde7e5; --high: #b45309; --highbg: #fdf0e1;
+  --near: #8a6d00; --nearbg: #fbf6dc; --rise: #5b4bb7; --risebg: #eeebfb; --ok: #1e7d3c; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #17181a; --surface: #1f2124;
+  --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd; --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef;
+  --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366; --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14;
+  --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; } }
+:root[data-theme="dark"] { --bg: #17181a; --surface: #1f2124; --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd;
+  --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef; --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366;
+  --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14; --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 16px; margin: 4px 0 10px; } h3 { font-size: 14px; margin: 18px 0 8px; }
+.mut { color: var(--mut); }
+.body { display: flex; align-items: flex-start; }
+#nav { position: sticky; top: 0; flex: 0 0 200px; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px;
+  max-height: 100vh; overflow-y: auto; }
+#nav button { font: inherit; text-align: left; cursor: pointer; background: transparent; border: 0; border-radius: 6px;
+  color: var(--fg-2); padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+#nav button:hover { background: var(--surface-2); color: var(--fg); }
+#nav button[aria-selected="true"] { background: var(--surface); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+#nav .count { color: var(--mut); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; }
+#nav .navgroup { color: var(--mut); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 14px 10px 4px; }
+main { flex: 1 1 auto; min-width: 0; padding: 14px 16px 32px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 12px; }
+.res { font-weight: 600; } .res.COMPLETE { color: var(--ok); } .res.PARTIAL, .res.NONE { color: var(--crit); }
+.nodata { border-color: var(--crit); } .nodata h3 { color: var(--crit); margin-top: 0; }
+.wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { background: var(--surface-2); font-weight: 600; position: sticky; top: 0; }
+th.n, td.n { text-align: right; }
+table.sortable th { cursor: pointer; user-select: none; }
+table.sortable th[aria-sort="ascending"]::after { content: " \25B2"; font-size: 10px; }
+table.sortable th[aria-sort="descending"]::after { content: " \25BC"; font-size: 10px; }
+td.host, th.host { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+th.host { background: var(--surface-2); z-index: 2; }
+th .dev { display: block; font-weight: 400; color: var(--mut); font-size: 12px; }
+tr.crit td { background: var(--critbg); color: var(--crit); } tr.high td { background: var(--highbg); color: var(--high); }
+tr.near td { background: var(--nearbg); color: var(--near); } tr.rise td { background: var(--risebg); color: var(--rise); }
+@media (max-width: 860px) {
+  .body { flex-direction: column; align-items: stretch; }
+  main { width: 100%; min-width: 0; }
+  #nav { position: static; flex: 1 1 auto; width: 100%; flex-direction: row; flex-wrap: wrap; max-height: none; }
+  #nav .navgroup { width: 100%; padding: 6px 10px 2px; }
+}
+@media print { #nav { display: none; } section.panel[hidden] { display: block !important; } }
+</style>
+</head>
+<body>
+EOF
+read -r -d '' HTML_TAIL <<'EOF'
+<script>
+(function () {
+  "use strict";
+  var nav = document.getElementById("nav");
+  var panels = Array.prototype.slice.call(document.querySelectorAll("section.panel"));
+  function show(id) {
+    panels.forEach(function (p) { p.hidden = p.id !== id; });
+    Array.prototype.forEach.call(nav.querySelectorAll("button[data-panel]"), function (b) {
+      b.setAttribute("aria-selected", b.getAttribute("data-panel") === id ? "true" : "false");
+    });
+    try { history.replaceState(null, "", "#" + id); } catch (e) { /* file:// in some browsers */ }
+  }
+  nav.addEventListener("click", function (ev) {
+    var b = ev.target.closest("button[data-panel]");
+    if (b) show(b.getAttribute("data-panel"));
+  });
+  // sort on a header click: numbers by data-v (no reading always last), text naturally (host-2 before host-10)
+  function val(row, i, num) {
+    var c = row.children[i];
+    if (!c) return null;
+    if (num) { var v = c.getAttribute("data-v"); return v === null || v === "" ? null : parseFloat(v); }
+    return c.textContent;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("table.sortable"), function (t) {
+    var ths = t.tHead.rows[0].cells;
+    Array.prototype.forEach.call(ths, function (th, i) {
+      th.addEventListener("click", function () {
+        var dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1, num = th.classList.contains("n");
+        if (num && !th.hasAttribute("aria-sort")) dir = -1;   // first click on a number: hottest first
+        Array.prototype.forEach.call(ths, function (h) { h.removeAttribute("aria-sort"); });
+        th.setAttribute("aria-sort", dir === 1 ? "ascending" : "descending");
+        var body = t.tBodies[0], rows = Array.prototype.slice.call(body.rows);
+        rows.sort(function (a, b) {
+          var x = val(a, i, num), y = val(b, i, num);
+          if (x === null && y === null) return 0;
+          if (x === null) return 1;
+          if (y === null) return -1;
+          if (num) return dir * (x - y);
+          return dir * x.localeCompare(y, undefined, { numeric: true });
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+      });
+    });
+  });
+  var want = location.hash.slice(1);
+  show(want && document.getElementById(want) ? want : "overview");
+})();
+</script>
+</body>
+</html>
+EOF
+
+# The page body: header, nav and panels. Inputs: hostmax, view, temps_summary.txt, pivot ("group type chip dev sensor
+# host value high crit", sorted), hosts (sorted). Strings are already [A-Za-z0-9_.:=-]; e() escapes anyway.
 HTML_AWK='
-function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); return s }
+function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); gsub(/"/, "\\&quot;", s); return s }
 function fc(f) { return f ~ /^crit/ ? "crit" : f ~ /^high/ ? "high" : f ~ /^near/ ? "near" : f ~ /rise/ ? "rise" : "" }
+function f1(x) { return x == "-" ? x : sprintf("%.1f", x) }
+function num(x) { return x == "-" ? "" : x }
 FILENAME == ARGV[1] { hm[++nh] = $0; next }
-FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr>"; next }
-    ns++; all[ns] = $0; if ($NF != "-") { nf++; fr[nf] = $0 } next }
-FNR == 1 { next }
-$12 ~ /^nodata/ { nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr></thead>"; next }
+    ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
+FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<li><b>" e($1) "</b> " e($2) ": " e(substr($12, 8)) "</li>"; next }
+FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
+    c = $3 ":" $5 ($4 != "-" ? "@" $4 : ""); if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cs[p, nc[p]] = $3 ":" $5; cd[p, nc[p]] = $4 }
+    cell[p, c, $6] = f1($7) " / " f1($8) " / " f1($9); cv[p, c, $6] = $7; has[p, $6] = 1; pc[p]++; next }
+{ ho[++nho] = $1 }
 function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
-    for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
+    for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\" data-v=\"" num(p[i]) "\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
 END {
-    print "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-    print "<title>Thermals " e(label) "</title><style>"
-    print ":root{--bg:#fbfbfa;--fg:#1d1f21;--mut:#5f6368;--line:#dcdcd8;--card:#fff;--crit:#b3261e;--critbg:#fde7e5;--high:#b45309;--highbg:#fdf0e1;--near:#8a6d00;--nearbg:#fbf6dc;--rise:#5b4bb7;--risebg:#eeebfb;--ok:#1e7d3c}"
-    print "@media (prefers-color-scheme: dark){:root:not([data-theme=light]){--bg:#17181a;--fg:#e6e6e3;--mut:#a0a3a8;--line:#33363a;--card:#1f2124;--crit:#ff8a80;--critbg:#3d1c1a;--high:#ffb366;--highbg:#3a2a16;--near:#e6cf5c;--nearbg:#332e14;--rise:#b3a6ff;--risebg:#2a2640;--ok:#7bd88f}}"
-    print "body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,Segoe UI,sans-serif}main{max-width:1200px;margin:0 auto;padding:16px}"
-    print "h1{font-size:20px;margin:0 0 4px}h2{font-size:16px;margin:24px 0 8px}.mut{color:var(--mut)}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 16px;margin:12px 0}"
-    print ".wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}th,td{text-align:left;padding:4px 8px;border-bottom:1px solid var(--line);white-space:nowrap}td.n,th.n{text-align:right}"
-    print "tr.crit td{background:var(--critbg);color:var(--crit)}tr.high td{background:var(--highbg);color:var(--high)}tr.near td{background:var(--nearbg);color:var(--near)}tr.rise td{background:var(--risebg);color:var(--rise)}"
-    print ".nodata{border-color:var(--crit)}.nodata h2{color:var(--crit);margin-top:0}.res{font-weight:600}.res.COMPLETE{color:var(--ok)}.res.PARTIAL,.res.NONE{color:var(--crit)}</style></head><body><main>"
-    printf "<h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
-    printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data</div>\n", res, res, hwd, nt, ns, nf, nn
-    if (nn) { print "<div class=\"card nodata\"><h2>No temperature data (never read as cool)</h2><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
-    if (nh) { print "<h2>Hottest reading per host and type (&deg;C)</h2><div class=\"wrap\"><table><tr><th>Host</th><th class=\"n\">Inlet</th><th class=\"n\">CPU</th><th class=\"n\">GPU</th><th class=\"n\">Mem</th><th class=\"n\">NVMe</th><th class=\"n\">NIC</th><th class=\"n\">Other</th><th>Flags</th></tr>"
-        for (i = 1; i <= nh; i++) { split(hm[i], p, " ")
-            w = p[9] ~ /crit/ ? "crit" : p[9] ~ /high/ ? "high" : p[9] ~ /near/ ? "near" : p[9] ~ /rise/ ? "rise" : ""
-            s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td>" e(p[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\">" p[j] "</td>"
-            print s "<td>" e(p[9]) "</td></tr>" }
-        print "</table></div>" }
-    if (nf) { print "<h2>Flagged sensors</h2><div class=\"wrap\"><table>" hdr; for (i = 1; i <= nf; i++) print row(fr[i]); print "</table></div>" }
-    if (ns) { print "<h2>Every sensor</h2><div class=\"wrap\"><table>" hdr; for (i = 1; i <= ns; i++) print row(all[i]); print "</table></div>" }
-    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high; rise = up more than " rise "&deg;C over the samples.</p></main></body></html>" }'
+    split("inlet cpu gpu mem nvme nic other", tyo, " "); split("Inlet CPU GPU Mem NVMe NIC Other", tyn, " ")
+    for (i = 1; i <= 7; i++) tname[tyo[i]] = tyn[i]
+    gname["bmc"] = "BMC / IPMI"; gname["os"] = "OS (hwmon, nvidia-smi)"
+    printf "<header><h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div></header>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples (cells show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
+    print "<div class=\"body\"><nav id=\"nav\" aria-label=\"Sections\">"
+    print "<button type=\"button\" data-panel=\"overview\" aria-selected=\"true\"><span>Overview</span><span class=\"count\">" nh "</span></button>"
+    for (g = 1; g <= 2; g++) { gk = (g == 1 ? "bmc" : "os"); hdrdone = 0
+        for (i = 1; i <= np; i++) { p = pord[i]; if (pg[p] != gk) continue
+            if (!hdrdone) { print "<div class=\"navgroup\">" gname[gk] "</div>"; hdrdone = 1 }
+            print "<button type=\"button\" data-panel=\"" p "\" aria-selected=\"false\"><span>" tname[pt[p]] "</span><span class=\"count\">" pc[p] "</span></button>" } }
+    print "</nav><main>"
+    print "<section class=\"panel\" id=\"overview\"><h2>Overview</h2>"
+    printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : "")
+    if (nn) { print "<div class=\"card nodata\"><h3>No temperature data (never read as cool)</h3><ul>"; for (i = 1; i <= nn; i++) print nd[i]; print "</ul></div>" }
+    if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th><th class=\"n\">Inlet</th><th class=\"n\">CPU</th><th class=\"n\">GPU</th><th class=\"n\">Mem</th><th class=\"n\">NVMe</th><th class=\"n\">NIC</th><th class=\"n\">Other</th><th>Flags</th></tr></thead><tbody>"
+        for (i = 1; i <= nh; i++) { split(hm[i], q, " ")
+            w = q[9] ~ /crit/ ? "crit" : q[9] ~ /high/ ? "high" : q[9] ~ /near/ ? "near" : q[9] ~ /rise/ ? "rise" : ""
+            s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td class=\"host\">" e(q[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\" data-v=\"" num(q[j]) "\">" q[j] "</td>"
+            print s "<td>" e(q[9]) "</td></tr>" }
+        print "</tbody></table></div>" }
+    if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
+    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
+    for (i = 1; i <= np; i++) { p = pord[i]
+        printf "<section class=\"panel\" id=\"%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is %s / High / Crit in &deg;C. Click a header to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "Max" : "Temp")
+        s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\">Host</th>"
+        for (j = 1; j <= nc[p]; j++) s = s "<th class=\"n\">" e(cs[p, j]) (cd[p, j] != "-" ? "<span class=\"dev\">@" e(cd[p, j]) "</span>" : "") "</th>"
+        print s "</tr></thead><tbody>"
+        for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
+            s = "<tr><td class=\"host\">" e(x) "</td>"
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; s = s (((p, c, x) in cell) ? "<td class=\"n\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] "</td>" : "<td class=\"n\" data-v=\"\">-</td>") }
+            print s "</tr>" }
+        print "</tbody></table></div></section>" }
+    print "</main></div>" }'
 
 # the same summary as Markdown (GitHub tables): result, no-data list, per-host maxima, flagged sensors, every sensor
 MD_AWK='
@@ -668,7 +804,13 @@ main() {
     { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
     awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
     awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
-    awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1 > "$WORK/hostmax"
+    awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
+    # the html's per-type tables: "group type chip dev sensor host value high crit", BMC first, then by type, chip,
+    # device and sensor (version order: Core_2 before Core_10); hosts in version order
+    awk 'BEGIN { split("inlet cpu gpu mem nvme nic other", t, " "); for (i = 1; i <= 7; i++) r[t[i]] = i }
+         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], g, $3, $4, $5, $6, $1, $8, $10, $11 }' \
+        "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k4,4 -k5,5V -k6,6V | cut -d' ' -f3- > "$WORK/pivot"
+    awk 'NR > 1 && $6 != "none" {print $1}' "$WORK/temps_summary.txt" | sort -u | sort -V > "$WORK/hostorder"
     local sensors flagged nodata hwd res rc
     read -r sensors flagged nodata hwd < <(awk 'NR > 1 && $6 != "none" {s++; if ($12 != "-") f++; if (!($1 in h)) {h[$1] = 1; hw++}} NR > 1 && $12 ~ /^nodata/ {d++}
         END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
@@ -695,7 +837,9 @@ main() {
         case $v in
             jsonl) awk "${common[@]}" -v iv="$iv" -v du="$du" -v ito="$FF_IPMI_TIMEOUT" -v user="$FF_SSH_USER" "$JSONL_AWK" \
                        "$WORK/samples" "$WORK/hosts" "$WORK/temps.txt" "$WORK/temps_summary.txt" > "$f.tmp" ;;
-            html) awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" > "$f.tmp" ;;
+            html) { printf '%s\n' "${HTML_HEAD//@TITLE@/Thermals $label}"
+                    awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder"
+                    printf '%s\n' "$HTML_TAIL"; } > "$f.tmp" ;;
             md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" > "$f.tmp" ;;
         esac && mv "$f.tmp" "$f" || die "could not write $f"
         out+=("$f")
