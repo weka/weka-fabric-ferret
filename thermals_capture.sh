@@ -219,7 +219,7 @@ EOF
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
 tmo() { if [[ -n $TO ]]; then "$TO" "$HOST_LIMIT" "$@"; else "$@"; fi; }
-clean() { printf '%s' "$1" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }
+clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 
 # sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
 # "label host source chip dev sensor temp_c high_c crit_c status" (sensor none = no data, why in status).
