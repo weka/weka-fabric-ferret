@@ -238,7 +238,7 @@ bmc,10.1.100.11,ADMIN,bmc-pass
 
 - stdout gets one aligned row per host and source: hwmon (with the nvidia-smi GPUs) and ipmi. Each row holds the sensor count, the hottest reading of each type (inlet, CPU, GPU, mem, NVMe, NIC, other) and the flags. stderr gets progress, the flagged sensors, the no-data list and the result. Every individual sensor is in the jsonl and html files.
 - The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (type and first, min, max and last value, with the sensor's flag), `nodata` and `result`.
-- The HTML is a single self-contained file. A left nav opens the Overview (result, hottest reading per host and type, flagged sensors), then the BMC / IPMI and OS (hwmon, nvidia-smi) readings, each split by type. A type's table has one row per host. Its columns are grouped by device, with a device header (`ibp13s0 mlx5`) over that device's sensors (`asic`, `Module0`). A column holds the same device on every host, and a host without it shows `-`.
+- The HTML is a single self-contained file. A left nav opens the Overview (result, hottest reading per host and type, flagged sensors), then one page per type: Inlet, CPU, GPU, Mem, NVMe, NIC and Other. A type's page holds an OS (hwmon, nvidia-smi) table and a BMC / IPMI table, each shown only when that source has readings. Each table has one row per host. Its columns are grouped by device, with a device header (`ibp13s0 mlx5`) over that device's sensors (`asic`, `Module0`). A column holds the same device on every host, and a host without it shows `-`.
   - Each cell shows the temperature.
   - The crit threshold sits under the sensor name, or in each cell when hosts differ.
   - Flagged readings are shaded.
@@ -246,12 +246,12 @@ bmc,10.1.100.11,ADMIN,bmc-pass
   - Click a sensor to sort; a temperature column sorts hottest first.
   - Wide tables scroll inside a box that ends at the bottom of the window, so the sideways scrollbar is on screen.
   - The Not read link at the foot of the nav lists every host and source that gave no reading, with the reason, and every unreachable target, with ssh's reason. Its count is highlighted when it isn't zero.
-- The Markdown file follows the same layout. It opens with a contents line, then the Overview, then BMC / IPMI and OS sections with one table per type, one row per host.
+- The Markdown file follows the same layout. It opens with a contents line, then the Overview, then a section per type holding an OS table and a BMC / IPMI table, one row per host.
   - A BMC table has one column per sensor, with its crit in the header.
   - An OS table has one column per device. Each cell lists that device's sensors, or "max T of N sensors" when there are more than four (a CPU socket's cores).
   - Flagged readings are bold.
   - Individual readings are in the jsonl.
-- The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
+- The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). One addition: a sensor that reports a crit threshold but no high one is given a high threshold of 95% of its crit, so it can be flagged high or near before it reaches crit. `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
 - Unreachable targets are left out of every count, the jsonl and the Markdown. That happens silently unless `-v` is given, which lists them on stderr. The HTML lists them under Not read. A target is unreachable when it took no ssh connection in any sample: timed out, refused, no route, or name not found. `RESULT ... unreachable=N` counts them. A target that connects but then fails (auth refused, say) is always reported.
 - A host or source that gives no reading is listed with the reason. Reasons include unreachable, cut off, no hwmon sensors, ipmitool not installed or timed out, and sudo refused. A host with no data is never shown as cool.
 - When either count is above zero, the line before the last says how many targets were unreachable (no ssh connection) and how many were unavailable (connected, but gave no reading at all).

@@ -33,8 +33,8 @@ Options
                    stdin stream, not argv); without a pw, sudo -n. A line naming one host sets its login and pw
                    even if an earlier range line covered it. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
-                   thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then
-                   BMC and OS tables by type, one row per host, sortable; md: the overview and every sensor)
+                   thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
+                   page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
   -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
@@ -60,7 +60,8 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_OUT_DIR       where the output goes (.)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
-nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A host or source that
+nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A sensor with a crit
+but no high gets high = 95% of crit. A host or source that
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
@@ -516,10 +517,9 @@ $12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\
   printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"min_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($13), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
 END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'
 
-# A self-contained page (no network): a left nav (after the cs plugin dashboards) with Overview, then BMC / IPMI and
-# OS (hwmon, nvidia-smi), each broken down by type. A type panel is one row per host and one column per
-# chip:sensor on one device (the same device on every host), each cell "dev / Temp / Crit" (Max with -d), flagged
-# cells shaded.
+# A self-contained page (no network): a left nav (after the cs plugin dashboards) with Overview, a page per type
+# (its OS table, then its BMC / IPMI table) and Not read at the foot. A table is one row per host; columns are
+# grouped by device, the same device on every host; cells the temperature (max with -d), flagged cells shaded.
 # The tables are static HTML, so the page reads and
 # prints without script; the inline script only switches panels and sorts a table on a header click.
 read -r -d '' HTML_HEAD <<'EOF'
@@ -706,10 +706,9 @@ END {
     printf "<header><h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div></header>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples (cells show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
     print "<div class=\"body\"><nav id=\"nav\" aria-label=\"Sections\">"
     print "<button type=\"button\" data-panel=\"overview\" aria-selected=\"true\"><span>Overview</span><span class=\"count\">" nh "</span></button>"
-    for (g = 1; g <= 2; g++) { gk = (g == 1 ? "bmc" : "os"); hdrdone = 0
-        for (i = 1; i <= np; i++) { p = pord[i]; if (pg[p] != gk) continue
-            if (!hdrdone) { print "<div class=\"navgroup\">" gname[gk] "</div>"; hdrdone = 1 }
-            print "<button type=\"button\" data-panel=\"" p "\" aria-selected=\"false\"><span>" tname[pt[p]] "</span><span class=\"count\">" pc[p] "</span></button>" } }
+    print "<div class=\"navgroup\">By type</div>"
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; tc = ((("os-" ty) in pc) ? pc["os-" ty] : 0) + ((("bmc-" ty) in pc) ? pc["bmc-" ty] : 0); if (!tc) continue
+        print "<button type=\"button\" data-panel=\"" ty "\" aria-selected=\"false\"><span>" tname[ty] "</span><span class=\"count\">" tc "</span></button>" }
     print "<div id=\"nav-footer\"><button type=\"button\" data-panel=\"notread\" aria-selected=\"false\"" (nn + nur ? " class=\"warn\"" : "") "><span>Not read</span><span class=\"count\">" nn + nur "</span></button></div>"
     print "</nav><main>"
     print "<section class=\"panel\" id=\"p-overview\"><h2>Overview</h2>"
@@ -722,8 +721,10 @@ END {
         print "</tbody></table></div>" }
     if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
     print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
-    for (i = 1; i <= np; i++) { p = pord[i]
-        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s &middot; %s</h2><p class=\"mut\">One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", p, gname[pg[p]], tname[pt[p]], (nsamp > 1 ? "highest reading" : "reading")
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
+        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s</h2><p class=\"mut\">The OS table (hwmon, nvidia-smi) and the BMC / IPMI table. One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", ty, tname[ty], (nsamp > 1 ? "highest reading" : "reading")
+        for (g = 1; g <= 2; g++) { p = (g == 1 ? "os" : "bmc") "-" ty; if (!(p in pc)) continue
+        printf "<h3>%s <span class=\"mut\">&middot; %d reading%s</span></h3>\n", gname[pg[p]], pc[p], (pc[p] == 1 ? "" : "s")
         two = 0; for (j = 1; j <= nc[p]; j++) { gs[j] = (j == 1 || cd[p, j] != cd[p, j - 1] || cchip[p, j] != cchip[p, j - 1]); if (cd[p, j] != "-") two = 1 }
         s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\"" (two ? " rowspan=\"2\"" : "") ">Host</th>"
         if (two) { for (j = 1; j <= nc[p]; j = k) { for (k = j + 1; k <= nc[p] && !gs[k]; k++) ; s = s "<th class=\"grp\" colspan=\"" (k - j) "\">" (cd[p, j] != "-" ? e(cd[p, j]) "<span class=\"chip\">" e(cchip[p, j]) "</span>" : e(cchip[p, j])) "</th>" }
@@ -736,7 +737,8 @@ END {
             for (j = 1; j <= nc[p]; j++) { c = col[p, j]; k = "n" (gs[j] ? " gs" : "")
                 s = s (((p, c, x) in cell) ? "<td class=\"" k (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : "") "</td>" : "<td class=\"" k "\" data-v=\"\">-</td>") }
             print s "</tr>" }
-        print "</tbody></table></div></section>" }
+        print "</tbody></table></div>" }
+        print "</section>" }
     print "<section class=\"panel\" id=\"p-notread\"><h2>Not read</h2>"
     print "<h3>No temperature data (" nn ")</h3><p class=\"mut\">Reached, but a source gave no reading; never shown as cool.</p>"
     if (nn) { print "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th data-col=\"1\">Source</th><th data-col=\"2\">Reason</th></tr></thead><tbody>"; for (i = 1; i <= nn; i++) print nd[i]; print "</tbody></table></div>" }
@@ -747,7 +749,7 @@ END {
     print "</section></main></div>" }'
 
 # Markdown, laid out like the html: contents, Overview (result, no-data list, hottest per host and type, flagged
-# sensors), then BMC / IPMI and OS, each by type, one row per host. A BMC table has a column per sensor ("HGX GPU",
+# sensors), then a section per type with its OS and BMC / IPMI tables, one row per host. A BMC table has a column per sensor ("HGX GPU",
 # crit in the header when every host has the same one, else in the cell). An OS table has a column per device
 # ("ibp13s0 mlx5"); its cell lists that device's sensors ("asic 41.0 · Module0 26.4"), or "max T of N sensors" past 4 of
 # them (a CPU socket's cores). A flagged reading is bold with its flag. Every single reading is in the jsonl.
@@ -775,20 +777,20 @@ END {
     gname["bmc"] = "BMC / IPMI"; gname["os"] = "OS (hwmon, nvidia-smi)"; gshort["bmc"] = "BMC"; gshort["os"] = "OS"
     printf "# Thermals: %s\n\n%s to %s UTC · %s · hwmon + nvidia-smi%s · thermals_capture %s\n\n", label, start, end, (nsamp > 1 ? nsamp " samples (tables show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), ver
     printf "**%s** · %d of %d hosts gave readings · %d sensors · %d flagged · %d no-data%s\n", res, hwd, nt, ns, nf, nn, (unreach ? " · " unreach " unreachable (no ssh connection)" : "")
-    print "\n**Contents:** [Overview](#overview)"
-    for (g = 1; g <= 2; g++) { gk = (g == 1 ? "bmc" : "os"); s = ""
-        for (i = 1; i <= np; i++) { p = pord[i]; if (pg[p] == gk) s = s (s == "" ? "" : " · ") "[" tname[pt[p]] "](#" tolower(gshort[gk] "-" tname[pt[p]]) ") (" pc[p] ")" }
-        if (s != "") print "- " gname[gk] ": " s }
+    s = ""
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; tc = ((("os-" ty) in pc) ? pc["os-" ty] : 0) + ((("bmc-" ty) in pc) ? pc["bmc-" ty] : 0)
+        if (tc) s = s " · [" tname[ty] "](#" ty ") (" tc ")" }
+    print "\n**Contents:** [Overview](#overview)" s
     print "\n## Overview"
     if (nn) { print "\n### No temperature data (never read as cool)\n"; for (i = 1; i <= nn; i++) print nd[i] }
     if (nh) { print "\n### Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
         for (i = 1; i <= nh; i++) { split(hm[i], q, " "); s = "| " q[1] " |"; for (j = 2; j <= 8; j++) s = s " " q[j] " |"; print s " " (q[9] == "-" ? "-" : "**" q[9] "**") " |" } }
     if (nf) { print "\n### Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
     print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high" (nsamp > 1 ? "; rise = up more than " rise "°C over the samples" : "") "."
-    lastg = ""
-    for (i = 1; i <= np; i++) { p = pord[i]; g = pg[p]
-        if (g != lastg) { print "\n## " gname[g]; lastg = g }
-        printf "\n### %s %s\n\n", gshort[g], tname[pt[p]]
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
+        print "\n## " tname[ty]
+        for (gi = 1; gi <= 2; gi++) { g = (gi == 1 ? "os" : "bmc"); p = g "-" ty; if (!(p in pc)) continue
+        printf "\n### %s · %d reading%s\n\n", gname[g], pc[p], (pc[p] == 1 ? "" : "s")
         s = "| Host |"; a = "|---|"
         for (j = 1; j <= nc[p]; j++) { c = col[p, j]
             s = s " " cn[p, j] (g == "bmc" ? (((p, c) in crmix) ? " (temp / crit)" : (cr[p, c] == "-" ? "" : " (crit " cr[p, c] ")")) : "") " |"; a = a (g == "bmc" ? "--:|" : "---|") }
@@ -798,7 +800,7 @@ END {
             for (j = 1; j <= nc[p]; j++) { c = col[p, j]
                 if (g == "bmc") s = s " " (((p, c, x) in cell) ? fl(cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : ""), cf[p, c, x]) : "-") " |"
                 else { k = p SUBSEP c SUBSEP x; s = s " " (!(k in n) ? "-" : n[k] <= 4 ? lst[k] : fl("max " f1(mx[k]) " of " n[k] " sensors", wf[k])) " |" } }
-            print s } }
+            print s } } }
     print "\nEvery single reading is in the jsonl (-o jsonl)." }'
 
 # ---------- main ----------
@@ -918,6 +920,9 @@ main() {
     local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
 
     # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
+    # a sensor with a crit but no high (or 0) gets high = 95% of crit, so high and near flag it too (Frank 10-26)
+    awk 'NR > 1 && $6 != "none" && ($8 == "-" || $8 + 0 <= 0) && $9 != "-" && $9 + 0 > 0 { $8 = sprintf("%.1f", $9 * 0.95) } { print }' \
+        "$WORK/temps.txt" > "$WORK/temps.hi" && mv "$WORK/temps.hi" "$WORK/temps.txt"
     awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
     { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
     awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
