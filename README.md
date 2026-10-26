@@ -210,7 +210,7 @@ ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
 ./thermals_capture.sh -t targets.csv -o md                    # targets from a file: hosts and BMCs, logins
 ```
 
-`-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments.
+`-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments. A line with no comma is a host with the defaults, so a plain host list works as it is. A line whose host field is empty or starts with `#` is skipped.
 - `host`: an ssh target. It can be an IP, a hostname, a CIDR or a range, as in `FF_HOSTS`. It is read like any other host: hwmon, plus in-band ipmitool.
 - `bmc`: one BMC address (no CIDR or range). It is read out of band from the machine running the script, with `ipmitool -I lanplus ... sensor`.
 - With no login, the current user is used. With no password, a host is reached by key (passwordless) ssh, and a BMC gets an empty password. The password is everything after the third comma.

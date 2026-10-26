@@ -18,7 +18,9 @@ Read only: each host reads /sys/class/hwmon (CPU, NVMe, NIC…; no package neede
 installed, `ipmitool sensor` (the BMC: inlet, exhaust…). Nothing is installed, loaded or changed.
 
 Options
-  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). type is host or bmc.
+  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). type is host or bmc. A line
+                   with no comma is a host with the defaults, so a plain host list works; a line whose host
+                   field is empty or starts with # is skipped.
                      host  an ssh target: IP, hostname, CIDR or range (as FF_HOSTS); hwmon + in-band ipmitool
                      bmc   one BMC address (no CIDR or range), read from here: ipmitool -I lanplus sensor
                    No login: the current user. No pw: key (passwordless) ssh; for a bmc, an empty password.
@@ -312,7 +314,8 @@ load_target_file() {
     while IFS= read -r line || [[ -n $line ]]; do
         ln=$(( ln + 1 )); line=${line%$'\r'}
         [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
-        [[ $line == *,* ]] || die "-t $f line $ln: expected <type>,<host>[,<login>[,<pw>]]"
+        [[ $line == *,* ]] || line="host,$line"   # a bare line is a host with the defaults: a plain host list works
+        [[ $line =~ ^[^,]*,[[:space:]]*(#|,*[[:space:]]*$) ]] && continue   # "host,# ...", "host," : commented out or empty
         ty=${line%%,*}; rest=${line#*,}
         h=${rest%%,*}; [[ $rest == *,* ]] && rest=${rest#*,} || rest=
         lg=${rest%%,*}; [[ $rest == *,* ]] && pw=${rest#*,} || pw=
