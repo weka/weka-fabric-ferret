@@ -62,8 +62,9 @@ nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts a
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
-Output: stdout gets every sensor, one row each ("Host Source Type Chip Dev Sensor Temp High Crit Flag", or First
-Min Max Last in place of Temp with -d); stderr gets the progress, the summary and the result.
+Output: stdout gets one row per host and source (hwmon, with nvidia-smi's GPUs, and ipmi): "Host Source Sensors Inlet CPU GPU Mem NVMe
+NIC Other Flags", the hottest reading of each type; stderr gets the progress, the flagged sensors, the no-data
+list and the result. Every sensor, one row each, is in the files (-o).
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
@@ -441,6 +442,14 @@ HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[
          for (x in hs) { l = x; for (i = 1; i <= 7; i++) l = l " " (((x, ty[i]) in m) ? m[x, ty[i]] : "-"); print l, (x in fl ? fl[x] : "-") } }'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 
+# stdout: one row per host and source (hwmon, which takes nvidia-smi's GPUs too, and ipmi), the hottest reading
+# of each type and the flags
+SRC_AWK='NR > 1 && $6 != "none" { k = $1 " " ($2 == "gpu" ? "hwmon" : $2); if (!(k in n)) ord[++nk] = k; n[k]++
+    if (!((k, $3) in m) || $8 > m[k, $3]) m[k, $3] = $8
+    if ($12 != "-" && index("," fl[k] ",", "," $3 ":" $12 ",") == 0) fl[k] = fl[k] (fl[k] == "" ? "" : ",") $3 ":" $12 }
+    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet CPU GPU Mem NVMe NIC Other Flags"
+          for (i = 1; i <= nk; i++) { k = ord[i]; l = k " " n[k]; for (j = 1; j <= 7; j++) l = l " " (((k, ty[j]) in m) ? m[k, ty[j]] : "-"); print l, (k in fl ? fl[k] : "-") } }'
+
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)
 VIEW_AWK='NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
@@ -456,10 +465,6 @@ print_summary() {
     echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples")):"
     awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
          END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
-    if awk 'NR > 1 && $6 != "none" {f = 1} END {exit !f}' "$ts"; then
-        echo "  Hottest reading per host and type (°C):"
-        { echo "$HOST_MAX_HDR"; sort -k9,9r -k1,1 "$WORK/hostmax"; } | column -t | sed 's/^/  /'
-    fi
     if awk 'NR > 1 && $NF != "-" {f = 1} END {exit !f}' "$WORK/view"; then
         echo "  Flagged sensors:"
         { head -n 1 "$WORK/view"; awk 'NR > 1 && $NF != "-"' "$WORK/view" | sort -k${fk},${fk} -k${mk},${mk}nr; } | column -t | sed 's/^/    /'
@@ -668,8 +673,10 @@ main() {
         END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
     if (( sensors == 0 )); then res=NONE rc=4; elif (( nodata > 0 )); then res=PARTIAL rc=3; else res=COMPLETE rc=0; fi
     print_summary >&2
-    # stdout: every sensor, one row each (the summary and the closing counts stay on stderr)
-    if awk 'NR > 1 {f = 1} END {exit !f}' "$WORK/view"; then column -t "$WORK/view"; fi
+    # stdout: one row per host and source (the summary and the closing counts stay on stderr)
+    if awk 'NR > 1 {f = 1} END {exit !f}' "$WORK/view"; then
+        awk "$SRC_AWK" "$WORK/temps_summary.txt" | { read -r hdr; echo "$hdr"; sort -k1,1 -k2,2; } | column -t
+    fi
     (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
     if (( verbose && ${#UNREACH[@]} )); then
         echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2

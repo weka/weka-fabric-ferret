@@ -236,7 +236,7 @@ host,node07
 bmc,10.1.100.11,ADMIN,bmc-pass
 ```
 
-- stdout gets every sensor, one aligned row each (host, source, type, chip, device, sensor, temperature, thresholds, flag). stderr gets progress, the summary and the result, so `> sensors.txt` keeps the table separate.
+- stdout gets one aligned row per host and source: hwmon (with the nvidia-smi GPUs) and ipmi. Each row holds the sensor count, the hottest reading of each type (inlet, CPU, GPU, mem, NVMe, NIC, other) and the flags. stderr gets progress, the flagged sensors, the no-data list and the result. Every individual sensor is in the jsonl, md and html files.
 - The JSONL file holds every reading, one object per line. Its records are typed `run`, `host`, `sample`, `reading`, `sensor` (type and first, min, max and last value, with the sensor's flag), `nodata` and `result`.
 - The HTML and Markdown files carry the summary. The HTML is a single self-contained file.
 - The flags are crit, high, near and rise, the same as with fabric_ferret's `FF_TEMPS` (`FF_TEMP_MARGIN`, `FF_TEMP_RISE`). `FF_IPMI`, `FF_IPMI_TIMEOUT`, `FF_SSH_USER`, `FF_SSH_PARALLEL`, `FF_LABEL` and `FF_OUT_DIR` work as they do for fabric_ferret.
