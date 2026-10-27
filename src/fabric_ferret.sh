@@ -586,7 +586,7 @@ main() {
         awk 'NR == FNR {sp[$1 " " $2] = $4; next} FNR == 1 {print $0, "Speed"; next} {print $0, (($1 " " $3) in sp && sp[$1 " " $3] ~ /^[0-9]+Mb\/s$/) ? sp[$1 " " $3] : "unknown"}' \
             "$NIC_DIAG" "$WORK/clients0" | column -t > "$COLLECT_DIR/clients.txt"
         if [[ -n $FF_CLIENT_GBPS ]]; then log "Client line rate: ${FF_CLIENT_GBPS}G (FF_CLIENT_GBPS)"
-            awk -v w="$(( FF_CLIENT_GBPS * 1000 ))Mb/s" 'NR > 1 && $7 ~ /^[0-9]+Mb\/s$/ && $7 != w {printf "#   %s %s %s %s\n", $1, $3, $4, $7}' "$COLLECT_DIR/clients.txt" > "$WORK/coffspeed"
+            awk -v w="$(( FF_CLIENT_GBPS * 1000 ))Mb/s" '#@awk ff_main.client_offspeed' "$COLLECT_DIR/clients.txt" > "$WORK/coffspeed"
             [[ -s $WORK/coffspeed ]] && { log "Client NICs not at ${FF_CLIENT_GBPS}G:"; cat "$WORK/coffspeed" >&2; }
         else log "Client line rate: each client NIC's own speed (a bond counts its total; set FF_CLIENT_GBPS to override): $(awk 'NR > 1 {print $7}' "$COLLECT_DIR/clients.txt" | sort | uniq -c | awk '{printf "%s%s x %s", s, $1, $2; s = ", "}')"; fi
     fi

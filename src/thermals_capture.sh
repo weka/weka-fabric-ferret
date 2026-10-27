@@ -214,7 +214,7 @@ main() {
 
     # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
     # a sensor with a crit but no high (or 0) gets high = 95% of crit, so high and near flag it too (Frank 10-26)
-    awk 'NR > 1 && $6 != "none" && ($8 == "-" || $8 + 0 <= 0) && $9 != "-" && $9 + 0 > 0 { $8 = sprintf("%.1f", $9 * 0.95) } { print }' \
+    awk '#@awk tc_main.crit_high' \
         "$WORK/temps.txt" > "$WORK/temps.hi" && mv "$WORK/temps.hi" "$WORK/temps.txt"
     awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
     { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
