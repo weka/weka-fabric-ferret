@@ -47,7 +47,21 @@ rail_groups() {
             GUPAIRS[g]=$up; GNUP[g]=$(( (nr * (nr - 1)) / 2 )); GPPP[g]=$(( nr + 2 )); GDPER[g]=$(( nr * nr ))
         else GUPAIRS[g]=""; GNUP[g]=1; GPPP[g]=$nr; GDPER[g]=$nr; fi
     done
+    # group pairs that share no rail (a 10-27 field run: A,B storage hosts and C GPU hosts) talk only through
+    # routing: phase 3 pairs them across the groups, the larger group (XGL) rotating through the smaller (XGS)
+    XGL=(); XGS=()
+    if [[ $CROSS == on ]]; then
+        local a b shared
+        for (( a = 0; a < ${#GKEYS[@]}; a++ )); do for (( b = a + 1; b < ${#GKEYS[@]}; b++ )); do
+            shared=0; for r in ${GRAILS[a]}; do [[ " ${GRAILS[b]} " == *" $r "* ]] && shared=1; done
+            (( shared )) && continue
+            if (( GN[b] > GN[a] )); then XGL+=("$b"); XGS+=("$a"); else XGL+=("$a"); XGS+=("$b"); fi
+        done; done
+    fi
 }
+
+# gmembers g: the hosts of group g (its circle without the bye), in GM
+gmembers() { local k; GM=(); for k in ${GROT[$1]}; do [[ $k == - ]] || GM+=("$k"); done; }
 
 # pair_rails a b: the rails both hosts hold, in PRL (indices) and PRN (their count)
 pair_rails() {
@@ -64,7 +78,7 @@ pair_rails() {
 # group) that sit this iteration out; GXA/GXB per group for the log.
 round_pairs() {
     local t=$1 g m i a b rr cyc
-    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); GXA=(); GXB=(); SITOUT=""; XA=; XB=
+    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=(); GXA=(); GXB=(); SITOUT=""; XA=; XB=
     for (( g = 0; g < ${#GKEYS[@]}; g++ )); do
         local -a rot=(${GROT[g]}) up=()
         m=${#rot[@]}; (( m > 1 )) || continue
@@ -87,11 +101,73 @@ round_pairs() {
                 pair_rails $a $b
                 local pxa=$xa pxb=$xb
                 [[ -n $xa && " $PRL " == *" $xa "* && " $PRL " == *" $xb "* ]] || { pxa=""; pxb=""; }
-                PC+=("$a"); PS+=("$b"); PI+=("$i"); PR+=("$rr"); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb")
+                PC+=("$a"); PS+=("$b"); PI+=("$i"); PR+=("$rr"); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb"); PXG+=(""); PSHARE+=(1)
                 local np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np")
             fi
         done
     done
+    # cross-group pairs (phase 3): host j of the larger group with host (j + t) mod |S| of the smaller; a smaller-group
+    # host serves several pairs (PSHARE: the flows its NIC carries in a wave); every host pair is met after |S| rounds.
+    # No same-rail paths (PRAILS empty): its paths are every (rail of one, rail of the other), both ways.
+    local x s j ns nl nrl nrs
+    for (( x = 0; x < ${#XGL[@]}; x++ )); do
+        gmembers ${XGL[x]}; local -a lm=("${GM[@]}"); gmembers ${XGS[x]}; local -a sm=("${GM[@]}")
+        nl=${#lm[@]}; ns=${#sm[@]}; (( nl > 0 && ns > 0 )) || continue
+        local -A cnt=()
+        for (( j = 0; j < nl; j++ )); do s=${sm[(j + t) % ns]}; cnt[$s]=$(( ${cnt[$s]:-0} + 1 )); done
+        for (( j = 0; j < nl; j++ )); do
+            s=${sm[(j + t) % ns]}; nrl=0; nrs=0
+            for r in ${HR[${lm[j]}]}; do nrl=$(( nrl + 1 )); done; for r in ${HR[$s]}; do nrs=$(( nrs + 1 )); done
+            PC+=("${lm[j]}"); PS+=("$s"); PI+=("$j"); PR+=("$t"); PG+=("x"); PRAILS+=(""); PXA+=(""); PXB+=(""); PXG+=("$x"); PSHARE+=("${cnt[$s]}")
+            PPATHS+=("$(( 2 * nrl * nrs ))")
+        done
+    done
+}
+
+# xg_paths p ra rb [share]: cross-group pair p's two runs over rails ra (its larger-group host) and rb (its
+# smaller-group host), one each way, in X1/X2, and their expected rate in XEXP: the slower of the sender's rail and
+# the shared receiver's rail divided by the flows it carries in the wave (the client rule; the smaller-group host is
+# the shared one): share as the wave counts it (xg_waves), else over the iteration's pairs (PSHARE)
+xg_paths() {
+    local p=$1 ra=$2 rb=$3 c=${PC[$p]} s=${PS[$p]} sh=${4:-${PSHARE[$p]}}
+    X1=($c $ra $s $rb); X2=($s $rb $c $ra)
+    XEXP=$(awk -v a="${LINE[ra]:-0}" -v b="${LINE[rb]:-0}" -v n="$sh" 'BEGIN { e = b / (n > 0 ? n : 1); if (a > 0 && a < e) e = a; printf "%g", e }')
+}
+
+# xg_waves results [udp]: phase 3 (U3): for every group pair and every rail pair (one rail of each group), the pairs'
+# runs both ways, in waves of at most FF_CROSS_MAX flows (as phase 2); TCP rows carry exp:<Gbps> for the judging
+xg_waves() {
+    local res=$1 mode=$2 x ra rb w p q all=$PHASE_OUT
+    for (( x = 0; x < ${#XGL[@]}; x++ )); do
+        for ra in ${GRAILS[${XGL[x]}]}; do for rb in ${GRAILS[${XGS[x]}]}; do
+            local -a xp=()
+            for (( p = 0; p < ${#PC[@]}; p++ )); do
+                [[ ${PXG[p]} == "$x" && " ${HR[${PC[p]}]} " == *" $ra "* && " ${HR[${PS[p]}]} " == *" $rb "* ]] && xp+=("$p")
+            done
+            (( ${#xp[@]} )) || continue
+            cross_waves ${#xp[@]}
+            for (( w = 0; w < XW; w++ )); do
+                PHASE_OUT=$all.x$x.$ra$rb.w$w; : > "$PHASE_OUT"
+                [[ $mode == udp ]] || echo "### iteration:${ITER} phase:${PHASE} rails:$(rail_letter $ra)-$(rail_letter $rb)$( (( XW > 1 )) && echo " wave:$(( w + 1 ))/$XW")" >> "$res"
+                # the pairs of this wave, and how many of them each smaller-group host serves: its NIC's share in the wave
+                local -a wp=(); local -A wc=(); local one=$(( ${FF_CROSS_MAX:-0} == 1 && XW > 1 ))
+                for (( q = 0; q < ${#xp[@]}; q++ )); do
+                    if (( one )); then (( q == w / 2 )) || continue; else (( q % XW == w )) || continue; fi
+                    wp+=("${xp[q]}"); wc[${PS[${xp[q]}]}]=$(( ${wc[${PS[${xp[q]}]}]:-0} + 1 ))
+                done
+                for p in "${wp[@]}"; do
+                    xg_paths $p $ra $rb "${wc[${PS[p]}]}"
+                    if (( one )); then
+                        if (( w % 2 )); then run_path p3b_${p}_$ra$rb "${X2[@]}" $mode; else run_path p3a_${p}_$ra$rb "${X1[@]}" $mode; fi
+                    else run_path p3a_${p}_$ra$rb "${X1[@]}" $mode; run_path p3b_${p}_$ra$rb "${X2[@]}" $mode; fi
+                done
+                wait; XEXP=
+                [[ $mode == udp ]] || column -t < "$PHASE_OUT" | tee -a "$res"
+                cat "$PHASE_OUT" >> "$all"
+            done
+        done; done
+    done
+    PHASE_OUT=$all
 }
 
 # xpaths p: pair p's two phase 2 runs, one each way across its group's rail pair (PXA, PXB), in X1/X2
@@ -186,8 +262,9 @@ run_path() {
           echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
         return
     fi
+    local xe=; [[ $PHASE == 3 && -n $XEXP ]] && xe=" exp:$XEXP"   # a cross-group run's expected rate (xg_paths), read by the per-NIC summary
     ( out=$(rbash -T $(( FF_DURATION + 30 )) "${T_TARGET[$sk]}" \
               "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
-      echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
+      echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}$xe" >> "$PHASE_OUT" ) &
 }

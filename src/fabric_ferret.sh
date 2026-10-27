@@ -791,11 +791,33 @@ main() {
             DIRECTED_TOTAL=$(( DIRECTED_TOTAL + 2 * d ))
         done; done
     done
-    for (( t = 0; t < (FF_ITER < cyc ? FF_ITER : cyc); t++ )); do   # the paths the iterations will plan
-        round_pairs $t; for (( p = 0; p < ${#PPATHS[@]}; p++ )); do planned=$(( planned + PPATHS[p] )); done
+    # cross-group (phase 3): every host pair across two groups with no rail in common, met after |smaller| rounds
+    XG_TOTAL=0; XG_COVERED=0; XG_UNROUTED=0; local xgdesc="" x nl ns xs xgr=0
+    for (( x = 0; x < ${#XGL[@]}; x++ )); do
+        gmembers ${XGL[x]}; local -a lm=("${GM[@]}"); gmembers ${XGS[x]}; local -a sm=("${GM[@]}"); nl=${#lm[@]}; ns=${#sm[@]}
+        XG_TOTAL=$(( XG_TOTAL + nl * ns )); XG_COVERED=$(( XG_COVERED + (FF_ITER < ns ? FF_ITER : ns) * nl ))
+        (( ns > cyc )) && cyc=$ns; (( ns > xgr )) && xgr=$ns
+        for i in "${lm[@]}"; do for j in "${sm[@]}"; do local nri=0 nrj=0; for r in ${HR[$i]}; do nri=$(( nri + 1 )); done; for r in ${HR[$j]}; do nrj=$(( nrj + 1 )); done
+            DIRECTED_TOTAL=$(( DIRECTED_TOTAL + 2 * nri * nrj )); done; done
+        xs=""; for i in ${GRAILS[${XGL[x]}]}; do for j in ${GRAILS[${XGS[x]}]}; do xs+="${xs:+ }$(rail_letter $i)<->$(rail_letter $j)"; done; done
+        xgdesc+="${xgdesc:+; }${GKEYS[${XGL[x]}]} ($nl hosts) <-> ${GKEYS[${XGS[x]}]} ($ns hosts): $nl pair$( (( nl != 1 )) && echo s)/iteration, rails $xs, every host pair after $ns iteration$( (( ns != 1 )) && echo s)$( (( FF_ITER < ns )) && echo "; $FF_ITER of $ns partners per host at FF_ITER=$FF_ITER")"
     done
+    (( ITER_ALL && cyc > FF_ITER )) && FF_ITER=$cyc
+    PAIRS_TOTAL=$(( PAIRS_TOTAL + XG_TOTAL )); PAIRS_COVERED=$(( PAIRS_COVERED + XG_COVERED ))
+    # the distinct directed paths the iterations will plan (a cross-group pair repeats after |smaller| rounds)
+    local -A pl=()
+    for (( t = 0; t < (FF_ITER < cyc ? FF_ITER : cyc); t++ )); do
+        round_pairs $t
+        for (( p = 0; p < ${#PC[@]}; p++ )); do
+            for r in ${PRAILS[p]}; do if (( r % 2 )); then pl["${PS[p]} $r ${PC[p]} $r"]=1; else pl["${PC[p]} $r ${PS[p]} $r"]=1; fi; done
+            [[ -n ${PXA[p]} ]] && { xpaths $p; pl["${X1[*]}"]=1; pl["${X2[*]}"]=1; }
+            [[ -n ${PXG[p]} ]] && for i in ${HR[${PC[p]}]}; do for j in ${HR[${PS[p]}]}; do pl["${PC[p]} $i ${PS[p]} $j"]=1; pl["${PS[p]} $j ${PC[p]} $i"]=1; done; done
+        done
+    done
+    planned=${#pl[@]}
+    [[ -n $xgdesc ]] && log "Cross-group: $xgdesc (phase 3: the groups share no rail, so the runs are routed; judged at the slower rail, shared NICs divided by their flows)"
     PATHS_PLANNED=0; DROP_READS_MIN=-1
-    log "Pairing: round-robin within $ng rail group$( (( ng > 1 )) && echo s): ${gdesc#; }; $FF_ITER iteration$( (( FF_ITER != 1 )) && echo s) cover$( (( FF_ITER == 1 )) && echo s) $PAIRS_COVERED of $total host pairs$( (( FF_ITER < rounds )) && echo " (all pairs need FF_ITER=$rounds)")"
+    log "Pairing: round-robin within $ng rail group$( (( ng > 1 )) && echo s): ${gdesc#; }; $FF_ITER iteration$( (( FF_ITER != 1 )) && echo s) cover$( (( FF_ITER == 1 )) && echo s) $PAIRS_COVERED of $PAIRS_TOTAL host pairs$( (( FF_ITER < rounds || FF_ITER < xgr )) && echo " (all pairs need FF_ITER=$(( rounds > xgr ? rounds : xgr )))")"
     if [[ -n $JOINED ]]; then
         local nj; nj=$(awk -F'; ' '{print NF}' <<<"$JOINED")
         log "$nj host$( (( nj > 1 )) && echo "s lack" || echo " lacks") a rail and pair$( (( nj == 1 )) && echo s) within the hosts holding the rails $( (( nj > 1 )) && echo they have || echo it has): $(awk -F'; ' '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? "; " : ""), $i; if (NF > 8) printf "; and %d more", NF - 8}' <<<"$JOINED")"
@@ -862,12 +884,17 @@ main() {
         [[ -n $sits ]] && log "Sits out this iteration (odd host count):$sits"
         for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
         PATHS=$WORK/paths.$ITER; mkdir -p "$PATHS"
+        local ra rb
         for (( p = 0; p < ${#PC[@]}; p++ )); do
             ck=${PC[p]}; sk=${PS[p]}
             p1_paths $p check
             [[ -n ${PXA[p]} ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; }
             for r in ${PRAILS[p]}; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
             [[ -n ${PXA[p]} ]] && { DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
+            [[ -n ${PXG[p]} ]] && for ra in ${HR[$ck]}; do for rb in ${HR[$sk]}; do   # cross-group: every rail pair, both ways
+                xg_paths $p $ra $rb; check_path p3a_${p}_$ra$rb "${X1[@]}"; check_path p3b_${p}_$ra$rb "${X2[@]}"
+                DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1
+            done; done
         done
         wait
         if [[ -z $cross_decided && ${#PC[@]} -gt 0 ]]; then
@@ -878,6 +905,12 @@ main() {
                 CROSS_UNROUTED=1   # still counted: a site missing its inter-rail routes looks the same
                 log "WARNING: rails are not routed to each other (all $xn $( (( NR == 2 )) && echo "A<->B" || echo cross-rail) path checks failed on routing, no same-rail one did): either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or inter-rail routing missing on every host. The skips count until you say which."
             fi
+            # the same for the group pairs: every cross-group check failed on routing while no same-rail one did
+            local gn gr=0; gn=$(ls "$PATHS" | grep -c '^p3'); (( gn )) && gr=$(cat "$PATHS"/p3* | grep -c '^ROUTE')
+            if (( gn > 0 && gr == gn && sr == 0 )); then
+                XG_UNROUTED=1
+                log "WARNING: the rail groups are not routed to each other (all $gn cross-group path checks failed on routing, no same-rail one did): either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or routing between the groups missing on every host. The skips count until you say which."
+            fi
         fi
         local bad nchk; bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' '); nchk=$(ls "$PATHS" | wc -l | tr -d ' ')
         log "Path checks (egress route, ping, MTU no-fragment): $(( nchk - bad )) OK, $bad excluded"
@@ -885,6 +918,8 @@ main() {
             for (( p = 0; p < ${#PC[@]}; p++ )); do
                 PHASE=1; p1_paths $p run check
                 [[ -n ${PXA[p]} ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
+                [[ -n ${PXG[p]} ]] && for ra in ${HR[${PC[p]}]}; do for rb in ${HR[${PS[p]}]}; do
+                    PHASE=3; xg_paths $p $ra $rb; run_path p3a_${p}_$ra$rb "${X1[@]}" check; run_path p3b_${p}_$ra$rb "${X2[@]}" check; done; done
             done
             clients_iter   # client path checks, every iteration
             (( ITER < FF_ITER )) && { echo; continue; }
@@ -903,11 +938,14 @@ main() {
             collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.obs"; hostctr_delta "iter${ITER}_obs" "$hc_prev" "$WORK/hc.obs"; collect_temps "iter${ITER}_obs"
             hc_log "the observation window" "$WORK/hc.obs"
         else
-            for PHASE in 1 2; do
+            for PHASE in 1 2 3; do
                 PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
                 if [[ $PHASE == 2 && $CROSS != on ]]; then log "Phase 2: skipped (cross-rail $CROSS)"; phase_skip 2; continue; fi
+                [[ $PHASE == 3 ]] && (( ${#XGL[@]} == 0 )) && continue   # no group pairs: no phase 3, nothing said
                 phase_start
-                [[ $PHASE == 1 ]] && log "Phase 1: $(same_desc) at once, start $PT0" || log "Phase 2: cross-rail, $(cross_desc) at once, start $PT0"
+                if [[ $PHASE == 1 ]]; then log "Phase 1: $(same_desc) at once, start $PT0"
+                elif [[ $PHASE == 2 ]]; then log "Phase 2: cross-rail, $(cross_desc) at once, start $PT0"
+                else log "Phase 3: cross-group, ${#XGL[@]} group pair$( (( ${#XGL[@]} != 1 )) && echo s), each rail pair both ways$( (( ${FF_CROSS_MAX:-0} )) && echo " in waves of at most $FF_CROSS_MAX"), start $PT0"; fi
                 if [[ $PHASE == 1 ]]; then
                     echo "### iteration:${ITER} phase:${PHASE}" >> "$RESULTS"
                     for (( p = 0; p < ${#PC[@]}; p++ )); do
@@ -915,7 +953,8 @@ main() {
                     done
                     wait
                     column -t < "$PHASE_OUT" | tee -a "$RESULTS"
-                else xwaves "$RESULTS"; fi
+                elif [[ $PHASE == 2 ]]; then xwaves "$RESULTS"
+                else xg_waves "$RESULTS"; fi
                 phase_end $PHASE
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
                 [[ $errs -gt 0 ]] && { log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
@@ -1013,11 +1052,12 @@ main() {
           (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" '#@awk ff_main.client_map' "$COLLECT_DIR/clients.txt"; } > "$WORK/dnmap"
         if grep -q 'Gbits/sec' "$RESULTS" || { (( ${#CLI[@]} )) && grep -q 'Gbits/sec' "$CRESULTS"; }; then
             echo "Throughput per data NIC, backends and clients, worst first (Gbps; Same: backend to backend on its rail$( (( NR > 1 )) && echo "; Cross: $( (( NR == 2 )) && echo "A<->B" || echo "rail-to-rail") runs, judged at the slower rail's rate")$( (( ${#CLI[@]} )) && echo "; CB_Out / CB_In: client<->backend runs this NIC sent / received; All_: the all-at-once phase"); Expect: the lowest expected rate over its runs; Status: each column's average share of its expected rate, worst, (retr) when Retr_% is above $FF_RETR_PCT (FF_RETR_PCT); Retr: TCP retransmits over the runs it sent, Retr_% of the segments it sent; a NIC with no runs shows its rail state):"
-            awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" -v rl="$FF_RETR_PCT" -v cl=${#CLI[@]} "$NIC_SUM_AWK" "$WORK/dnmap" "$RESULTS" "$( (( ${#CLI[@]} )) && echo "$CRESULTS" || echo "$WORK/cres0")" \
+            awk -F'[, ]+' -v lines="$RAIL_LINES" -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" -v rl="$FF_RETR_PCT" -v cl=${#CLI[@]} -v xg=${#XGL[@]} "$NIC_SUM_AWK" "$WORK/dnmap" "$RESULTS" "$( (( ${#CLI[@]} )) && echo "$CRESULTS" || echo "$WORK/cres0")" \
                 | { read -r hdr; echo "$hdr"; sort -k1,1nr -k2,2n -k4,4V; } | cut -d' ' -f3- | column -t | sed 's/^/  /'
         fi
         if grep -q 'Gbits/sec' "$RESULTS"; then
             cross_summary "$map" "$RESULTS"
+            (( ${#XGL[@]} )) && xgroup_summary "$map" "$RESULTS"
             uplink_summary "$map" "$LLDP_DATA" "$NIC_DIAG" "$RESULTS"
         else
             if (( FF_SKIP_IPERF )); then
@@ -1173,6 +1213,10 @@ main() {
         echo "cross_max=${FF_CROSS_MAX:-none}"
         echo "sysinfo_hosts=$( [[ -d $SI ]] && ls "$SI" | wc -l | tr -d " " || echo 0)"
         echo "cross_rail=$( (( CROSS_UNROUTED )) && echo unrouted || echo "$CROSS")"
+        # cross-group (phase 3): none = no two groups with disjoint rails; off = FF_CROSS_RAIL=0; unrouted = every check failed on routing
+        echo "cross_group=$( (( ${#XGL[@]} == 0 )) && { [[ $CROSS == off ]] && echo off || echo none; } || { (( XG_UNROUTED )) && echo unrouted || echo on; })"
+        echo "cross_group_pairs_total=$XG_TOTAL"
+        echo "cross_group_pairs_covered=$XG_COVERED"
         echo "paths_ok=$paths_ok"
         echo "drop_nics_read_min=$DROP_READS_MIN"
         local ncl=0; for k in "${CLI[@]}"; do ncl=$(( ncl + CN[$k] )); done

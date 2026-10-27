@@ -110,6 +110,7 @@ def generate_html(data, output_path):
     nic_rows, nic_cols = _nic_rows(data, ip_to_host, ip_to_nic)
     col_head = {'S': 'Same<small>backend to backend, its rail (mean Gbps)</small>',
                 'X': 'Cross<small>rail to rail runs (a path, judged at the slower rail)</small>',
+                'G': 'XGrp<small>cross-group runs, routed between rail groups that share no rail (judged at the slower rail, a shared NIC divided by its flows)</small>',
                 'CO': 'CB_Out<small>client&lt;-&gt;backend runs this NIC sent</small>',
                 'CI': 'CB_In<small>client&lt;-&gt;backend runs this NIC received</small>',
                 'FO': 'All_Out<small>all-at-once runs this NIC sent</small>', 'FI': 'All_In<small>all-at-once runs this NIC received</small>'}
@@ -1672,9 +1673,10 @@ def _int(s):
 
 
 def _cross(r, ip_rail):
-    """A run between rails measures a path, not either IP's NIC (routes decide which NIC carries it)."""
+    """A run between rails measures a path, not either IP's NIC (routes decide which NIC carries it).
+    A cross-group run (phase 3, between rail groups that share no rail) is routed too, but judged on its own."""
     a, b = ip_rail.get(r['src']), ip_rail.get(r['dst'])
-    return bool(a and b and a != b)
+    return bool(a and b and a != b and r.get('phase') != 3)
 
 
 def _cross_finding(data):
@@ -2009,6 +2011,9 @@ def _iperf_row(line):
     sh = re.search(r'\sshare:(\d+)', line)   # client runs: flows on that backend NIC at once
     if sh:
         r['share'] = int(sh.group(1))
+    xe = re.search(r'\sexp:([\d.]+)', line)   # cross-group runs: the expected rate the collector judged at
+    if xe:
+        r['exp'] = float(xe.group(1))
     return r
 
 
@@ -2045,21 +2050,25 @@ def _nic_rows(data, ip_to_host, ip_to_nic):
     def sent(x):
         if x['src'] in rows:
             r = rows[x['src']]; r['retr'] += x.get('retransmits', 0); r['gb'] += x.get('gbytes', 0); r['bytes'] += x.get('bytes', 0)
+    xg = False
     for x in data['iperf_results']:
         sent(x)
         a, b = rr.get(ipr.get(x['src'])) or L, rr.get(ipr.get(x['dst'])) or L
         same = ipr.get(x['src']) == ipr.get(x['dst'])
         for ip in (x['src'], x['dst']):
-            add(ip, 'S' if same else 'X', x['gbps'], a if same else min(a, b))
+            if x.get('phase') == 3:   # cross-group: judged at the exp: the collector wrote (shared NICs divided by their flows)
+                xg = True; add(ip, 'G', x['gbps'], x.get('exp') or min(a, b))
+            else:
+                add(ip, 'S' if same else 'X', x['gbps'], a if same else min(a, b))
     for f in cl.get('flows', []):
         sent(f)
         p = 'F' if f['phase'].startswith('F') else 'C'
         add(f['src'], p + 'O', f['gbps'], f['expected']); add(f['dst'], p + 'I', f['gbps'], f['expected'])
-    cols = ['S', 'X'] + (['CO', 'CI', 'FO', 'FI'] if cl else [])
+    cols = ['S', 'X'] + (['G'] if xg else []) + (['CO', 'CI', 'FO', 'FI'] if cl else [])
     down = set(data.get('down_ips', []))
     out = []
     for r in rows.values():
-        vals, w, wn, lo = {}, -1, -1, None
+        vals, w, wn, wx, wg, lo = {}, -1, -1, -1, -1, None
         for k in cols:
             c = r['c'].get(k)
             if not c:
@@ -2069,14 +2078,22 @@ def _nic_rows(data, ip_to_host, ip_to_nic):
             if c[3]:
                 p = c[2] / c[3]; lv = 0 if p >= ok else 1 if p >= slow else 2
                 lo = p if lo is None else min(lo, p); w = max(w, lv)
-                if k != 'X':
+                if k == 'X':
+                    wx = lv
+                elif k == 'G':
+                    wg = lv
+                else:
                     wn = max(wn, lv)
             vals[k] = {'g': round(c[0] / c[1], 1), 'lv': lv}
         ran = any(vals.values())
         segs = r['bytes'] / (r['mtu'] - 52 if r['mtu'] > 52 else 1448)   # as the collector: bytes sent / MSS
         rp = 100 * r['retr'] / segs if segs else None
+        # (cross) / (xgrp): only the routed columns are that bad; the host passes on its own rails (as the collector's table)
+        sfx = ''
+        if w > wn and (wx >= 0 or wg >= 0):
+            sfx = '(cross,xgrp)' if wx == w and wg == w else '(cross)' if wx == w else '(xgrp)'
         st = (('DOWN' if r['ip'] in down else r['state'].replace('_', ' ') if r['state'] != 'ok' else 'no result') if not ran
-              else ('-' if w < 0 else ['OK', 'SLOW', 'CRITICAL'][w] + ('(cross)' if wn >= 0 and w > wn else ''))
+              else ('-' if w < 0 else ['OK', 'SLOW', 'CRITICAL'][w] + sfx)
               + ('(retr)' if rp is not None and rp > rl else ''))
         out.append({'ip': r['ip'], 'role': r['role'], 'host': r['host'], 'nic': r['nic'], 'rail': r['rail'], 'cols': vals, 'retr': r['retr'],
                     'gb': r['gb'], 'retr_pct': round(rp, 3) if rp is not None else None,
@@ -2340,16 +2357,17 @@ def parse_tar_archive(filepath):
     line_speed = f'{line_gbps * 1000}Mb/s'
 
     # iperf3 results — with iteration/phase markers
-    cur_iter, cur_phase, cur_wave = 0, 0, ''
+    cur_iter, cur_phase, cur_wave, cur_rails = 0, 0, '', ''
     for line in read_file('iperf3_results.txt').splitlines():
         # Marker lines: ### iteration:N phase:N [wave:w/W]
-        mm = re.match(r'^###\s+iteration:(\d+)\s+phase:(\d+)(?:\s+wave:(\S+))?', line)
+        mm = re.match(r'^###\s+iteration:(\d+)\s+phase:(\d+)(?:\s+rails:(\S+))?(?:\s+wave:(\S+))?', line)
         if mm:
-            cur_iter, cur_phase, cur_wave = int(mm.group(1)), int(mm.group(2)), mm.group(3) or ''
+            cur_iter, cur_phase, cur_wave = int(mm.group(1)), int(mm.group(2)), mm.group(4) or ''
+            cur_rails = mm.group(3) or ''   # phase 3 (cross-group): the rail pair, e.g. C-A
             continue
         r = _iperf_row(line)
         if r:
-            data['iperf_results'].append({'iteration': cur_iter, 'phase': cur_phase, 'wave': cur_wave, **r})
+            data['iperf_results'].append({'iteration': cur_iter, 'phase': cur_phase, 'wave': cur_wave, 'rails': cur_rails if cur_phase == 3 else '', **r})
         elif ',ERROR' in line:   # a run with no result: "src,dst,ERROR rc=N iperf3: error - <reason>"
             p = line.split(',', 2)
             data['run_errors'].append({'iteration': cur_iter, 'phase': str(cur_phase), 'wave': cur_wave, 'src': p[0],
@@ -2651,6 +2669,33 @@ def parse_tar_archive(filepath):
                      f'every host; the skipped {xab} paths count until the operator says which.')
     elif xr == 'off':
         notes.append(f'Cross-rail phase ({xab}) not run: FF_CROSS_RAIL=0 (operator: rails are separate fabrics).')
+    # cross-group (phase 3): rail groups that share no rail, paired across the groups and routed
+    xg = meta.get('cross_group')
+    if xg in ('on', 'unrouted'):
+        ok_pct, slow_pct = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
+        def med(v):
+            v, k = sorted(v), len(v)
+            return 0 if not k else v[k // 2] if k % 2 else (v[k // 2 - 1] + v[k // 2]) / 2
+        gt, gc = _int(meta.get('cross_group_pairs_total')) or 0, _int(meta.get('cross_group_pairs_covered')) or 0
+        g3 = [r for r in data['iperf_results'] if r.get('phase') == 3]
+        by = defaultdict(list)
+        for r in g3:
+            by[r.get('rails') or '?'].append(r)
+        parts = []
+        for k in sorted(by):
+            rs = by[k]
+            okc = sum(1 for r in rs if r.get('exp') and 100 * r['gbps'] / r['exp'] >= ok_pct)
+            parts.append(f"{k}: {len(rs)} flows, median {med([r['gbps'] for r in rs]):.1f} Gbps, {okc} OK")
+        notes.append(f'Cross-group runs (phase 3, between rail groups that share no rail, routed): {gc} of {gt} host pairs covered'
+                     + (f'; {"; ".join(parts)}' if parts else '; no run gave a result') + '.')
+        if xg == 'unrouted':
+            problems.append('Rail groups not routed to each other: every cross-group path check failed on routing, no same-rail '
+                            'one did. Either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or routing between the '
+                            'groups missing on every host; the skipped cross-group paths count until the operator says which.')
+        bad3 = [r for r in g3 if r.get('exp') and 100 * r['gbps'] / r['exp'] < slow_pct]
+        if bad3:
+            problems.append(f'{len(bad3)} of {len(g3)} cross-group runs below {slow_pct:g}% of their expected rate (the XGrp column): '
+                            'the routed path between the groups, not either rail alone.')
     xs = [r for r in data['iperf_results'] if _cross(r, data['ip_rail'])]
     fx = min(data.get('rail_tiers', {}).get(k, data['tiers'])['F'] for k in rails)
     slow_x = [r for r in xs if r['gbps'] < fx]

@@ -21,21 +21,31 @@ uplink_summary() {
         -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" "$UPLINK_AWK" "$@"
 }
 
-# UDP phases U1 (same rail) and U2 (cross) on the current pairs, with host and NIC
-# counters read around each phase so lost datagrams can be placed.
+# xgroup_summary ipmap results: phase 3 per rail pair (both groups' rails): flows, average, median, OK/SLOW/CRITICAL
+# against the exp: each run carries
+xgroup_summary() {
+    awk -F'[, ]+' -v ok="$FF_OK_PCT" -v slow="$FF_SLOW_PCT" '#@awk ff_xgroup_summary' "$1" "$2"
+}
+
+# UDP phases U1 (same rail), U2 (cross) and U3 (cross-group, when group pairs exist) on the current pairs, with host
+# and NIC counters read around each phase so lost datagrams can be placed.
 udp_phases() {
     local u p ck sk a=$WORK/udp.0
     collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"; collect_counters "$TXCTR_SCRIPT" "$a.tx"
-    for u in 1 2; do
+    for u in 1 2 3; do
         PHASE=U$u; PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
         if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; phase_skip U2; continue; fi
+        [[ $u == 3 ]] && (( ${#XGL[@]} == 0 )) && continue
         phase_start
-        [[ $u == 1 ]] && log "Phase U1: UDP $(same_desc) at once (-b 0), start $PT0" || log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0), start $PT0"
+        if [[ $u == 1 ]]; then log "Phase U1: UDP $(same_desc) at once (-b 0), start $PT0"
+        elif [[ $u == 2 ]]; then log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0), start $PT0"
+        else log "Phase U3: UDP cross-group, each rail pair both ways (-b 0), start $PT0"; fi
         echo "### iteration:${ITER} phase:${PHASE}" >> "$UDP_RESULTS"
         if [[ $u == 1 ]]; then
             for (( p = 0; p < ${#PC[@]}; p++ )); do p1_paths $p run udp; done
             wait
-        else xwaves "$UDP_RESULTS" udp; fi
+        elif [[ $u == 2 ]]; then xwaves "$UDP_RESULTS" udp
+        else xg_waves "$UDP_RESULTS" udp; fi
         phase_end $PHASE
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local errs b=$WORK/udp.$u; errs=$(grep -c ',ERROR' "$PHASE_OUT")
