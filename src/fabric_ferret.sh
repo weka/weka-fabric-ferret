@@ -653,7 +653,8 @@ main() {
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
     # speed for every rail, so a whole rail that came up slow is not judged against itself. Only a usable rail's
     # NIC votes (iprail: "host nic letter", rails in state ok); a NIC a host has but does not address, or a rail
-    # it lacks, has no say and no rail letter (Frank's GPU fleet: 112 bond members with no IPv4 voted as rail B)
+    # it lacks, has no say and no rail letter (Frank's GPU fleet: 112 bond members with no IPv4 were keyed by that
+    # "none" and the 107 with a readable speed voted as rail B; the other 5 reported speed Unknown!)
     local -a LINE=() MODE=() VOTE=() TOT=() fl=(); local LINE_GBPS k v
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $k $r && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
     if [[ -n $FF_LINE_GBPS ]]; then
