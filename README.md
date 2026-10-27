@@ -84,6 +84,8 @@ With no rail setting, the tool sweeps the hosts, prints the IPv4 subnets it foun
 
 `FF_RAILS=a,b` (a comma, no `;`) is one rail with two subnets. On hosts with a NIC in each, that rail is ambiguous, and the run stops and shows the `;` form.
 
+Instead of `FF_HOSTS` and `FF_CLIENTS`, `-t FILE` reads the targets from a file in the format thermals_capture.sh reads (`<type>,<host>,<login>,<pw>`, see that section below): `backend` (or `host`) and `client` lines, each an IP, hostname, CIDR or range; `bmc` lines are skipped and counted in one log line. Not both: `-t` with `FF_HOSTS` or `FF_CLIENTS` set stops the run. This version reaches every target as `FF_SSH_USER`: a line with another login or a password, or a credential row (a host of `*` or a glob), stops the run, naming its line number. From a jump host, the file must be there: `bash -s -- -t FILE 120`. An argument the tool doesn't take (anything but `-t FILE`, `--list` and one duration) stops the run.
+
 ### Clients (optional)
 
 | Setting (default) | Meaning |
@@ -139,7 +141,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | `FF_BUSY_CHECK` (WEKA containers running) | command run on each host before any load: exit 0 = in production use, 1 = idle, anything else = unknown (counts as in use). Example: `'systemctl is-active --quiet myservice'`. `none` = no check |
 | `FF_BUSY_OK` | `1` = run even where the busy check says in use (stop the cluster's I/O first) |
 | `FF_IGNORE_LOCK` | `1` = run even if another run holds a host (both runs then get garbage) |
-| `FF_SSH_USER` (root) | ssh user; a non-root user runs remote steps with `sudo -n` |
+| `FF_SSH_USER` (the current user) | ssh user; a non-root user runs remote steps with `sudo -n` |
 | `FF_SSH_PARALLEL` (64) | ssh sessions at once for sweep and collection |
 | `FF_SSH_RETRY_PARALLEL` (8) | retry targets that refused ssh under load this many at a time |
 | `FF_MAX_TARGETS` (4096) | refuse to expand `FF_HOSTS` beyond this |

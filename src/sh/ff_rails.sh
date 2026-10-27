@@ -38,10 +38,11 @@ parse_rails() {
     done; done
 }
 
-# Client data NICs: CLIENT_MODE nets (CLIENT_SPEC = CIDRs) or nics (names); none when FF_CLIENTS is unset
+# Client data NICs: CLIENT_MODE nets (CLIENT_SPEC = CIDRs) or nics (names); none without clients (FF_CLIENTS or -t
+# client lines, TF_CL)
 parse_clients() {
     CLIENT_MODE=none; CLIENT_SPEC=()
-    [[ -n $FF_CLIENTS ]] || { [[ -n $FF_CLIENT_NETS$FF_CLIENT_NICS ]] && die "FF_CLIENT_NETS/FF_CLIENT_NICS need FF_CLIENTS (the client ssh targets)"; return 0; }
+    [[ -n $FF_CLIENTS ]] || (( ${#TF_CL[@]} )) || { [[ -n $FF_CLIENT_NETS$FF_CLIENT_NICS ]] && die "FF_CLIENT_NETS/FF_CLIENT_NICS need FF_CLIENTS or -t client lines (the client ssh targets)"; return 0; }
     local c
     if [[ -n $FF_CLIENT_NICS ]]; then
         CLIENT_MODE=nics; _words "$FF_CLIENT_NICS"; CLIENT_SPEC=("${WORDS[@]}")

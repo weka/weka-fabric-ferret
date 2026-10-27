@@ -414,6 +414,9 @@ load_target_file() {
     [[ -r $f && -f $f ]] || die "-t: cannot read '$f'"
     [[ $def =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     me=$(id -un); T_ROW=(); B_ROW=()
+    # also set: HF_RANGES[backend|client] (1 once a row of that type has a CIDR or range: INPUT_RANGES per type, so a
+    # backend range never makes a dead client look normal) and HF_WILD_LINES (the credential rows' line numbers)
+    declare -gA HF_RANGES=([backend]=0 [client]=0); declare -ga HF_WILD_LINES=()
     # _offer T|B idx row: the row's credentials for that target if more specific than what it has; an equal one
     # that differs keeps the first, warned once per pair of lines
     _offer() {
@@ -444,7 +447,7 @@ load_target_file() {
             [[ $h =~ ^[][A-Za-z0-9.*?!^-]+$ ]] || die "-t $f line $ln: bad host pattern (letters, digits . - and * ? [...] only)"
             [[ -n $lg || -n $pw ]] || die "-t $f line $ln: a wildcard row adds no targets, so it needs a login or pw"
             if [[ $h != '*' ]]; then tier=3; elif [[ $ty != '*' ]]; then tier=2; else tier=1; fi
-            R_TIER[r]=$tier; wild+=("$r"); continue
+            R_TIER[r]=$tier; wild+=("$r"); HF_WILD_LINES+=("$ln"); continue
         fi
         [[ $ty == '*' ]] && die "-t $f line $ln: type * takes a host of * or a glob (it adds no targets)"
         if [[ $ty == bmc ]]; then
@@ -457,11 +460,11 @@ load_target_file() {
         # an ssh target row: expanded alone, so the targets an earlier row already listed are known to be covered
         R_TIER[r]=5; [[ $h == */* || ( $h =~ ^[0-9.-]+$ && $h == *-* ) ]] && R_TIER[r]=4
         local -a keep=("${TARGETS[@]}") cover; local ir=$INPUT_RANGES
-        TARGETS=(); _SEEN=(); EXPANDING="-t $f line $ln"
+        TARGETS=(); _SEEN=(); EXPANDING="-t $f line $ln"; INPUT_RANGES=0
         expand_entry "$h"
         cover=("${TARGETS[@]}"); TARGETS=("${keep[@]}"); _SEEN=()
         for t in "${TARGETS[@]}"; do _SEEN[$t]=1; done
-        (( INPUT_RANGES |= ir ))
+        (( HF_RANGES[$ty] |= INPUT_RANGES, INPUT_RANGES |= ir ))   # this row's range flag, kept per type too
         for t in "${cover[@]}"; do
             if [[ -z ${tidx[$t]+x} ]]; then _emit "$t"; tidx[$t]=$(( ${#TARGETS[@]} - 1 )); T_TYPE[${tidx[$t]}]=$ty; T_FROM[${tidx[$t]}]=$ln
             elif [[ ${T_TYPE[${tidx[$t]}]} != "$ty" ]]; then

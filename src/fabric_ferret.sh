@@ -9,10 +9,18 @@
 usage() {
     cat <<'EOF'
 Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
-       FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh)
+       FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh -t FILE [duration_s]   (targets from a file instead)
+       FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh; -t FILE works too)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
        ssh jump "FF_HOSTS=10.1.0.0/24 FF_RAILS='10.20.1.0/24;10.20.2.0/24' bash -s -- 120" < fabric_ferret.sh
        The run ends by printing the scp + render line for the tarball it left on the jump host.
+       With -t: bash -s -- -t FILE 120, and FILE must be on the jump host (copy it there first).
+
+  -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
+             format thermals_capture.sh reads (# comments; a line with no comma is a backend). Types: backend (or
+             host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines are skipped (counted in
+             one log line). This version takes one login, FF_SSH_USER: a row with another login or a pw, or a
+             credential row (a host of * or a glob), is refused with its line number.
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
 
@@ -87,7 +95,7 @@ Optional (default)
   FF_SYSINFO_TIMEOUT  seconds per host for the system info capture before load (300); a host that runs
                    out keeps what it sent and is flagged sysinfo_partial
   FF_PORT          iperf3 port (5201)
-  FF_SSH_USER      ssh user; non-root runs remote steps with sudo -n (root)
+  FF_SSH_USER      ssh user, and -t's default login (the current user); non-root runs remote steps with sudo -n
   FF_SSH_PARALLEL  ssh sessions at once for sweep and collection (64)
   FF_SSH_RETRY_PARALLEL  retry targets that refused ssh under load (reset, kex) this many at a time (8)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
@@ -150,6 +158,8 @@ phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 #@include sh/ff_in_cidr.sh
 
 #@include sh/expand.sh
+
+#@include sh/hostfile.sh
 
 #@include sh/ff_rails.sh
 
@@ -215,7 +225,7 @@ main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
 
-    : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=root}"
+    : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=$(id -un)}"
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}" "${FF_RETR_PCT:=0.1}"
     [[ $FF_RETR_PCT =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "FF_RETR_PCT must be a number (% of TCP segments sent), got '$FF_RETR_PCT'"
@@ -228,8 +238,36 @@ main() {
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
-    [[ $1 =~ ^[0-9]+$ ]] && FF_DURATION=$1
+    # arguments, any order: --list, -t FILE, one duration (whole seconds); anything else is refused
+    local list=0 tfile= dur=
+    while (( $# )); do
+        case $1 in
+            --list) list=1; shift ;;
+            -t) (( $# >= 2 )) || die "-t needs a file (--help)"; tfile=$2; shift 2 ;;
+            -t?*) tfile=${1#-t}; shift ;;
+            *) [[ -z $dur && $1 =~ ^[0-9]+$ ]] || die "unexpected argument '$1' (arguments: [-t FILE] [--list] [duration_s]; --help)"
+               dur=$1; shift ;;
+        esac
+    done
+    [[ -n $dur ]] && FF_DURATION=$dur
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    # -t FILE (the format thermals_capture.sh reads): backend and client rows, one login (FF_SSH_USER) for now
+    local -a TF_BE=() TF_CL=()
+    if [[ -n $tfile ]]; then
+        [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
+        declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
+        TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
+        load_target_file "$tfile" "$FF_SSH_USER"
+        local k one="fabric_ferret.sh takes one login (FF_SSH_USER); row credentials come in a later version"
+        (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
+        for k in "${!TARGETS[@]}"; do
+            [[ ${T_LINE[$k]} == default ]] || [[ ${T_LOGIN[$k]} == "$FF_SSH_USER" && -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
+            if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
+        done
+        (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
+        (( ${#TF_BE[@]} )) || die "-t $tfile has no backend targets"
+    fi
     [[ -z $FF_UDP ]] && FF_UDP=$(( ! FF_SKIP_IPERF ))   # UDP by default, except with no load
     : "${FF_UDP_DURATION:=$FF_DURATION}"
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
@@ -275,13 +313,17 @@ main() {
     fi
     # clients first, so a target in both lists is caught; TARGETS = hosts, then clients (index >= NHT)
     local -a CL_T=(); CL_RANGES=0
-    if [[ -n $FF_CLIENTS ]]; then expand_targets "$FF_CLIENTS" FF_CLIENTS; CL_T=("${TARGETS[@]}"); CL_RANGES=$INPUT_RANGES; fi
-    expand_targets "$FF_HOSTS"
+    if [[ -n $tfile ]]; then   # a range per type: a backend range never makes a dead client look normal
+        TARGETS=("${TF_BE[@]}"); CL_T=("${TF_CL[@]}"); INPUT_RANGES=${HF_RANGES[backend]}; CL_RANGES=${HF_RANGES[client]}
+    else
+        if [[ -n $FF_CLIENTS ]]; then expand_targets "$FF_CLIENTS" FF_CLIENTS; CL_T=("${TARGETS[@]}"); CL_RANGES=$INPUT_RANGES; fi
+        expand_targets "$FF_HOSTS"
+    fi
     NHT=${#TARGETS[@]}
-    if (( ${#CL_T[@]} )); then
+    if (( ${#CL_T[@]} )) && [[ -z $tfile ]]; then
         local t; for t in "${CL_T[@]}"; do [[ -n ${_SEEN[$t]+x} ]] && die "target $t is in both FF_HOSTS and FF_CLIENTS"; done
     fi
-    if [[ $1 == --list ]]; then
+    if (( list )); then
         printf '%s\n' "${TARGETS[@]}"; log "${#TARGETS[@]} targets"
         (( ${#CL_T[@]} )) && { printf 'client %s\n' "${CL_T[@]}"; log "${#CL_T[@]} client targets"; }
         exit 0
