@@ -1,0 +1,42 @@
+# hostlist.example.csv: a target file for fabric_ferret.sh -t and thermals_capture.sh -t (the same format).
+# Copy it, keep the rows you need, and chmod 600 it when a row holds a password.
+#
+# Row format: <type>,<host>,<login>,<pw>
+#   type   backend (or host) and client: ssh targets; bmc: one BMC address, read out of band (fabric_ferret.sh
+#          skips bmc rows and says how many). A bare line (no comma) is a backend with the defaults, so a plain
+#          host list works as it is. Type * means backend and client, never bmc.
+#   host   an IP, hostname, CIDR or range (as FF_HOSTS); a bmc takes one IP or hostname. A host of * or a glob
+#          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
+#          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).
+#   login  the ssh login (a bmc: its user); empty = FF_SSH_USER, by default the user running the tool.
+#   pw     everything after the third comma, verbatim; empty = key (passwordless) ssh, or an empty BMC password.
+# Each target takes the most specific row that gives a login or a password: the row naming the one host, then a
+# CIDR or range, then a glob, then <type>,*, then *,*. That row is its credential; there is no fallback to a less
+# specific one. Passwords never appear on a command line, in an environment variable or in any output.
+#
+# Targets
+backend,10.20.1.0/28
+backend,10.20.1.16-23
+backend,storage-09,svc-fabric
+client,10.20.2.0/26
+client,gpu-node-01
+client,gpu-node-02
+bmc,10.20.100.11
+# Credential rows: the login (and password, if any) for every target a more specific row does not cover
+backend,*,svc-fabric
+*,gpu-node-*,admin
+#
+# Settings: the environment today (a later build reads them from this file). Export them before the run; an
+# uncommented settings line here is refused as a bad host.
+# FF_NICS=<rail-a-nic>,<rail-b-nic>      data NIC per rail, rail A first (wins over FF_RAILS)
+# FF_CLIENT_NICS=bond0                   the clients' data NIC names, comma separated (a client may have one or several)
+# FF_LINE_GBPS=400                       link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...)
+# FF_CLIENT_GBPS=800                     client line rate (default: each client NIC's ethtool speed; a bond counts its total)
+# FF_SPINES=4                            leaf-spine uplinks, all three or none (no defaults): spines, links from each
+# FF_SPINE_LINKS=5                       backend leaf to each spine, Gbps per link; with these set the summary judges
+# FF_SPINE_GBPS=400                      each leaf's cross-leaf runs against spines x links x Gbps per direction
+# FF_CLIENT_SPINE_LINKS=4                the same for client leaves (both or neither; they need FF_SPINES)
+# FF_CLIENT_SPINE_GBPS=400
+# FF_ITER=3                              passes of the full test set (every host and client NIC, every phase); each pass
+#                                        gets new partners, round robin; all = every direction on every NIC pair once
+# FF_DURATION=120                        iperf3 seconds per run ($1 also sets it)
