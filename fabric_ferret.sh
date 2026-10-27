@@ -3,6 +3,9 @@
 # fabric_ferret: backend-to-backend (any number of rails) and client-to-backend iperf3 fabric check.
 # Hosts and rails come from env vars (see usage); output is a .tgz bundle
 # that generate_dashboard.py turns into an HTML dashboard.
+# bash 4.3+ (declare -A, wait -n, namerefs): checked first, in bash 3 syntax, before anything else runs
+[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
+    echo "fabric_ferret.sh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; echo "RESULT coverage=STOPPED (needs bash 4.3+)" >&2; exit 2; }
 
 usage() {
     cat <<'EOF'
@@ -2005,7 +2008,6 @@ check_settings() {
 # ======================================================================
 
 main() {
-    (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )) || die "needs bash 4.3+"
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
 

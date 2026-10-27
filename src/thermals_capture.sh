@@ -2,6 +2,9 @@
 # thermals_capture: every hwmon temperature and the BMC's (ipmitool) on a set of hosts, read only, over ssh.
 # One snapshot by default, or a sample every -i seconds for -d seconds. Output: any of .jsonl, .html, .md.
 # Standalone companion to fabric_ferret.sh: same host syntax and FF_ settings, same reader and flags.
+# bash 4.3+ (declare -A, wait -n, namerefs): checked first, in bash 3 syntax, before anything else runs
+[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
+    echo "thermals_capture.sh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; echo "RESULT data=STOPPED (needs bash 4.3+)" >&2; exit 2; }
 
 THERMALS_VERSION=1.0
 
@@ -111,7 +114,6 @@ cleanup() {
 }
 
 main() {
-    (( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 3) )) || die "needs bash 4.3+"
     [[ $1 == --help ]] && { usage; exit 0; }
     : "${FF_SSH_USER:=root}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
