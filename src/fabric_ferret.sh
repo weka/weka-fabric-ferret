@@ -345,14 +345,8 @@ main() {
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
     # a password login (a -t row's pw): read once, where its ssh master opens (the sweep), through the askpass helper from a
-    # one-use fifo; never in an environment variable, argv or the state file. Unattended from OpenSSH 8.4, else setsid.
-    SETSID=; local ver
-    if (( ${#TPW[@]} )); then
-        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
-        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
-            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
-        fi
-    fi
+    # one-use fifo; never in an environment variable, argv or the state file. pw_transport (auth.sh): OpenSSH 8.4+, else setsid.
+    SETSID=; (( ${#TPW[@]} )) && pw_transport
 
     WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
     AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; (( ${#TPW[@]} )) && write_askpass "$AUTH/askpass"

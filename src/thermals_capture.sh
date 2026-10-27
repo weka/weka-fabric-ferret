@@ -178,15 +178,9 @@ main() {
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
     LOCAL_IPMITOOL=; (( ${#BMCS[@]} )) && { LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; }
-    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); unattended
-    # from OpenSSH 8.4 (SSH_ASKPASS_REQUIRE), or under setsid (no tty) before that
-    SETSID=; local ver
-    if (( ${#T_PW[@]} )); then
-        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
-        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
-            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
-        fi
-    fi
+    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); pw_transport
+    # (auth.sh) checks this ssh takes it unattended, or dies
+    SETSID=; (( ${#T_PW[@]} )) && pw_transport
     MODE=-; (( FF_IPMI )) && MODE=ipmi
     # a host's whole read is cut off 30 s after the ipmitool timeout (a hung sysfs read or ssh), where timeout exists
     HOST_LIMIT=$(( FF_IPMI_TIMEOUT + 30 )); TO=$(command -v timeout || command -v gtimeout)

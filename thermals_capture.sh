@@ -306,7 +306,16 @@ write_askpass() {
 }
 # pwfifo name pw: a one-use fifo in AUTH holding pw, open read-write on fd 4 (a fifo drops what it holds when its last
 # fd closes; the write can't block). The pw goes in by printf (a builtin: no argv). Caller: exec 4>&-; rm the fifo.
-pwfifo() { local f=$AUTH/$1.fifo; rm -f "$f" "$f.used"; mkfifo -m 600 "$f" || return 1; exec 4<>"$f"; printf '%s\n' "$2" >&4; PWFIFO=$f; }
+pwfifo() { local f=$AUTH/$1.fifo; rm -f "$f" "$f.used"; mkfifo -m 600 "$f" || { echo "no password fifo: mkfifo $f failed" >&2; return 1; }; exec 4<>"$f"; printf '%s\n' "$2" >&4; PWFIFO=$f; }
+# pw_transport: a password login's ssh takes SSH_ASKPASS unattended from OpenSSH 8.4 (SSH_ASKPASS_REQUIRE), before that
+# only under setsid (no tty). Sets SETSID (the setsid path, or empty); dies when this machine has neither.
+pw_transport() {
+    local ver; SETSID=
+    ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
+    if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
+        SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
+    fi
+}
 
 # ---------- collection ----------
 
@@ -983,15 +992,9 @@ main() {
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
     LOCAL_IPMITOOL=; (( ${#BMCS[@]} )) && { LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; }
-    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); unattended
-    # from OpenSSH 8.4 (SSH_ASKPASS_REQUIRE), or under setsid (no tty) before that
-    SETSID=; local ver
-    if (( ${#T_PW[@]} )); then
-        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
-        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
-            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
-        fi
-    fi
+    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); pw_transport
+    # (auth.sh) checks this ssh takes it unattended, or dies
+    SETSID=; (( ${#T_PW[@]} )) && pw_transport
     MODE=-; (( FF_IPMI )) && MODE=ipmi
     # a host's whole read is cut off 30 s after the ipmitool timeout (a hung sysfs read or ssh), where timeout exists
     HOST_LIMIT=$(( FF_IPMI_TIMEOUT + 30 )); TO=$(command -v timeout || command -v gtimeout)
