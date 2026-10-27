@@ -63,7 +63,7 @@ sample() {
         if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
             echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue
         fi
-        echo "$n ${TARGETS[$i]} $host host ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
+        echo "$n ${TARGETS[$i]} $host ${T_TYPE[$i]:-backend} ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
         case $rc in
             0) why=no_output ;;
             124) why=ssh_cut_off_after_${HOST_LIMIT}s ;;

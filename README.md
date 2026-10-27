@@ -216,24 +216,27 @@ ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
 ./thermals_capture.sh -t targets.csv -o md                    # targets from a file: hosts and BMCs, logins
 ```
 
-`-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments. A line with no comma is a host with the defaults, so a plain host list works as it is. A line whose host field is empty or starts with `#` is skipped.
-- `host`: an ssh target. It can be an IP, a hostname, a CIDR or a range, as in `FF_HOSTS`. It is read like any other host: hwmon, plus in-band ipmitool.
+`-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments. A line with no comma is a backend with the defaults, so a plain host list works as it is. A line whose host field is empty or starts with `#` is skipped.
+- `backend` or `client` (`host` = `backend`): an ssh target. It can be an IP, a hostname, a CIDR or a range, as in `FF_HOSTS`. It is read like any other host: hwmon, plus in-band ipmitool. One target can't be listed as both.
 - `bmc`: one BMC address (no CIDR or range). It is read out of band from the machine running the script, with `ipmitool -I lanplus ... sensor`.
-- With no login, the current user is used. With no password, a host is reached by key (passwordless) ssh, and a BMC gets an empty password. The password is everything after the third comma.
+- A host of `*` or a glob (`*`, `?`, `[...]`, matched in any case) makes a credential row: it adds no targets and needs a login or a password. Type `*` means backend and client, never bmc.
+- Each target takes the most specific row that gives a login or a password: a line naming the one host, then a CIDR or range, then a glob, then `<type>,*`, then `*,*`. That row is its credential; there is no fallback to a less specific one. Two rows at the same level that differ: the first is used, with a warning naming both line numbers. A credential row that matches no target is warned.
+- With no login, `FF_SSH_USER` is used (default: the current user). With no password, a host is reached by key (passwordless) ssh, and a BMC gets an empty password. The password is everything after the third comma.
 - Passwords never appear on a command line or in any output. ssh gets its password through the environment: `sshpass -e` if sshpass is installed, otherwise `SSH_ASKPASS`, which needs OpenSSH 8.4 or later on the machine running the script. ipmitool gets its password through `-E`.
 - The script warns if a file that holds passwords can be read by group or others; `chmod 600` it.
 - Targets come from `FF_HOSTS` or from `-t`, never both.
 - `FF_HOSTS` hosts are reached as `FF_SSH_USER` with key (passwordless) ssh and `sudo -n`.
 - On a `-t` host line with a non-root login and a password, ipmitool runs with `sudo -S` and that password. The password is sent over the ssh session's input stream, never on a command line.
-- A line that names one host sets that host's login and password even if an earlier range line covered it.
 - `FF_IPMI=0` turns off in-band ipmitool only; `bmc` lines are always read.
 
 ```text
 # type,host,login,pw
-host,10.1.0.11,admin,s3cret
-host,10.1.0.0/28,ops
-host,node07
-bmc,10.1.100.11,ADMIN,bmc-pass
+backend,10.1.0.0/28
+backend,10.1.0.11,admin,s3cret
+client,cl-*,ops
+client,cl-01
+bmc,10.1.100.11
+bmc,*,ADMIN,bmc-pass
 ```
 
 - stdout gets one aligned row per host and source: hwmon (with the nvidia-smi GPUs) and ipmi. Each row holds the sensor count, the hottest reading of each type (inlet, CPU, GPU, mem, NVMe, NIC, other) and the flags. stderr gets progress, the flagged sensors, the no-data list and the result. Every individual sensor is in the jsonl and html files.

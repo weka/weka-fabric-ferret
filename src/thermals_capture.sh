@@ -23,18 +23,23 @@ GPU board, drives, DIMMs…). Nothing is installed, loaded or changed. Every sen
 (inlet, cpu, gpu, mem, nvme, nic, other), whichever of the three read it.
 
 Options
-  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). type is host or bmc. A line
-                   with no comma is a host with the defaults, so a plain host list works; a line whose host
-                   field is empty or starts with # is skipped.
-                     host  an ssh target: IP, hostname, CIDR or range (as FF_HOSTS); hwmon + in-band ipmitool
+  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). A line with no comma is a
+                   backend with the defaults, so a plain host list works; a line whose host field is empty or
+                   starts with # is skipped.
+                     backend, client (host = backend)  an ssh target: IP, hostname, CIDR or range (as
+                           FF_HOSTS); hwmon + in-band ipmitool
                      bmc   one BMC address (no CIDR or range), read from here: ipmitool -I lanplus sensor
-                   No login: the current user. No pw: key (passwordless) ssh; for a bmc, an empty password.
+                     *     backend and client, never bmc (credential rows only)
+                   A host of * or a glob (* ? [...], any case) is a credential row: it adds no targets and needs
+                   a login or pw. Each target takes the most specific row with a login or pw: one host > CIDR
+                   or range > glob > <type>,* > *,*. That row is its credential, no fallback; two rows at one
+                   level that differ: the first, warned; a row matching nothing: warned.
+                   No login: FF_SSH_USER. No pw: key (passwordless) ssh; for a bmc, an empty password.
                    The pw is everything after the third comma. Passwords reach ssh only through the environment
                    (sshpass -e if installed, else SSH_ASKPASS: OpenSSH 8.4+ here) and ipmitool through -E,
                    never a command line, and are never written out. chmod 600 the file (warned otherwise).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
-                   stdin stream, not argv); without a pw, sudo -n. A line naming one host sets its login and pw
-                   even if an earlier range line covered it. -t or FF_HOSTS, not both.
+                   stdin stream, not argv); without a pw, sudo -n. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
                    page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
@@ -49,9 +54,10 @@ Options
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
-  FF_HOSTS         ssh targets (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
+  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
                    10.1.0.10-10.1.1.20 | 10.1.0.10-40 | 10.1.0-1.10-40 | @hosts.txt (# comments)
-  FF_SSH_USER      ssh user (root); a non-root user reads hwmon as itself and runs ipmitool with sudo -n
+  FF_SSH_USER      ssh user, and -t's default login (the current user); a non-root user reads hwmon as itself
+                   and runs ipmitool with sudo -n
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -115,7 +121,7 @@ cleanup() {
 
 main() {
     [[ $1 == --help ]] && { usage; exit 0; }
-    : "${FF_SSH_USER:=root}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
+    : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
     [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
     local v; for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
@@ -141,11 +147,12 @@ main() {
     (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
     [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
     [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
-    # targets: FF_HOSTS (FF_SSH_USER, key ssh, sudo -n), or the -t file's host and bmc lines
-    declare -ga T_LOGIN=() T_PW=() BMCS=() B_LOGIN=() B_PW=(); HAVE_PW=0
+    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh, sudo -n), or the -t file's rows (FF_SSH_USER the default login)
+    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
     TARGETS=(); _SEEN=(); INPUT_RANGES=0
-    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; done; fi
-    [[ -n $tfile ]] && load_target_file "$tfile"
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
+    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
     if (( list )); then (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0; fi
     FMTS=(); local -A seen=(); local -a fl

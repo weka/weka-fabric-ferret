@@ -24,18 +24,23 @@ GPU board, drives, DIMMs…). Nothing is installed, loaded or changed. Every sen
 (inlet, cpu, gpu, mem, nvme, nic, other), whichever of the three read it.
 
 Options
-  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). type is host or bmc. A line
-                   with no comma is a host with the defaults, so a plain host list works; a line whose host
-                   field is empty or starts with # is skipped.
-                     host  an ssh target: IP, hostname, CIDR or range (as FF_HOSTS); hwmon + in-band ipmitool
+  -t FILE          targets, one per line: <type>,<host>,<login>,<pw> (# comments). A line with no comma is a
+                   backend with the defaults, so a plain host list works; a line whose host field is empty or
+                   starts with # is skipped.
+                     backend, client (host = backend)  an ssh target: IP, hostname, CIDR or range (as
+                           FF_HOSTS); hwmon + in-band ipmitool
                      bmc   one BMC address (no CIDR or range), read from here: ipmitool -I lanplus sensor
-                   No login: the current user. No pw: key (passwordless) ssh; for a bmc, an empty password.
+                     *     backend and client, never bmc (credential rows only)
+                   A host of * or a glob (* ? [...], any case) is a credential row: it adds no targets and needs
+                   a login or pw. Each target takes the most specific row with a login or pw: one host > CIDR
+                   or range > glob > <type>,* > *,*. That row is its credential, no fallback; two rows at one
+                   level that differ: the first, warned; a row matching nothing: warned.
+                   No login: FF_SSH_USER. No pw: key (passwordless) ssh; for a bmc, an empty password.
                    The pw is everything after the third comma. Passwords reach ssh only through the environment
                    (sshpass -e if installed, else SSH_ASKPASS: OpenSSH 8.4+ here) and ipmitool through -E,
                    never a command line, and are never written out. chmod 600 the file (warned otherwise).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
-                   stdin stream, not argv); without a pw, sudo -n. A line naming one host sets its login and pw
-                   even if an earlier range line covered it. -t or FF_HOSTS, not both.
+                   stdin stream, not argv); without a pw, sudo -n. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
                    page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
@@ -50,9 +55,10 @@ Options
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
-  FF_HOSTS         ssh targets (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
+  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
                    10.1.0.10-10.1.1.20 | 10.1.0.10-40 | 10.1.0-1.10-40 | @hosts.txt (# comments)
-  FF_SSH_USER      ssh user (root); a non-root user reads hwmon as itself and runs ipmitool with sudo -n
+  FF_SSH_USER      ssh user, and -t's default login (the current user); a non-root user reads hwmon as itself
+                   and runs ipmitool with sudo -n
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -336,7 +342,7 @@ sample() {
         if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
             echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue
         fi
-        echo "$n ${TARGETS[$i]} $host host ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
+        echo "$n ${TARGETS[$i]} $host ${T_TYPE[$i]:-backend} ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
         case $rc in
             0) why=no_output ;;
             124) why=ssh_cut_off_after_${HOST_LIMIT}s ;;
@@ -356,41 +362,99 @@ sample() {
     done
 }
 
-# load_target_file file: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped). type host: an ssh
-# target (IP, name, CIDR or range, as FF_HOSTS); bmc: one BMC address read out of band. No login = the current
-# user; no pw = key login (host) or an empty password (bmc). The pw is everything after the third comma, verbatim.
-# Errors name the line number, never its text (it may hold a password).
+# load_target_file file deflogin: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped). type backend
+# (host = backend) or client: ssh targets (IP, name, CIDR or range, as FF_HOSTS); bmc: one BMC address read out of
+# band. A host field * or a glob (* ? [...], any case) is a credential row: it adds no targets. Type * = backend
+# and client, never bmc. Each target takes the most specific row that gives a login or pw: one host > CIDR/range >
+# glob > <type>,* > *,* > the default (deflogin, key; a bmc: the current user, empty password). That row is the
+# credential, with no fallback. The pw is everything after the third comma, verbatim. Errors and warnings name
+# line numbers, never the text (it may hold a password). Sets TARGETS T_TYPE T_LOGIN T_PW T_LINE, BMCS B_LOGIN
+# B_PW B_LINE (T_LINE/B_LINE: the line whose credential it took, or "default").
 load_target_file() {
-    local f=$1 line ln=0 ty h lg pw rest n0 k me
+    local f=$1 def=$2 line ln=0 ty h lg pw rest k r t g n tier me
+    local -a R_LN=() R_TY=() R_H=() R_LG=() R_PW=() R_TIER=() wild=()
+    local -A tidx=() bidx=() warned=()
     [[ -r $f && -f $f ]] || die "-t: cannot read '$f'"
-    me=$(id -un)
+    [[ $def =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    me=$(id -un); T_ROW=(); B_ROW=()
+    # _offer T|B idx row: the row's credentials for that target if more specific than what it has; an equal one
+    # that differs keeps the first, warned once per pair of lines
+    _offer() {
+        local -n rw=${1}_ROW; local o=${rw[$2]}
+        if [[ -z $o ]] || (( R_TIER[$3] > R_TIER[o] )); then rw[$2]=$3
+        elif (( R_TIER[$3] == R_TIER[o] && o != $3 )) && [[ ${R_LG[$3]} != "${R_LG[o]}" || ${R_PW[$3]} != "${R_PW[o]}" ]] && [[ -z ${warned[$o,$3]} ]]; then
+            warned[$o,$3]=1; log "WARNING: -t $f lines ${R_LN[o]} and ${R_LN[$3]} give a target different credentials at the same specificity; line ${R_LN[o]}'s are used"
+        fi
+    }
     while IFS= read -r line || [[ -n $line ]]; do
         ln=$(( ln + 1 )); line=${line%$'\r'}
         [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
-        [[ $line == *,* ]] || line="host,$line"   # a bare line is a host with the defaults: a plain host list works
+        [[ $line == *,* ]] || line="backend,$line"   # a bare line is a backend with the defaults: a plain host list works
         [[ $line =~ ^[^,]*,[[:space:]]*(#|,*[[:space:]]*$) ]] && continue   # "host,# ...", "host," : commented out or empty
         ty=${line%%,*}; rest=${line#*,}
         h=${rest%%,*}; [[ $rest == *,* ]] && rest=${rest#*,} || rest=
         lg=${rest%%,*}; [[ $rest == *,* ]] && pw=${rest#*,} || pw=
-        ty=${ty//[[:space:]]/}; h=${h//[[:space:]]/}; lg=${lg//[[:space:]]/}; lg=${lg:-$me}
-        [[ $lg =~ ^[A-Za-z0-9._@-]+$ ]] || die "-t $f line $ln: bad login (letters, digits . _ @ - only)"
+        ty=${ty//[[:space:]]/}; ty=${ty,,}; h=${h//[[:space:]]/}; lg=${lg//[[:space:]]/}
+        [[ -z $lg || $lg =~ ^[A-Za-z0-9._@-]+$ ]] || die "-t $f line $ln: bad login (letters, digits . _ @ - only)"
         [[ -n $pw ]] && HAVE_PW=1
-        case $ty in
-            host)
-                [[ -n $h ]] || die "-t $f line $ln: no host"
-                n0=${#TARGETS[@]}; EXPANDING="-t $f line $ln"
-                if [[ -n ${_SEEN[$h]+x} ]]; then   # one host already listed (FF_HOSTS, a range): this line's login/pw win
-                    for k in "${!TARGETS[@]}"; do [[ ${TARGETS[$k]} == "$h" ]] && break; done
-                    T_LOGIN[$k]=$lg; unset 'T_PW[k]'; [[ -n $pw ]] && T_PW[$k]=$pw; continue
-                fi
-                expand_entry "$h"
-                for (( k = n0; k < ${#TARGETS[@]}; k++ )); do T_LOGIN[$k]=$lg; [[ -n $pw ]] && T_PW[$k]=$pw; done ;;
-            bmc)
-                is_ip "$h" || [[ $h =~ ^[A-Za-z][A-Za-z0-9.-]*$ ]] || die "-t $f line $ln: a bmc line takes one IP or hostname (no CIDR or range)"
-                BMCS+=("$h"); B_LOGIN+=("$lg"); B_PW+=("$pw") ;;
-            *) die "-t $f line $ln: type must be host or bmc" ;;
-        esac
+        [[ $ty == host ]] && ty=backend
+        [[ $ty =~ ^(backend|client|bmc|\*)$ ]] || die "-t $f line $ln: type must be backend, client, bmc (host = backend) or *"
+        [[ -n $h ]] || die "-t $f line $ln: no host"
+        r=${#R_LN[@]}; R_LN[r]=$ln; R_TY[r]=$ty; R_H[r]=$h; R_LG[r]=$lg; R_PW[r]=$pw
+        if [[ $h == *[\*\?\[]* ]]; then   # a credential row: matched against the targets once all are read
+            [[ $h =~ ^[][A-Za-z0-9.*?!^-]+$ ]] || die "-t $f line $ln: bad host pattern (letters, digits . - and * ? [...] only)"
+            [[ -n $lg || -n $pw ]] || die "-t $f line $ln: a wildcard row adds no targets, so it needs a login or pw"
+            if [[ $h != '*' ]]; then tier=3; elif [[ $ty != '*' ]]; then tier=2; else tier=1; fi
+            R_TIER[r]=$tier; wild+=("$r"); continue
+        fi
+        [[ $ty == '*' ]] && die "-t $f line $ln: type * takes a host of * or a glob (it adds no targets)"
+        if [[ $ty == bmc ]]; then
+            is_ip "$h" || [[ $h =~ ^[A-Za-z][A-Za-z0-9.-]*$ ]] || die "-t $f line $ln: a bmc line takes one IP or hostname, or a glob (no CIDR or range)"
+            R_TIER[r]=5
+            [[ -n ${bidx[$h]+x} ]] || { bidx[$h]=${#BMCS[@]}; BMCS+=("$h"); }
+            [[ -n $lg || -n $pw ]] && _offer B "${bidx[$h]}" "$r"
+            continue
+        fi
+        # an ssh target row: expanded alone, so the targets an earlier row already listed are known to be covered
+        R_TIER[r]=5; [[ $h == */* || ( $h =~ ^[0-9.-]+$ && $h == *-* ) ]] && R_TIER[r]=4
+        local -a keep=("${TARGETS[@]}") cover; local ir=$INPUT_RANGES
+        TARGETS=(); _SEEN=(); EXPANDING="-t $f line $ln"
+        expand_entry "$h"
+        cover=("${TARGETS[@]}"); TARGETS=("${keep[@]}"); _SEEN=()
+        for t in "${TARGETS[@]}"; do _SEEN[$t]=1; done
+        (( INPUT_RANGES |= ir ))
+        for t in "${cover[@]}"; do
+            if [[ -z ${tidx[$t]+x} ]]; then _emit "$t"; tidx[$t]=$(( ${#TARGETS[@]} - 1 )); T_TYPE[${tidx[$t]}]=$ty; T_FROM[${tidx[$t]}]=$ln
+            elif [[ ${T_TYPE[${tidx[$t]}]} != "$ty" ]]; then
+                die "-t $f line $ln: a target here is already listed as ${T_TYPE[${tidx[$t]}]} on line ${T_FROM[${tidx[$t]}]}"
+            fi
+            [[ -n $lg || -n $pw ]] && _offer T "${tidx[$t]}" "$r"
+        done
     done < "$f"
+    # credential rows (globs, <type>,*, *,*): * never reaches a bmc; a row that matches no target is warned
+    for r in "${wild[@]}"; do
+        n=0; g=${R_H[r],,}
+        if [[ ${R_TY[r]} == bmc ]]; then
+            for k in "${!BMCS[@]}"; do t=${BMCS[$k],,}; [[ $t == $g ]] && { n=$(( n + 1 )); _offer B "$k" "$r"; }; done
+        else
+            for k in "${!TARGETS[@]}"; do
+                [[ ${R_TY[r]} == '*' || ${R_TY[r]} == "${T_TYPE[$k]}" ]] || continue
+                t=${TARGETS[$k],,}; [[ $t == $g ]] && { n=$(( n + 1 )); _offer T "$k" "$r"; }
+            done
+        fi
+        (( n )) || log "WARNING: -t $f line ${R_LN[r]} matches no target"
+    done
+    # the chosen row is THE credential: its login (else the default) and its pw (else key ssh / an empty BMC password)
+    for k in "${!TARGETS[@]}"; do
+        r=${T_ROW[$k]}
+        if [[ -n $r ]]; then T_LOGIN[$k]=${R_LG[r]:-$def}; T_LINE[$k]=${R_LN[r]}; [[ -n ${R_PW[r]} ]] && T_PW[$k]=${R_PW[r]}
+        else T_LOGIN[$k]=$def; T_LINE[$k]=default; fi
+    done
+    for k in "${!BMCS[@]}"; do
+        r=${B_ROW[$k]}
+        if [[ -n $r ]]; then B_LOGIN[$k]=${R_LG[r]:-$me}; B_PW[$k]=${R_PW[r]}; B_LINE[$k]=${R_LN[r]}
+        else B_LOGIN[$k]=$me; B_PW[$k]=; B_LINE[$k]=default; fi
+    done
     if (( HAVE_PW )); then
         local p; p=$(ls -ln "$f" | awk '{print $1}')
         [[ ${p:4:6} == ------ ]] || log "WARNING: $f holds passwords and is readable by group or others ($p); chmod 600 it"
@@ -823,7 +887,7 @@ cleanup() {
 
 main() {
     [[ $1 == --help ]] && { usage; exit 0; }
-    : "${FF_SSH_USER:=root}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
+    : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
     [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
     local v; for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
@@ -849,11 +913,12 @@ main() {
     (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
     [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
     [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
-    # targets: FF_HOSTS (FF_SSH_USER, key ssh, sudo -n), or the -t file's host and bmc lines
-    declare -ga T_LOGIN=() T_PW=() BMCS=() B_LOGIN=() B_PW=(); HAVE_PW=0
+    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh, sudo -n), or the -t file's rows (FF_SSH_USER the default login)
+    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
     TARGETS=(); _SEEN=(); INPUT_RANGES=0
-    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; done; fi
-    [[ -n $tfile ]] && load_target_file "$tfile"
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
+    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
     if (( list )); then (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0; fi
     FMTS=(); local -A seen=(); local -a fl
