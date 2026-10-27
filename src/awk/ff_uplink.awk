@@ -5,7 +5,7 @@ function tb(g) { return g >= 1000 ? sprintf("%.2f T", g / 1000) : sprintf("%.1f 
 BEGIN { nr = split(lines, lq, " "); for (i = 1; i <= nr; i++) { split(lq[i], kv, "="); L[kv[1]] = kv[2] + 0; if (i == 1 || kv[2] + 0 < lx) lx = kv[2] + 0 } }
 FNR == 1 { f++ }
 f == 1 { rail[$1] = $3; if ($3 == "client") cl[$1] = 1; else nip++; next }
-f == 2 { if ($4 != "unknown" && $4 != "") leaf[$3] = $4; next }
+f == 2 { if ($4 != "unknown" && $4 != "") { if (!($3 in leaf)) leaf[$3] = $4; else if (index("+" leaf[$3] "+", "+" $4 "+") == 0) leaf[$3] = leaf[$3] "+" $4 }; next }   # an IP's leaf from any row naming one (a bond: its members); two leaves = an MLAG pair "x+y"
 f == 3 { if ($4 ~ /^[0-9]+Mb\/s$/) { s = $4; sub(/Mb\/s/, "", s); sp[$3] = s / 1000 }; next }
 /^### / { it = ""; ph = ""; w = ""
           for (i = 2; i <= NF; i++) { if ($i ~ /^iteration:/) it = substr($i, 11); else if ($i ~ /^phase:/) ph = substr($i, 7); else if ($i ~ /^wave:/) w = substr($i, 6) }
@@ -31,6 +31,8 @@ END {
         C0 = C; C = 1   # judge per leaf below
     } else {
         if (C > 0) printf "  Declared uplinks: %d spines x %d links x %dG = %s per leaf, each direction\n", N, M, S, tb(C)
+        # the NICs left out are said before any exit (a 10-27 field run dropped 285 runs and said nothing)
+        if (nm) printf "  Uplinks: %d of %d rail NICs have no LLDP neighbour; their %d runs are left out of the leaf totals.\n", nm, nip, left
         if (!nl) { if (C > 0) print "  Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour."; exit }
     }
     # busiest iteration per (phase, leaf), in first-seen order
@@ -51,7 +53,6 @@ END {
     }
     if (!no && C == 0) exit
     if (C == 0) print "  Uplink totals per leaf (set FF_SPINES, FF_SPINE_LINKS, FF_SPINE_GBPS to judge against uplink capacity):"
-    if (nm) printf "  Uplinks: %d of %d rail NICs have no LLDP neighbour; their %d runs are left out of the leaf totals.\n", nm, nip, left
     if (!no) { print "  No runs crossed between leaves."; exit }
     okc = lx * ok / 100
     for (q = 1; q <= no; q++) { pl = lst[q]; split(pl, p, SUBSEP); k = bk[pl]; split(k, kk, SUBSEP)

@@ -1,26 +1,105 @@
-# round_pairs r: round r of the circle method over ROT (even length, "-" = bye).
-# ROT[0] stays put and the rest rotate one place per round, so no pair repeats
-# until every pair has met (${#ROT[@]} - 1 rounds). Sets PC/PS (client/server), PI (pair slot) and SITOUT.
-round_pairs() {
-    local r=$1 m=${#ROT[@]} i a b
-    local -a arr=("${ROT[0]}")
-    for (( i = 0; i < m - 1; i++ )); do arr+=("${ROT[1 + (i + r) % (m - 1)]}"); done
-    PC=(); PS=(); PI=(); SITOUT=""
-    for (( i = 0; i < m / 2; i++ )); do
-        a=${arr[i]}; b=${arr[m - 1 - i]}
-        if [[ $a == - ]]; then SITOUT=$b
-        elif [[ $b == - ]]; then SITOUT=$a
-        else PC+=("$a"); PS+=("$b"); PI+=("$i"); fi
+# rail_has k r: host k holds rail r (a NIC with an address on it; it may still be DOWN, which is a per-path skip)
+rail_has() { case ${RSTATE[$1,$2]} in "no NIC "*|"no IPv4 on "*|"no address in "*) return 1 ;; esac; return 0; }
+
+# rail_groups: the eligible hosts (ORDER) grouped by the rails they hold (HR[k], rail indices), in ORDER's
+# order. A rail set held by one host joins the largest group whose rails include it (its pairs plan only the
+# rails it holds: JOINED notes "host: rail B not addressed, tested on A only"); a lone host no group contains
+# has no partner. Per group g: GKEYS[g] its rail letters, GN[g] hosts, GROT[g] its round-robin circle (a bye
+# "-" when odd, none for a lone host), GRAILS[g] rail indices, GROUNDS[g] rounds to meet every pair,
+# GPER[g] pairs per iteration, GUPAIRS[g] rail pairs for phase 2 ("0 1;0 2;1 2"), GNUP[g] their count
+# (1 with no cross phase), GPPP[g] paths per pair per iteration (a pair with a joined host has fewer).
+rail_groups() {
+    local k r key g h best
+    local -A gi=()
+    local -a keys=() n=() rot=() rails=()
+    HR=(); JOINED=""
+    for k in "${ORDER[@]}"; do
+        key=""; HR[$k]=""; for r in "${RAILS[@]}"; do rail_has $k $r && { key+=$(rail_letter $r); HR[$k]+="${HR[$k]:+ }$r"; }; done
+        [[ -n $key ]] || key=none
+        if [[ -z ${gi[$key]} ]]; then gi[$key]=${#keys[@]}; keys+=("$key"); n+=(0); rot+=(""); rails+=("${HR[$k]}"); fi
+        g=${gi[$key]}; n[g]=$(( n[g] + 1 )); rot[g]+="${rot[g]:+ }$k"
+    done
+    for (( g = 0; g < ${#keys[@]}; g++ )); do
+        (( n[g] == 1 )) || continue
+        best=-1
+        for (( h = 0; h < ${#keys[@]}; h++ )); do
+            (( h != g && n[h] > 0 )) || continue
+            local ok=1; for r in ${rails[g]}; do [[ " ${rails[h]} " == *" $r "* ]] || ok=0; done
+            (( ok )) && { (( best < 0 || n[h] > n[best] )) && best=$h; }
+        done
+        (( best >= 0 )) || continue
+        k=${rot[g]}; local lack="" held=""
+        for r in ${rails[best]}; do [[ " ${rails[g]} " == *" $r "* ]] && held+=$(rail_letter $r) || lack+="${lack:+,}$(rail_letter $r)"; done
+        JOINED+="${JOINED:+; }${T_HOST[$k]}: rail $lack not addressed, tested on $held only"
+        rot[best]+=" $k"; n[best]=$(( n[best] + 1 )); n[g]=0
+    done
+    GKEYS=(); GN=(); GROT=(); GRAILS=(); GROUNDS=(); GPER=(); GUPAIRS=(); GNUP=(); GPPP=(); GDPER=()
+    for (( h = 0; h < ${#keys[@]}; h++ )); do
+        (( n[h] > 0 )) || continue
+        g=${#GKEYS[@]}; GKEYS+=("${keys[h]}"); GN+=("${n[h]}"); GROT+=("${rot[h]}"); GRAILS+=("${rails[h]}")
+        local nn=${GN[g]} nr=0 up="" ua ub m
+        (( nn > 1 && nn % 2 )) && GROT[g]+=" -"
+        m=$(( nn > 1 ? nn + nn % 2 : 1 ))
+        GROUNDS[g]=$(( m > 1 ? m - 1 : 0 )); GPER[g]=$(( nn / 2 ))
+        for r in ${GRAILS[g]}; do nr=$(( nr + 1 )); done
+        if [[ $CROSS == on ]] && (( nr > 1 )); then
+            for ua in ${GRAILS[g]}; do for ub in ${GRAILS[g]}; do (( ub > ua )) && up+="${up:+;}$ua $ub"; done; done
+            GUPAIRS[g]=$up; GNUP[g]=$(( (nr * (nr - 1)) / 2 )); GPPP[g]=$(( nr + 2 )); GDPER[g]=$(( nr * nr ))
+        else GUPAIRS[g]=""; GNUP[g]=1; GPPP[g]=$nr; GDPER[g]=$nr; fi
     done
 }
 
-# xpaths p: pair p's two phase 2 runs, one each way across the rails, in X1/X2 (src_k src_r dst_k dst_r).
-# Odd: client A <-> server B; even: client B <-> server A. A rotating host moves one slot per round, so slot
-# parity swaps its NIC each iteration; slot 0 (the fixed host) swaps by iteration.
-# With more than two rails, the rail pair (XA, XB) comes from UPAIRS by pairing cycle (set per iteration).
+# pair_rails a b: the rails both hosts hold, in PRL (indices) and PRN (their count)
+pair_rails() {
+    local r; PRL=""; PRN=0
+    for r in ${HR[$1]}; do [[ " ${HR[$2]} " == *" $r "* ]] && { PRL+="${PRL:+ }$r"; PRN=$(( PRN + 1 )); }; done
+}
+
+# round_pairs t: iteration t (from 0) of every rail group's circle method over GROT[g] (even length, "-" =
+# bye). Slot 0 stays put and the rest rotate one place per round, so no pair repeats until every pair has
+# met (GROUNDS[g] rounds); the next cycle repeats the pairings with client and server swapped, and each
+# further pair of cycles takes the group's next rail pair for phase 2. Sets, per pair p: PC/PS (client/
+# server), PI (pair slot), PR (the round), PG (group), PRAILS (the rails both hosts hold), PXA/PXB (phase 2
+# rail pair when both hold it, else empty), PPATHS (its paths this iteration); SITOUT the hosts (one per odd
+# group) that sit this iteration out; GXA/GXB per group for the log.
+round_pairs() {
+    local t=$1 g m i a b rr cyc
+    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); GXA=(); GXB=(); SITOUT=""; XA=; XB=
+    for (( g = 0; g < ${#GKEYS[@]}; g++ )); do
+        local -a rot=(${GROT[g]}) up=()
+        m=${#rot[@]}; (( m > 1 )) || continue
+        rr=$(( t % (m - 1) )); cyc=$(( t / (m - 1) ))
+        local xa="" xb=""
+        if [[ -n ${GUPAIRS[g]} ]]; then
+            IFS=';' read -r -a up <<<"${GUPAIRS[g]}"
+            read -r xa xb <<<"${up[$(( cyc / 2 % ${#up[@]} ))]}"
+            [[ -n $XA ]] || { XA=$xa; XB=$xb; }
+        fi
+        GXA[g]=$xa; GXB[g]=$xb
+        local -a arr=("${rot[0]}")
+        for (( i = 0; i < m - 1; i++ )); do arr+=("${rot[1 + (i + rr) % (m - 1)]}"); done
+        for (( i = 0; i < m / 2; i++ )); do
+            a=${arr[i]}; b=${arr[m - 1 - i]}
+            (( cyc % 2 )) && { local tmp=$a; a=$b; b=$tmp; }
+            if [[ $a == - ]]; then SITOUT+=" $b"
+            elif [[ $b == - ]]; then SITOUT+=" $a"
+            else
+                pair_rails $a $b
+                local pxa=$xa pxb=$xb
+                [[ -n $xa && " $PRL " == *" $xa "* && " $PRL " == *" $xb "* ]] || { pxa=""; pxb=""; }
+                PC+=("$a"); PS+=("$b"); PI+=("$i"); PR+=("$rr"); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb")
+                local np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np")
+            fi
+        done
+    done
+}
+
+# xpaths p: pair p's two phase 2 runs, one each way across its group's rail pair (PXA, PXB), in X1/X2
+# (src_k src_r dst_k dst_r). Odd: client A <-> server B; even: client B <-> server A. A rotating host moves
+# one slot per round, so slot parity swaps its NIC each iteration; slot 0 (the fixed host) swaps by round.
 xpaths() {
-    local c=${PC[$1]} s=${PS[$1]} i=${PI[$1]} a=${XA:-0} b=${XB:-1}
-    if (( i ? i % 2 : (RND + 1) % 2 )); then X1=($c $a $s $b); X2=($s $b $c $a); else X1=($c $b $s $a); X2=($s $a $c $b); fi
+    local c=${PC[$1]} s=${PS[$1]} i=${PI[$1]} a=${PXA[$1]:-0} b=${PXB[$1]:-1}
+    if (( i ? i % 2 : (PR[$1] + 1) % 2 )); then X1=($c $a $s $b); X2=($s $b $c $a); else X1=($c $b $s $a); X2=($s $a $c $b); fi
 }
 
 # cross_waves npairs: XW = phase 2 waves under FF_CROSS_MAX (1 when unset). A pair's two flows (one each
@@ -35,19 +114,21 @@ cross_waves() {
 # xwaves results [udp]: the current pairs' cross-rail runs in XW waves (pair p in wave p % XW). TCP results
 # get a "wave:w/W" marker per wave, so totals only add up flows that ran at the same time.
 xwaves() {
-    local res=$1 mode=$2 w p all=$PHASE_OUT
-    cross_waves ${#PC[@]}
-    (( XW > 1 && ITER == 1 )) && log "  $(( 2 * ${#PC[@]} )) cross-rail flows in $XW waves of at most $FF_CROSS_MAX (FF_CROSS_MAX), $( (( FF_CROSS_MAX == 1 )) && echo "one flow at a time" || echo "each wave A->B and B->A balanced")"
+    local res=$1 mode=$2 w p q all=$PHASE_OUT
+    local -a xp=()   # the pairs with a phase 2 (a one-rail group's pairs have none)
+    for (( p = 0; p < ${#PC[@]}; p++ )); do [[ -n ${PXA[p]} ]] && xp+=("$p"); done
+    cross_waves ${#xp[@]}
+    (( XW > 1 && ITER == 1 )) && log "  $(( 2 * ${#xp[@]} )) cross-rail flows in $XW waves of at most $FF_CROSS_MAX (FF_CROSS_MAX), $( (( FF_CROSS_MAX == 1 )) && echo "one flow at a time" || echo "each wave A->B and B->A balanced")"
     for (( w = 0; w < XW; w++ )); do
         PHASE_OUT=$all.w$w; : > "$PHASE_OUT"
         [[ $mode == udp ]] || echo "### iteration:${ITER} phase:${PHASE}$( (( XW > 1 )) && echo " wave:$(( w + 1 ))/$XW")" >> "$res"
-        for (( p = 0; p < ${#PC[@]}; p++ )); do
-            xpaths $p
-            if (( ${FF_CROSS_MAX:-0} == 1 && XW > 1 )); then   # cap 1: wave 2p runs X1, 2p+1 runs X2
-                (( p == w / 2 )) || continue
+        for (( q = 0; q < ${#xp[@]}; q++ )); do
+            p=${xp[q]}; xpaths $p
+            if (( ${FF_CROSS_MAX:-0} == 1 && XW > 1 )); then   # cap 1: wave 2q runs X1, 2q+1 runs X2
+                (( q == w / 2 )) || continue
                 if (( w % 2 )); then run_path p2b_$p "${X2[@]}" $mode; else run_path p2a_$p "${X1[@]}" $mode; fi
             else
-                (( p % XW == w )) || continue
+                (( q % XW == w )) || continue
                 run_path p2a_$p "${X1[@]}" $mode; run_path p2b_$p "${X2[@]}" $mode
             fi
         done
@@ -58,11 +139,11 @@ xwaves() {
     PHASE_OUT=$all
 }
 
-# p1_paths p check|run [mode]: pair p's same-rail paths, one per rail: client->server on even rails,
-# server->client on odd ones (two rails: A c->s, B s->c), so each host sends on some rails and receives on others
+# p1_paths p check|run [mode]: pair p's same-rail paths, one per rail its group holds: client->server on even
+# rails, server->client on odd ones (two rails: A c->s, B s->c), so each host sends on some rails and receives on others
 p1_paths() {
     local p=$1 fn=${2}_path mode=$3 r
-    for r in "${RAILS[@]}"; do
+    for r in ${PRAILS[p]}; do
         if (( r % 2 )); then $fn p1${r}_$p ${PS[p]} $r ${PC[p]} $r $mode
         else $fn p1${r}_$p ${PC[p]} $r ${PS[p]} $r $mode; fi
     done

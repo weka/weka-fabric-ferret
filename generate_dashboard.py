@@ -1738,7 +1738,14 @@ def _uplinks(data):
     u['cm'], u['cs'] = crun if ok3(crun) else cenv if ok3(cenv) else (0, 0)
     u['cn'], u['Cc'] = cn, cn * u['cm'] * u['cs']
     ipr = data.get('ip_rail', {})
-    leaf = {l['ip']: l['switch'] for l in data['lldp_info'] if l['switch'] not in ('unknown', '')}
+    leaf = {}   # ip -> leaf, from any LLDP row naming one (a bond: its members); two leaves = an MLAG pair "x+y"
+    for l in data['lldp_info']:
+        if l['switch'] in ('unknown', ''):
+            continue
+        if l['ip'] not in leaf:
+            leaf[l['ip']] = l['switch']
+        elif l['switch'] not in leaf[l['ip']].split('+'):
+            leaf[l['ip']] += '+' + l['switch']
     ips = set(ipr)
     cips = data.get('client_ips', set())
     side = {}   # leaf -> backend | client | shared (a shared leaf is judged as a backend leaf)
@@ -1748,9 +1755,11 @@ def _uplinks(data):
             side[leaf[ip]] = k if side.get(leaf[ip], k) == k else 'shared'
     u['clients'] = bool(cips)
     if not any(ip in leaf for ip in ips):
-        if not C:
-            return None
-        u['notes'].append('Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour.')
+        # the NICs left out are said before anything else (as the collector's log does)
+        left = sum(1 for r in data['iperf_results'] if r['src'] in ipr and r['dst'] in ipr)
+        u['notes'].append(f'{len(ips)} of {len(ips)} rail NICs have no LLDP neighbour; their {left} runs are left out of the leaf totals.')
+        if C:
+            u['notes'].append('Uplink check skipped: it needs LLDP, and no rail NIC reported a switch neighbour.')
         return u
     rr = data.get('rail_rate', {})
     rate = {x: rr.get(x) or data['line_rate'] for x in data.get('rails', ['A', 'B'])}

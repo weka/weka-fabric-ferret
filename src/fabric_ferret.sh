@@ -753,27 +753,58 @@ main() {
     : > "$RESULTS"; : > "$DROP_TOTALS"; : > "$COLLECT_DIR/link_flaps.txt"; : > "$PATH_EXCL"
     local FIRST_HOST=${T_HOST[${ORDER[0]}]}
     local n=${#ORDER[@]} p ck sk
-    ROT=("${ORDER[@]}"); (( n % 2 )) && ROT+=(-)
-    local rounds=$(( ${#ROT[@]} - 1 )) per=$(( n / 2 )) total=$(( n * (n - 1) / 2 ))
     # cross-rail phase: on, off when the operator says the rails are separate fabrics, single with one rail
     CROSS=on; CROSS_UNROUTED=0
     if (( NR == 1 )); then CROSS=single; log "One rail: no cross-rail phase"
     elif [[ $FF_CROSS_RAIL == 0 ]]; then CROSS=off; log "Cross-rail phase off (FF_CROSS_RAIL=0): $( (( NR == 2 )) && echo "A<->B" || echo "rail to rail") is not tested"; fi
-    # rail pairs for phase 2: one per pairing cycle (2 x rounds iterations); with two rails always A,B
-    UPAIRS=(); local ua ub; for (( ua = 0; ua < NR; ua++ )); do for (( ub = ua + 1; ub < NR; ub++ )); do UPAIRS+=("$ua $ub"); done; done
-    local NUP=$(( ${#UPAIRS[@]} > 0 ? ${#UPAIRS[@]} : 1 )); [[ $CROSS == on ]] || NUP=1
-    (( ITER_ALL )) && FF_ITER=$(( 2 * rounds * NUP > ${CL_ALL:-0} ? 2 * rounds * NUP : CL_ALL ))
-    local used=$(( FF_ITER < rounds ? FF_ITER : rounds ))
-    PAIRS_COVERED=$(( used * per )); PAIRS_TOTAL=$total
+    # Rail groups: a host is paired only with hosts that hold the same rails. A rail a host lacks or does not
+    # address is a host property (a 10-27 field run: 24 storage hosts on A,B and 215 GPU hosts on C drew each
+    # other in 24 of 119 pairs, every path in those pairs skipped, phase 2 ran nothing); a DOWN rail keeps its
+    # host in the group and its paths log a skip. Per group g: GROT[g] its round-robin circle ("-" = bye),
+    # GRAILS[g] its rail indices, GUPAIRS[g] its rail pairs for phase 2 ("0 1;0 2;..."), GROUNDS/GPER/GPPP/GNUP.
+    rail_groups
+    local g rounds=0 per=0 total=0 NUP=1 cyc=0 ng=${#GKEYS[@]}
+    for (( g = 0; g < ng; g++ )); do
+        (( GROUNDS[g] > rounds )) && rounds=${GROUNDS[g]}
+        (( GNUP[g] > NUP )) && NUP=${GNUP[g]}
+        (( 2 * GROUNDS[g] * GNUP[g] > cyc )) && cyc=$(( 2 * GROUNDS[g] * GNUP[g] ))
+        per=$(( per + GPER[g] )); total=$(( total + GN[g] * (GN[g] - 1) / 2 ))
+    done
+    (( rounds > 0 )) || rounds=1; (( cyc > 0 )) || cyc=1
+    (( ITER_ALL )) && FF_ITER=$(( cyc > ${CL_ALL:-0} ? cyc : CL_ALL ))
+    PAIRS_COVERED=0; PAIRS_TOTAL=$total; DIRECTED_TOTAL=0; local planned=0 gdesc="" lone="" t
+    local -A DIRECTED=()
+    for (( g = 0; g < ng; g++ )); do
+        local gused=$(( FF_ITER < GROUNDS[g] ? FF_ITER : GROUNDS[g] ))
+        PAIRS_COVERED=$(( PAIRS_COVERED + gused * GPER[g] ))
+        if (( GN[g] == 1 )); then lone+=" ${T_HOST[${GROT[g]}]}"; gdesc+="; ${GKEYS[g]} 1 host, no partner"; continue; fi
+        gdesc+="; ${GKEYS[g]} ${GN[g]} hosts, ${GPER[g]} pair$( (( GPER[g] != 1 )) && echo s)/iteration$( (( GN[g] % 2 )) && echo ", 1 sits out")"
+        # directed NIC paths of the group: per host pair, over the rails both hold (a joined host has fewer)
+        local -a gm=(${GROT[g]}); local i j
+        for (( i = 0; i < ${#gm[@]}; i++ )); do for (( j = i + 1; j < ${#gm[@]}; j++ )); do
+            [[ ${gm[i]} == - || ${gm[j]} == - ]] && continue
+            pair_rails ${gm[i]} ${gm[j]}; local d=$PRN
+            [[ $CROSS == on ]] && (( PRN > 1 )) && d=$(( PRN * PRN ))
+            DIRECTED_TOTAL=$(( DIRECTED_TOTAL + 2 * d ))
+        done; done
+    done
+    for (( t = 0; t < (FF_ITER < cyc ? FF_ITER : cyc); t++ )); do   # the paths the iterations will plan
+        round_pairs $t; for (( p = 0; p < ${#PPATHS[@]}; p++ )); do planned=$(( planned + PPATHS[p] )); done
+    done
     PATHS_PLANNED=0; DROP_READS_MIN=-1
-    log "Pairing: round-robin, $per pairs per iteration; $FF_ITER iterations cover $PAIRS_COVERED of $total host pairs$( (( FF_ITER < rounds )) && echo " (all pairs need FF_ITER=$rounds)")"
+    log "Pairing: round-robin within $ng rail group$( (( ng > 1 )) && echo s): ${gdesc#; }; $FF_ITER iteration$( (( FF_ITER != 1 )) && echo s) cover$( (( FF_ITER == 1 )) && echo s) $PAIRS_COVERED of $total host pairs$( (( FF_ITER < rounds )) && echo " (all pairs need FF_ITER=$rounds)")"
+    if [[ -n $JOINED ]]; then
+        local nj; nj=$(awk -F'; ' '{print NF}' <<<"$JOINED")
+        log "$nj host$( (( nj > 1 )) && echo "s lack" || echo " lacks") a rail and pair$( (( nj == 1 )) && echo s) within the hosts holding the rails $( (( nj > 1 )) && echo they have || echo it has): $(awk -F'; ' '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? "; " : ""), $i; if (NF > 8) printf "; and %d more", NF - 8}' <<<"$JOINED")"
+    fi
+    if [[ -n $lone ]]; then
+        local nl; nl=$(wc -w <<<"$lone" | tr -d ' ')
+        log "$nl host$( (( nl > 1 )) && echo s have || echo " has") no partner sharing $( (( nl > 1 )) && echo their || echo its) rails (not tested): $(awk '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? " " : ""), $i; if (NF > 8) printf " and %d more", NF - 8}' <<<"$lone")"
+    fi
     # a pair's directed NIC paths (8 with two rails): cycle 1 runs half, cycle 2 (same pairings, client and server
     # swapped) the other half; with more rails, each further pair of cycles covers one more rail pair
-    local -A DIRECTED=(); local dper=$(( NR * NR )); [[ $CROSS == on ]] || dper=$NR
-    local cyc=$(( 2 * rounds * NUP )) ppp=$(( NR + ($( [[ $CROSS == on ]] && echo 2 || echo 0 )) ))
-    DIRECTED_TOTAL=$(( n * (n - 1) * dper ))
-    log "Directed NIC paths: $(( (FF_ITER < cyc ? FF_ITER : cyc) * per * ppp )) of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
-    (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped"
+    log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
+    (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped$( (( ng > 1 )) && echo " (largest group; a smaller group swaps sooner)")"
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
@@ -811,22 +842,24 @@ main() {
     fi
     local cross_decided=; [[ $CROSS == on ]] || cross_decided=1
     for (( ITER = 1; ITER <= FF_ITER; ITER++ )); do
-        RND=$(( (ITER - 1) % rounds )); round_pairs $RND
-        if (( (ITER - 1) / rounds % 2 )); then local -a tmp=("${PC[@]}"); PC=("${PS[@]}"); PS=("${tmp[@]}"); fi
-        local up=(${UPAIRS[$(( (ITER - 1) / (2 * rounds) % NUP ))]}); XA=${up[0]:-0}; XB=${up[1]:-1}
+        round_pairs $(( ITER - 1 ))   # every group's pairs for this iteration (swap cycle and rail pair per group)
         lock_all touch
-        local per=$ppp
-        PATHS_PLANNED=$(( PATHS_PLANNED + per * ${#PC[@]} ))
-        log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs$( (( NR > 2 )) && [[ $CROSS == on ]] && echo "; cross-rail $(rail_letter $XA)<->$(rail_letter $XB)")) ============"
-        [[ -n $SITOUT ]] && log "Sits out this iteration (odd host count): ${T_HOST[$SITOUT]}"
+        local xdesc="" sits=""
+        for (( p = 0; p < ${#PC[@]}; p++ )); do PATHS_PLANNED=$(( PATHS_PLANNED + PPATHS[p] )); done
+        if (( NR > 2 )) && [[ $CROSS == on ]]; then
+            for (( g = 0; g < ng; g++ )); do [[ -n ${GXA[g]} ]] && xdesc+="${xdesc:+, }${GKEYS[g]}: $(rail_letter ${GXA[g]})<->$(rail_letter ${GXB[g]})"; done
+        fi
+        log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs${xdesc:+; cross-rail $xdesc}) ============"
+        for sk in $SITOUT; do sits+=" ${T_HOST[$sk]}"; done
+        [[ -n $sits ]] && log "Sits out this iteration (odd host count):$sits"
         for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
         PATHS=$WORK/paths.$ITER; mkdir -p "$PATHS"
         for (( p = 0; p < ${#PC[@]}; p++ )); do
             ck=${PC[p]}; sk=${PS[p]}
             p1_paths $p check
-            [[ $CROSS == on ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; }
-            for r in "${RAILS[@]}"; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
-            [[ $CROSS == on ]] && { DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
+            [[ -n ${PXA[p]} ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; }
+            for r in ${PRAILS[p]}; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
+            [[ -n ${PXA[p]} ]] && { DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
         done
         wait
         if [[ -z $cross_decided && ${#PC[@]} -gt 0 ]]; then
@@ -843,7 +876,7 @@ main() {
         if (( FF_SKIP_IPERF )); then   # every planned path's check is recorded; the counters get one window, at the end
             for (( p = 0; p < ${#PC[@]}; p++ )); do
                 PHASE=1; p1_paths $p run check
-                [[ $CROSS == on ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
+                [[ -n ${PXA[p]} ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
             done
             clients_iter   # client path checks, every iteration
             (( ITER < FF_ITER )) && { echo; continue; }

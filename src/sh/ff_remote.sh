@@ -94,14 +94,22 @@ for nic in "$@"; do
     temp=$(echo "$mod" | awk '/Module temperature/ && t == "" {for (i = 1; i <= NF; i++) if ($i == "degrees") {t = $(i-1); break}}
         /Module voltage *:/ && $NF == "V" && $(NF-1) + 0 == 0 {z = 1} END {if (t != "" && !z) print t}')
     echo "@@NIC_DIAG $h $nic ${ip:-none} ${speed:-unknown} $* $rxp${temp:-n/a}"
-    if have lldpcli; then lldp=$(lldpcli show neighbors ports "$nic" 2>&1); else lldp=""; fi
-    chassis=$(echo "$lldp" | awk -F': *' '/SysName:/{gsub(/ /,"_",$2); print $2; exit}')
-    portid=$(echo "$lldp" | awk '/PortID:/{print $NF; exit}')
-    portdesc=$(echo "$lldp" | awk -F': *' '/PortDescr:/{gsub(/ /,"_",$2); print $2; exit}')
-    sysdesc=$(echo "$lldp" | awk -F': *' '/SysDescr:/{gsub(/ /,"_",$2); print $2; exit}')
-    echo "@@LLDP $h $nic ${ip:-none} ${chassis:-unknown} ${portid:-unknown} ${portdesc:-unknown} ${sysdesc:-unknown}"
     f() { echo "$inf" | awk -F': ' -v k="$1" '$1==k {print $2; exit}'; }
     drv=$(f driver); ver=$(f version); ver=${ver// /_}; fw=$(f firmware-version); bus=$(f bus-info)
+    # LLDP: one row for the NIC and, when it is a bond, one per member (a bond has no neighbour of its own; a 10-27
+    # field run had 215 bond rows "unknown" while the members named their leaves). Member rows carry the bond's IP.
+    # FF_SYSFS (default /sys) is a test hook.
+    members=""; [ "$drv" = bonding ] && [ -r "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" ] && members=$(cat "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" 2>&1)
+    for port in $nic $members; do
+        if have lldpcli; then lldp=$(lldpcli show neighbors ports "$port" 2>&1); else lldp=""; fi
+        chassis=$(echo "$lldp" | awk -F': *' '/SysName:/{gsub(/ /,"_",$2); print $2; exit}')
+        portid=$(echo "$lldp" | awk '/PortID:/{print $NF; exit}')
+        portdesc=$(echo "$lldp" | awk -F': *' '/PortDescr:/{gsub(/ /,"_",$2); print $2; exit}')
+        sysdesc=$(echo "$lldp" | awk -F': *' '/SysDescr:/{gsub(/ /,"_",$2); print $2; exit}')
+        echo "@@LLDP $h $port ${ip:-none} ${chassis:-unknown} ${portid:-unknown} ${portdesc:-unknown} ${sysdesc:-unknown}"
+        if [ "$port" = "$nic" ]; then lldp0=$lldp; else echo "=== lldpcli $port ==="; echo "${lldp:-lldpcli not installed}"; fi
+    done
+    lldp=$lldp0
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"
     # a bond: its slaves' MII state as "@@BOND host nic up total down_slaves" (none = all up) and the kernel's
     # whole report, so a bond at half speed names the member without link. FF_PROCNET (default /proc/net) is a test hook.
