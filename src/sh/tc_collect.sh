@@ -50,8 +50,9 @@ sample() {
         throttle
         # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
         # bash -s reads the script a line at a time, so the first line's read takes the second line
+        # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
         { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
-              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$( [[ -r $WORK/esc.$i ]] && cat "$WORK/esc.$i")" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
           echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
     done
     for j in "${!BMCS[@]}"; do
@@ -71,6 +72,8 @@ sample() {
         o=$WORK/o.$n.$i; rc=$(cat "$WORK/rc.$n.$i" 2>&1)
         host=$(awk '$1 ~ /^@@(HWMON|IPMI)$/ {print $2; exit}' "$o")
         if [[ -n $host ]]; then : > "$WORK/answered.$i"; else host=${TARGETS[$i]}; fi
+        [[ -e $WORK/esc.$i ]] || awk '$1 == "@@ESC" {print $3; exit}' "$o" > "$WORK/esc.$i.new"
+        [[ -s $WORK/esc.$i.new ]] && mv -f "$WORK/esc.$i.new" "$WORK/esc.$i"; rm -f "$WORK/esc.$i.new"
         # a target that took no connection: set aside, silent unless -v (see unreachable_targets)
         if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
             echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue

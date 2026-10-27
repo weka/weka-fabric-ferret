@@ -202,7 +202,7 @@ python3 generate_dashboard.py <run>.tgz [output.html] [--compare <older run>.tgz
 A standalone script that reads temperatures alone, without fabric_ferret's network tests. It uses the same hwmon and BMC reader, the same flags and the same `FF_HOSTS` syntax. It is read only and installs, loads and changes nothing. Each host reads three sources:
 - `/sys/class/hwmon`, which needs no package.
 - `nvidia-smi -q -d TEMPERATURE`, where installed, for NVIDIA GPUs, which hwmon doesn't show.
-- `ipmitool sensor`, where installed, for the BMC. Root runs ipmitool directly; any other `FF_SSH_USER` runs it with `sudo -n`.
+- `ipmitool sensor`, where installed, for the BMC. Root runs ipmitool directly; any other login runs it through the first passwordless escalator it finds (dzdo, pbrun, sesu, pmrun, doas, ksu, sudo; see `-t` below for exactly what runs).
 
 Every sensor is typed by what it measures, whichever source read it: inlet, cpu, gpu, mem, nvme, nic or other. A BMC sensor is typed by its name; for example, `HGX_GPU_Temp` is gpu and `NVMe_SSDA_Temp` is nvme. The per-host summary shows the hottest reading of each type.
 
@@ -225,7 +225,8 @@ ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
 - Passwords never appear on a command line, in an environment variable or in any output. ssh reads a password through an `SSH_ASKPASS` helper, and ipmitool through `-f`, each from a one-use fifo in a private temporary directory; sshpass is not used. Unattended `SSH_ASKPASS` needs OpenSSH 8.4 or later on the machine running the script, or `setsid` there.
 - The script warns if a file that holds passwords can be read by group or others; `chmod 600` it.
 - Targets come from `FF_HOSTS` or from `-t`, never both.
-- `FF_HOSTS` hosts are reached as `FF_SSH_USER` with key (passwordless) ssh and `sudo -n`.
+- `FF_HOSTS` hosts are reached as `FF_SSH_USER` with key (passwordless) ssh.
+- What runs on a host for the BMC reading: as root, `ipmitool sensor`. For any other login without a row password, the script first finds a passwordless escalator by running `<escalator> true` for `dzdo -n`, `pbrun`, `sesu`, `pmrun`, `doas -n`, `ksu -e` and `sudo -n`, in that order (each only if installed), each under a 5 s timeout, once per host per run; the first that works runs `ipmitool sensor`. If none works, the host's BMC reading is reported as no data with that reason; its hwmon readings still count. A login with a row password skips the probe and uses `sudo -S`.
 - On a `-t` host line with a non-root login and a password, ipmitool runs with `sudo -S` and that password. The password is sent over the ssh session's input stream and kept in an unexported shell variable on the host, never on a command line or in an environment.
 - `FF_IPMI=0` turns off in-band ipmitool only; `bmc` lines are always read.
 

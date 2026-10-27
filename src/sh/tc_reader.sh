@@ -63,13 +63,28 @@ fi
 [ "$1" = ipmi ] || exit 0
 if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
 # not root: sudo -S with the login's password when the -t file gave one (TC_PW, read from stdin ahead of this
-# script: a shell variable, never exported, never argv), else sudo -n
+# script: a shell variable, never exported, never argv); else the first passwordless escalator that runs `true`
+# within 5 s, tried in this order: dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n. $3, when given, is the
+# escalator an earlier sample found ("_" for spaces, or none): no probe then. Reported as "@@ESC host escalator".
+# Every probe and ipmitool reads an empty stdin, never the rest of this script.
 s=; [ "$(id -u)" = 0 ] || { s=n; [ -n "${TC_PW+x}" ] && s=S; }
-ito=${2:-60}; ipt() { if [ -n "$(command -v timeout)" ]; then timeout "$ito" "$@"; else "$@"; fi; }
+ito=${2:-60}; esc=$(printf '%s' "${3:-}" | tr _ ' ')
+tmo() { t=$1; shift; if [ -n "$(command -v timeout)" ]; then timeout "$t" "$@"; else "$@"; fi; }
+if [ "$s" = n ]; then
+    if [ -z "$esc" ]; then
+        esc=none
+        for e in "dzdo -n" pbrun sesu pmrun "doas -n" "ksu -e" "sudo -n"; do
+            [ -n "$(command -v "${e%% *}")" ] || continue
+            if pr=$(tmo 5 $e true 2>&1 <<<""); then esc=$e; break; fi
+        done
+    fi
+    echo "@@ESC $h $(printf '%s' "$esc" | tr ' ' _)"
+fi
 case $s in
-    S) out=$(printf '%s\n' "$TC_PW" | ipt sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
-    n) out=$(ipt sudo -n ipmitool sensor 2>&1); rc=$? ;;
-    *) out=$(ipt ipmitool sensor 2>&1); rc=$? ;;
+    S) out=$(printf '%s\n' "$TC_PW" | tmo "$ito" sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
+    n) if [ "$esc" = none ]; then echo "@@IPMI $h none no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo"; exit 0; fi
+       out=$(tmo "$ito" $esc ipmitool sensor 2>&1 <<<""); rc=$? ;;
+    *) out=$(tmo "$ito" ipmitool sensor 2>&1 <<<""); rc=$? ;;
 esac
 # ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
 r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}

@@ -39,7 +39,8 @@ Options
                    or setsid, here) and ipmitool (-f) only through a one-use fifo in a private temp dir: never an
                    environment variable or a command line, never written out. chmod 600 the file (warned otherwise).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
-                   stdin stream, not argv); without a pw, sudo -n. -t or FF_HOSTS, not both.
+                   stdin stream, not argv); without a pw, the first passwordless escalator (FF_SSH_USER below).
+                   -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
                    page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
@@ -54,10 +55,12 @@ Options
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
-  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
+  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
                    10.1.0.10-10.1.1.20 | 10.1.0.10-40 | 10.1.0-1.10-40 | @hosts.txt (# comments)
-  FF_SSH_USER      ssh user, and -t's default login (the current user); a non-root user reads hwmon as itself
-                   and runs ipmitool with sudo -n
+  FF_SSH_USER      ssh user, and -t's default login (the current user). A non-root login reads hwmon as itself
+                   and runs ipmitool through the first passwordless escalator: on each host, once per run,
+                   `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n, in
+                   that order; none = no BMC data from that host (its reason says so)
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -147,7 +150,7 @@ main() {
     (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
     [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
     [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
-    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh, sudo -n), or the -t file's rows (FF_SSH_USER the default login)
+    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh), or the -t file's rows (FF_SSH_USER the default login)
     declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
     TARGETS=(); _SEEN=(); INPUT_RANGES=0
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"

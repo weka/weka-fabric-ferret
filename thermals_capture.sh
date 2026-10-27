@@ -40,7 +40,8 @@ Options
                    or setsid, here) and ipmitool (-f) only through a one-use fifo in a private temp dir: never an
                    environment variable or a command line, never written out. chmod 600 the file (warned otherwise).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
-                   stdin stream, not argv); without a pw, sudo -n. -t or FF_HOSTS, not both.
+                   stdin stream, not argv); without a pw, the first passwordless escalator (FF_SSH_USER below).
+                   -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
                    page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
@@ -55,10 +56,12 @@ Options
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
-  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER; sudo -n where not root), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
+  FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
                    10.1.0.10-10.1.1.20 | 10.1.0.10-40 | 10.1.0-1.10-40 | @hosts.txt (# comments)
-  FF_SSH_USER      ssh user, and -t's default login (the current user); a non-root user reads hwmon as itself
-                   and runs ipmitool with sudo -n
+  FF_SSH_USER      ssh user, and -t's default login (the current user). A non-root login reads hwmon as itself
+                   and runs ipmitool through the first passwordless escalator: on each host, once per run,
+                   `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n, in
+                   that order; none = no BMC data from that host (its reason says so)
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -257,13 +260,28 @@ fi
 [ "$1" = ipmi ] || exit 0
 if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
 # not root: sudo -S with the login's password when the -t file gave one (TC_PW, read from stdin ahead of this
-# script: a shell variable, never exported, never argv), else sudo -n
+# script: a shell variable, never exported, never argv); else the first passwordless escalator that runs `true`
+# within 5 s, tried in this order: dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n. $3, when given, is the
+# escalator an earlier sample found ("_" for spaces, or none): no probe then. Reported as "@@ESC host escalator".
+# Every probe and ipmitool reads an empty stdin, never the rest of this script.
 s=; [ "$(id -u)" = 0 ] || { s=n; [ -n "${TC_PW+x}" ] && s=S; }
-ito=${2:-60}; ipt() { if [ -n "$(command -v timeout)" ]; then timeout "$ito" "$@"; else "$@"; fi; }
+ito=${2:-60}; esc=$(printf '%s' "${3:-}" | tr _ ' ')
+tmo() { t=$1; shift; if [ -n "$(command -v timeout)" ]; then timeout "$t" "$@"; else "$@"; fi; }
+if [ "$s" = n ]; then
+    if [ -z "$esc" ]; then
+        esc=none
+        for e in "dzdo -n" pbrun sesu pmrun "doas -n" "ksu -e" "sudo -n"; do
+            [ -n "$(command -v "${e%% *}")" ] || continue
+            if pr=$(tmo 5 $e true 2>&1 <<<""); then esc=$e; break; fi
+        done
+    fi
+    echo "@@ESC $h $(printf '%s' "$esc" | tr ' ' _)"
+fi
 case $s in
-    S) out=$(printf '%s\n' "$TC_PW" | ipt sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
-    n) out=$(ipt sudo -n ipmitool sensor 2>&1); rc=$? ;;
-    *) out=$(ipt ipmitool sensor 2>&1); rc=$? ;;
+    S) out=$(printf '%s\n' "$TC_PW" | tmo "$ito" sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
+    n) if [ "$esc" = none ]; then echo "@@IPMI $h none no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo"; exit 0; fi
+       out=$(tmo "$ito" $esc ipmitool sensor 2>&1 <<<""); rc=$? ;;
+    *) out=$(tmo "$ito" ipmitool sensor 2>&1 <<<""); rc=$? ;;
 esac
 # ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
 r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
@@ -333,8 +351,9 @@ sample() {
         throttle
         # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
         # bash -s reads the script a line at a time, so the first line's read takes the second line
+        # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
         { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
-              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$( [[ -r $WORK/esc.$i ]] && cat "$WORK/esc.$i")" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
           echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
     done
     for j in "${!BMCS[@]}"; do
@@ -354,6 +373,8 @@ sample() {
         o=$WORK/o.$n.$i; rc=$(cat "$WORK/rc.$n.$i" 2>&1)
         host=$(awk '$1 ~ /^@@(HWMON|IPMI)$/ {print $2; exit}' "$o")
         if [[ -n $host ]]; then : > "$WORK/answered.$i"; else host=${TARGETS[$i]}; fi
+        [[ -e $WORK/esc.$i ]] || awk '$1 == "@@ESC" {print $3; exit}' "$o" > "$WORK/esc.$i.new"
+        [[ -s $WORK/esc.$i.new ]] && mv -f "$WORK/esc.$i.new" "$WORK/esc.$i"; rm -f "$WORK/esc.$i.new"
         # a target that took no connection: set aside, silent unless -v (see unreachable_targets)
         if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
             echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue
@@ -931,7 +952,7 @@ main() {
     (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
     [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
     [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
-    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh, sudo -n), or the -t file's rows (FF_SSH_USER the default login)
+    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh), or the -t file's rows (FF_SSH_USER the default login)
     declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
     TARGETS=(); _SEEN=(); INPUT_RANGES=0
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
