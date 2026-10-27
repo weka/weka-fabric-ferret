@@ -30,7 +30,9 @@ load_target_file() {
         ty=${line%%,*}; rest=${line#*,}
         h=${rest%%,*}; [[ $rest == *,* ]] && rest=${rest#*,} || rest=
         lg=${rest%%,*}; [[ $rest == *,* ]] && pw=${rest#*,} || pw=
-        ty=${ty//[[:space:]]/}; ty=${ty,,}; h=${h//[[:space:]]/}; lg=${lg//[[:space:]]/}
+        # trim the ends only: a space inside a type, host or login is bad input, refused below with its line number
+        for k in ty h lg; do local -n v=$k; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}; unset -n v; done
+        ty=${ty,,}
         [[ -z $lg || $lg =~ ^[A-Za-z0-9._@-]+$ ]] || die "-t $f line $ln: bad login (letters, digits . _ @ - only)"
         [[ -n $pw ]] && HAVE_PW=1
         [[ $ty == host ]] && ty=backend
