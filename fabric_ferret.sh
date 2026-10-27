@@ -2600,22 +2600,26 @@ main() {
     lldp_rail_check "$LLDP_DATA"
 
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
-    # speed for every rail, so a whole rail that came up slow is not judged against itself
-    local -a LINE=() MODE=() fl=(); local LINE_GBPS k
-    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do echo "${RIP[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
+    # speed for every rail, so a whole rail that came up slow is not judged against itself. Only a usable rail's
+    # NIC votes (iprail: "host nic letter", rails in state ok); a NIC a host has but does not address, or a rail
+    # it lacks, has no say and no rail letter (Frank's GPU fleet: 112 bond members with no IPv4 voted as rail B)
+    local -a LINE=() MODE=() VOTE=() TOT=() fl=(); local LINE_GBPS k v
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $k $r && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
     if [[ -n $FF_LINE_GBPS ]]; then
         IFS=, read -r -a fl <<<"$FF_LINE_GBPS"
         for r in "${RAILS[@]}"; do LINE[r]=${fl[r]:-${fl[0]}}; done
     else
-        read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" 'NR == FNR {rail[$1] = $2; next}
-            ($3 in rail) && $4 ~ /^[0-9]+Mb\/s$/ {s = $4; sub(/Mb\/s/, "", s); n[rail[$3] " " s / 1000]++}
+        # per rail "mode/voters/total": the most common speed, how many NICs run at it, how many voted
+        read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" 'NR == FNR {rail[$1 " " $2] = $3; next}
+            (($1 " " $2) in rail) && $4 ~ /^[0-9]+Mb\/s$/ {s = $4; sub(/Mb\/s/, "", s); r = rail[$1 " " $2]; n[r " " s / 1000]++; t[r]++}
             END {for (k in n) {split(k, p, " "); r = p[1]; v = p[2] + 0
                      if (n[k] > c[r] || (n[k] == c[r] && v > m[r])) {c[r] = n[k]; m[r] = v}}
-                 for (i = 1; i <= length(L); i++) printf "%s ", (substr(L, i, 1) in m) ? m[substr(L, i, 1)] : 0}' "$WORK/iprail" "$NIC_DIAG")"
+                 for (i = 1; i <= length(L); i++) {l = substr(L, i, 1); printf "%s ", (l in m) ? m[l] "/" c[l] "/" t[l] : "0/0/0"}}' "$WORK/iprail" "$NIC_DIAG")"
+        for r in "${RAILS[@]}"; do v=${MODE[r]}; MODE[r]=${v%%/*}; v=${v#*/}; VOTE[r]=${v%/*}; TOT[r]=${v#*/}; done
         local mx=0 differ= ms=""; for r in "${RAILS[@]}"; do (( MODE[r] > mx )) && mx=${MODE[r]}; done
-        for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G"; done
+        for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G on ${VOTE[r]} of ${TOT[r]} NICs"; done
         (( mx )) || for r in "${RAILS[@]}"; do LINE[r]=; done
-        [[ -n $differ ]] && log "WARNING: rails run at different speeds (most NICs: $ms): $( (( NR == 2 )) && echo both || echo all) judged at ${mx}G. If that is by design, set FF_LINE_GBPS=$(IFS=,; echo "${MODE[*]}")"
+        [[ -n $differ ]] && log "WARNING: rails run at different speeds ($ms): $( (( NR == 2 )) && echo both || echo all) judged at ${mx}G. If that is by design, set FF_LINE_GBPS=$(IFS=,; echo "${MODE[*]}")"
     fi
     LINE_GBPS=0; RAIL_LINES=""; for r in "${RAILS[@]}"; do (( ${LINE[r]:-0} > LINE_GBPS )) && LINE_GBPS=${LINE[r]}; RAIL_LINES+="${RAIL_LINES:+ }$(rail_letter $r)=${LINE[r]:-0}"; done
     (( LINE_GBPS )) || LINE_GBPS=
@@ -2625,8 +2629,8 @@ main() {
         if [[ -n $same ]]; then log "Link speed for cut-offs: $(cutoffs "${LINE[0]}")"
         else log "Link speed for cut-offs: $(for r in "${RAILS[@]}"; do printf '%srail %s %s' "$( (( r )) && echo ', ')" "$(rail_letter $r)" "$(cutoffs "${LINE[r]:-0}")"; done)"; fi
         awk -v lines="$RAIL_LINES" 'BEGIN {n = split(lines, q, " "); for (i = 1; i <= n; i++) {split(q[i], kv, "="); want[kv[1]] = kv[2] * 1000 "Mb/s"}}
-            NR == FNR {rail[$1] = $2; next}
-            $4 ~ /^[0-9]+Mb\/s$/ && ($3 in rail) && $4 != want[rail[$3]] {printf "#   %s %s %s (rail %s)\n", $1, $2, $4, rail[$3]}' \
+            NR == FNR {rail[$1 " " $2] = $3; next}
+            $4 ~ /^[0-9]+Mb\/s$/ && (($1 " " $2) in rail) && $4 != want[rail[$1 " " $2]] {printf "#   %s %s %s (rail %s)\n", $1, $2, $4, rail[$1 " " $2]}' \
             "$WORK/iprail" "$NIC_DIAG" > "$WORK/offspeed"
         if [[ -s $WORK/offspeed ]]; then
             if [[ -n $same ]]; then log "NICs not at ${LINE[0]}G:"; else log "NICs not at their rail's speed:"; fi

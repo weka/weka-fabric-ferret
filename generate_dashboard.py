@@ -2275,7 +2275,8 @@ def parse_tar_archive(filepath):
     ip_rail = {}
     for q in rail_rows:
         for r in rails:
-            ip_rail[q[rcol[f'Rail_{r}_IP']]] = r
+            if q[rcol[f'Rail_{r}_IP']] != 'none':   # an IP-less NIC is on no rail (it would land on the last rail)
+                ip_rail[q[rcol[f'Rail_{r}_IP']]] = r
     rail_rate = {}
     for r in rails:
         v = data['metadata'].get(f'line_rate_{r.lower()}_gbps', '')

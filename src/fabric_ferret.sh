@@ -632,18 +632,22 @@ main() {
     lldp_rail_check "$LLDP_DATA"
 
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
-    # speed for every rail, so a whole rail that came up slow is not judged against itself
-    local -a LINE=() MODE=() fl=(); local LINE_GBPS k
-    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do echo "${RIP[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
+    # speed for every rail, so a whole rail that came up slow is not judged against itself. Only a usable rail's
+    # NIC votes (iprail: "host nic letter", rails in state ok); a NIC a host has but does not address, or a rail
+    # it lacks, has no say and no rail letter (Frank's GPU fleet: 112 bond members with no IPv4 voted as rail B)
+    local -a LINE=() MODE=() VOTE=() TOT=() fl=(); local LINE_GBPS k v
+    for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $k $r && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
     if [[ -n $FF_LINE_GBPS ]]; then
         IFS=, read -r -a fl <<<"$FF_LINE_GBPS"
         for r in "${RAILS[@]}"; do LINE[r]=${fl[r]:-${fl[0]}}; done
     else
+        # per rail "mode/voters/total": the most common speed, how many NICs run at it, how many voted
         read -r -a MODE <<<"$(awk -v L="${LETTERS:0:NR}" '#@awk ff_main.rail_speed' "$WORK/iprail" "$NIC_DIAG")"
+        for r in "${RAILS[@]}"; do v=${MODE[r]}; MODE[r]=${v%%/*}; v=${v#*/}; VOTE[r]=${v%/*}; TOT[r]=${v#*/}; done
         local mx=0 differ= ms=""; for r in "${RAILS[@]}"; do (( MODE[r] > mx )) && mx=${MODE[r]}; done
-        for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G"; done
+        for r in "${RAILS[@]}"; do LINE[r]=$mx; (( MODE[r] && MODE[r] != mx )) && differ=1; ms+="${ms:+, }rail $(rail_letter $r) ${MODE[r]}G on ${VOTE[r]} of ${TOT[r]} NICs"; done
         (( mx )) || for r in "${RAILS[@]}"; do LINE[r]=; done
-        [[ -n $differ ]] && log "WARNING: rails run at different speeds (most NICs: $ms): $( (( NR == 2 )) && echo both || echo all) judged at ${mx}G. If that is by design, set FF_LINE_GBPS=$(IFS=,; echo "${MODE[*]}")"
+        [[ -n $differ ]] && log "WARNING: rails run at different speeds ($ms): $( (( NR == 2 )) && echo both || echo all) judged at ${mx}G. If that is by design, set FF_LINE_GBPS=$(IFS=,; echo "${MODE[*]}")"
     fi
     LINE_GBPS=0; RAIL_LINES=""; for r in "${RAILS[@]}"; do (( ${LINE[r]:-0} > LINE_GBPS )) && LINE_GBPS=${LINE[r]}; RAIL_LINES+="${RAIL_LINES:+ }$(rail_letter $r)=${LINE[r]:-0}"; done
     (( LINE_GBPS )) || LINE_GBPS=
