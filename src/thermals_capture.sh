@@ -128,11 +128,11 @@ cleanup() {
 
 main() {
     [[ $1 == --help ]] && { usage; exit 0; }
+    # the FF_ names the environment set, before any default: a -t file's settings lines never override them
+    HF_ENV=" $(compgen -e | awk '/^FF_/ {printf "%s ", $0}')"; HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh
     : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
-    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
-    local v; for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
-    for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do
+    local v; for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
         [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
     done
     local list=0; [[ $1 == --list ]] && { list=1; shift; }
@@ -161,6 +161,12 @@ main() {
     if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
     [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
+    # the other settings are checked here, after a -t file's settings lines have had their say
+    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
+    for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
+    for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL; do
+        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
+    done
     if (( list )); then (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0; fi
     FMTS=(); local -A seen=(); local -a fl
     IFS=, read -ra fl <<<"$fmt"

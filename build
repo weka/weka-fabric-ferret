@@ -82,3 +82,10 @@ bash -n "$tmp" || {
 done
 # both assembled and parsed: only now is either target replaced
 for i in "${!names[@]}"; do chmod 755 "${tmps[$i]}"; mv -f "${tmps[$i]}" "$dir/${names[$i]}"; done
+# The repo's example host file is the built fabric_ferret.sh's own template (its usage text), so the two never
+# drift: a default build writes it; a build to another path writes it there too.
+ex=$(mktemp "$dir/hostlist.example.csv.XXXXXX"); tmps+=("$ex")
+said=$(bash -c 'source "$1" && write_targets_template "$2"' _ "$dir/fabric_ferret.sh" "$ex" 2>&1) \
+    || { echo "build: cannot write hostlist.example.csv (the bash on PATH must be 4.3+, as the tool needs): $said" >&2; exit 1; }
+chmod 644 "$ex"   # mktemp's 0600 would survive the mv
+mv -f "$ex" "$dir/hostlist.example.csv"

@@ -26,17 +26,183 @@ bmc,10.20.100.11
 backend,*,svc-fabric
 *,gpu-node-*,admin
 #
-# Settings: the environment today (a later build reads them from this file). Export them before the run; an
-# uncommented settings line here is refused as a bad host.
-# FF_NICS=<rail-a-nic>,<rail-b-nic>      data NIC per rail, rail A first (wins over FF_RAILS)
-# FF_CLIENT_NICS=bond0                   the clients' data NIC names, comma separated (a client may have one or several)
-# FF_LINE_GBPS=400                       link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...)
-# FF_CLIENT_GBPS=800                     client line rate (default: each client NIC's ethtool speed; a bond counts its total)
-# FF_SPINES=4                            leaf-spine uplinks, all three or none (no defaults): spines, links from each
-# FF_SPINE_LINKS=5                       backend leaf to each spine, Gbps per link; with these set the summary judges
-# FF_SPINE_GBPS=400                      each leaf's cross-leaf runs against spines x links x Gbps per direction
-# FF_CLIENT_SPINE_LINKS=4                the same for client leaves (both or neither; they need FF_SPINES)
-# FF_CLIENT_SPINE_GBPS=400
-# FF_ITER=3                              passes of the full test set (every host and client NIC, every phase); each pass
-#                                        gets new partners, round robin; all = every direction on every NIC pair once
-# FF_DURATION=120                        iperf3 seconds per run ($1 also sets it)
+# Settings: a line FF_<setting>=value (the whole line; the value verbatim, commas and all) sets that setting for the
+# run, for both tools. A setting exported in the environment wins over the file; the other tool's names are
+# skipped and named in one log line; an unknown name, or one that looks like a credential, stops the run with its
+# line number. Below, every fabric_ferret.sh setting at its default under its help (from --help; empty = none):
+#   each rail's data subnets: ';' between rails (A first), ',' between a rail's subnets.
+#   '10.20.1.0/24;10.20.2.0/24'                two rails, one subnet each
+#   '10.20.1.0/24,10.20.3.0/24;10.20.2.0/24'   rail A has two subnets
+#   10.20.1.0/24                               one rail (no cross-rail phase)
+#   Any number of rails, labelled A, B, C... Quote it: ';' ends a shell command.
+# FF_RAILS=
+#
+#   data NIC per rail, rail A first:   enp5s0np0,enp196s0np0   (wins over FF_RAILS)
+# FF_NICS=
+#
+#   the clients' data subnets, comma separated (every NIC with an address in them is a data NIC)
+# FF_CLIENT_NETS=
+#
+#   the clients' data NIC names, comma separated (a client may have one or several)
+#   Neither set: the tool lists the subnets on the clients and stops.
+# FF_CLIENT_NICS=
+#
+#   N (1): waves, at most N client NICs on each backend NIC at once; full: every client NIC
+#   at once, clients->backends then backends->clients; N:full: the waves, then all at once
+# FF_CLIENT_RATIO=1
+#
+#   client line rate (default: each client NIC's ethtool speed; a bond counts its total)
+# FF_CLIENT_GBPS=
+#
+#   clients that should be tested; fewer makes the coverage PARTIAL
+# FF_EXPECT_CLIENTS=
+#
+#   iperf3 seconds per run (120; $1 also sets it)
+# FF_DURATION=120
+#
+#   passes of the full test set (every host and client NIC, every phase), to flush out
+#   noise and outliers; each pass gets new partners, round robin: no pair repeats, every
+#   host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
+#   and server, so every direction on every NIC pair runs after 2(n-1).
+#   all = 2(n-1) (3)
+# FF_ITER=3
+#
+#   iperf3 parallel streams, >=2 (16)
+# FF_STREAMS=16
+#
+#   IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
+#   + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
+# FF_TOS=
+#
+#   no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
+#   runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
+#   and drop counters, system info, host-side receive), the counters over one FF_DURATION
+#   window of the cluster's own traffic. The busy check reports but doesn't stop the run.
+# FF_SKIP_IPERF=0
+#
+#   after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
+#   (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into sender
+#   TX (never left the sender's NIC: kernel and port tx packet counts, udp_tx.txt),
+#   receiver socket, NIC, kernel backlog and unaccounted. Uncapped UDP has no
+#   backoff: where what the senders sent into a NIC exceeds its line, 1 - line/offered
+#   is expected loss (udp_expected.txt); only unaccounted loss beyond it is flagged.
+#   With FF_TOS the whole TOS byte, ECN bits included, is sent.
+# FF_UDP=1
+#
+#   seconds per UDP run (FF_DURATION)
+# FF_UDP_DURATION=
+#
+#   run even if another fabric_ferret run holds a host (two runs on the same hosts
+#   kill each other's iperf3 servers and both get garbage)
+# FF_IGNORE_LOCK=0
+#
+#   before load, ping every tested host's rail IPs from every other one's (same rail and
+#   cross-rail), and every backend rail IP from every client data NIC (clients never
+#   ping each other); tested hosts only, so other clusters on shared subnets are never
+#   probed. Failures go to mesh_failures.txt and the Preflight card. 0 = off.
+# FF_MESH=1
+#
+#   the rails are separate fabrics by design: skip the cross-rail phase and leave it
+#   out of the coverage count. Default: test it; unrouted cross-rail paths count
+#   as skipped (PARTIAL), since missing inter-rail routes can be the fault. When every
+#   cross-rail check fails on routing and no same-rail one does, the log says so.
+# FF_CROSS_RAIL=1
+#
+#   at most N cross-rail flows at once: phase 2 (and U2) run in balanced waves,
+#   each flow for the full duration; keeps a shared inter-rail path from capping
+#   every flow (unset: all at once)
+# FF_CROSS_MAX=
+#
+#   seconds per host for the system info capture before load (300); a host that runs
+#   out keeps what it sent and is flagged sysinfo_partial
+# FF_SYSINFO_TIMEOUT=300
+#
+#   iperf3 port (5201)
+# FF_PORT=5201
+#
+#   ssh user, and -t's default login (the current user). A non-root login with no -t password runs
+#   the remote steps through the first passwordless escalator: on each host, once per run, during
+#   the sweep, `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e,
+#   sudo -n, in that order
+# FF_SSH_USER=
+#
+#   ssh sessions at once for sweep and collection (64)
+# FF_SSH_PARALLEL=64
+#
+#   retry targets that refused ssh under load (reset, kex) this many at a time (8)
+# FF_SSH_RETRY_PARALLEL=8
+#
+#   refuse to expand FF_HOSTS beyond this (4096)
+# FF_MAX_TARGETS=4096
+#
+#   name in the report and tarball (first tested hostname)
+# FF_LABEL=
+#
+#   where the .tgz bundle goes (.)
+# FF_OUT_DIR=.
+#
+#   link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
+#   the rails differ by design (e.g. 100,50). Default: the fastest rail's most common
+#   NIC speed for all, so a rail that came up slow everywhere shows as slow
+# FF_LINE_GBPS=
+#
+#   OK at or above this % of link speed (75)
+# FF_OK_PCT=75
+#
+#   SLOW at or above this %, CRITICAL below (50)
+# FF_SLOW_PCT=50
+#
+#   a data NIC whose TCP retransmits exceed this % of the segments it sent gets (retr) on its
+#   Status; throughput still decides OK/SLOW/CRITICAL (0.1)
+# FF_RETR_PCT=0.1
+#
+#   read every hwmon temperature (/sys/class/hwmon: CPU, NVMe, NIC…) on every host and client
+#   before the run and after every phase, read only; temps.txt, temps_summary.txt. 0 = off
+# FF_TEMPS=1
+#
+#   with FF_TEMPS, also the BMC's temperatures (inlet, exhaust…) via ipmitool sensor, once per
+#   iteration and at the end, where ipmitool is installed (needs root or sudo). 0 = off
+# FF_IPMI=1
+#
+#   seconds per ipmitool read (60)
+# FF_IPMI_TIMEOUT=60
+#
+#   a sensor within this many °C of its high threshold is flagged near (5)
+# FF_TEMP_MARGIN=5
+#
+#   a sensor that climbs more than this many °C over the run is flagged rise (10)
+# FF_TEMP_RISE=10
+#
+#   number of spines every leaf uplinks to (all three uplink settings or none; no defaults)
+# FF_SPINES=
+#
+#   uplinks from each backend leaf to EACH spine
+# FF_SPINE_LINKS=
+#
+#   Gbps per uplink; the summary judges each leaf's cross-leaf runs (leaf = LLDP neighbour)
+#   against spines x links x Gbps per direction: oversubscribed by design, or a lost
+#   link/spine. Without these it only sums each leaf's runs. Status is unchanged.
+# FF_SPINE_GBPS=
+#
+#   uplinks from each client leaf to each spine (with FF_CLIENT_SPINE_GBPS: both or neither)
+# FF_CLIENT_SPINE_LINKS=
+#
+#   Gbps per client leaf uplink; they need FF_SPINES (one spine layer serves both). A leaf
+#   that serves both clients and backends is flagged and judged as a backend leaf.
+# FF_CLIENT_SPINE_GBPS=
+#
+#   command run on each host before any load; exit 0 = host is in
+#   production use, 1 = idle, anything else = unknown (counts as in use).
+#   Default: WEKA containers running (`weka local ps`); idle where WEKA
+#   isn't installed. Other example: 'systemctl is-active --quiet myservice'.
+#   none = no check.
+# FF_BUSY_CHECK=
+#
+#   run even where FF_BUSY_CHECK says in use (stop the cluster's I/O first)
+# FF_BUSY_OK=0
+#
+#   hosts that should be tested; fewer makes the coverage PARTIAL
+#   (default: every target for a plain host list, the hosts found on
+#   the rails when FF_HOSTS has a CIDR or range)
+# FF_EXPECT_HOSTS=
+#

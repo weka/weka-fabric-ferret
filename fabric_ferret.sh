@@ -125,18 +125,19 @@ Optional (default)
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
+
                    Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
                    way per pair between two rails (with more than two rails, the rail pair rotates each
                    pairing cycle). Host Status = the worst of its rail columns and Cross;
                    SLOW(cross)/CRITICAL(cross) = only the cross-rail runs were that slow.
-  FF_SPINES        leaf-spine uplinks, all three or none (no defaults): spines, links from each
-  FF_SPINE_LINKS   backend leaf to each spine, Gbps per link. The summary always sums each leaf's runs
-  FF_SPINE_GBPS    to other leaves per phase (leaf = LLDP neighbour); with these set it judges them
-                   against spines x links x Gbps per direction: oversubscribed by design, or a
-                   lost link/spine. Status is unchanged.
-  FF_CLIENT_SPINE_LINKS, FF_CLIENT_SPINE_GBPS  the same for client leaves (both or neither; they need
-                   FF_SPINES: one spine layer serves both). A leaf that serves both clients and backends
-                   is flagged and judged as a backend leaf.
+  FF_SPINES        number of spines every leaf uplinks to (all three uplink settings or none; no defaults)
+  FF_SPINE_LINKS   uplinks from each backend leaf to EACH spine
+  FF_SPINE_GBPS    Gbps per uplink; the summary judges each leaf's cross-leaf runs (leaf = LLDP neighbour)
+                   against spines x links x Gbps per direction: oversubscribed by design, or a lost
+                   link/spine. Without these it only sums each leaf's runs. Status is unchanged.
+  FF_CLIENT_SPINE_LINKS  uplinks from each client leaf to each spine (with FF_CLIENT_SPINE_GBPS: both or neither)
+  FF_CLIENT_SPINE_GBPS   Gbps per client leaf uplink; they need FF_SPINES (one spine layer serves both). A leaf
+                   that serves both clients and backends is flagged and judged as a backend leaf.
   FF_BUSY_CHECK    command run on each host before any load; exit 0 = host is in
                    production use, 1 = idle, anything else = unknown (counts as in use).
                    Default: WEKA containers running (`weka local ps`); idle where WEKA
@@ -289,7 +290,43 @@ expand_targets() {
     (( ${#TARGETS[@]} > 0 )) || die "$EXPANDING expanded to zero targets"
 }
 
-# load_target_file file deflogin: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped). type backend
+# Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
+# is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
+# (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS"
+
+# load_settings_lines file: a -t file's settings lines, "FF_<setting>=value" as the whole line (the value verbatim,
+# commas and all), read before the rows so FF_SSH_USER from the file is the rows' default login. The caller sets
+# HF_KNOWN (its own names), HF_OTHER and HF_OTHER_NAME (the other tool's) and HF_ENV (the FF_ names exported in
+# the environment at startup, " a b "): the environment beats the file; the other tool's names are skipped and
+# named once; FF_HOSTS/FF_CLIENTS, a credential-looking name or an unknown one stops the run by line number, the
+# value never printed. Sets HF_SET_USER when the file set FF_SSH_USER.
+load_settings_lines() {
+    local f=$1 line ln=0 nm val; local -a skipped=()
+    HF_SET_USER=
+    while IFS= read -r line || [[ -n $line ]]; do
+        ln=$(( ln + 1 )); line=${line%$'\r'}
+        [[ $line =~ ^[[:space:]]*(FF_[A-Z0-9_]+)[[:space:]]*=(.*)$ ]] || continue
+        nm=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}; val=${val#"${val%%[![:space:]]*}"}
+        [[ $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
+        [[ $nm == FF_HOSTS || $nm == FF_CLIENTS ]] && die "-t $f line $ln: $nm is not a setting here; list the targets as rows"
+        if [[ " $HF_KNOWN " == *" $nm "* ]]; then
+            if [[ " $HF_ENV " == *" $nm "* ]]; then log "-t $f line $ln: $nm is set in the environment; the file's value is ignored"
+            else
+                printf -v "$nm" '%s' "$val"; [[ $nm == FF_SSH_USER ]] && HF_SET_USER=1
+                # the rows below expand against FF_MAX_TARGETS, so a file value is checked here, not after the load
+                [[ $nm == FF_MAX_TARGETS ]] && { [[ $val =~ ^[0-9]+$ ]] && (( val > 0 )) || die "-t $f line $ln: FF_MAX_TARGETS must be a positive integer"; }
+            fi
+        elif [[ " $HF_OTHER " == *" $nm "* ]]; then skipped+=("$nm")
+        else die "-t $f line $ln: unknown setting $nm; this tool reads: ${HF_KNOWN// /, }"; fi
+    done < "$f"
+    (( ${#skipped[@]} )) && log "-t $f: ${#skipped[@]} setting line(s) for $HF_OTHER_NAME skipped: ${skipped[*]}"
+    return 0
+}
+
+# load_target_file file deflogin: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped; FF_<setting>=value
+# lines are settings, load_settings_lines). type backend
 # (host = backend) or client: ssh targets (IP, name, CIDR or range, as FF_HOSTS); bmc: one BMC address read out of
 # band. A host field * or a glob (* ? [...], any case) is a credential row: it adds no targets. Type * = backend
 # and client, never bmc. Each target takes the most specific row that gives a login or pw: one host > CIDR/range >
@@ -302,6 +339,7 @@ load_target_file() {
     local -a R_LN=() R_TY=() R_H=() R_LG=() R_PW=() R_TIER=() wild=()
     local -A tidx=() bidx=() warned=()
     [[ -r $f && -f $f ]] || die "-t: cannot read '$f'"
+    load_settings_lines "$f"; [[ -n $HF_SET_USER ]] && def=$FF_SSH_USER
     [[ $def =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     me=$(id -un); T_ROW=(); B_ROW=()
     # also set: HF_RANGES[backend|client] (1 once a row of that type has a CIDR or range: INPUT_RANGES per type, so a
@@ -319,6 +357,7 @@ load_target_file() {
     while IFS= read -r line || [[ -n $line ]]; do
         ln=$(( ln + 1 )); line=${line%$'\r'}
         [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
+        [[ $line =~ ^[[:space:]]*FF_[A-Z0-9_]+[[:space:]]*= ]] && continue   # a settings line (read above)
         [[ $line == *,* ]] || line="backend,$line"   # a bare line is a backend with the defaults: a plain host list works
         [[ $line =~ ^[^,]*,[[:space:]]*(#|,*[[:space:]]*$) ]] && continue   # "host,# ...", "host," : commented out or empty
         ty=${line%%,*}; rest=${line#*,}
@@ -2281,9 +2320,68 @@ cleanup() {
     exit $rc
 }
 
-# Every FF_* setting this tool reads. Any other FF_* in the environment is a typo that would be silently
-# ignored (a dropped letter, say), so it stops the run. A regress test keeps the list complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+# FF_KNOWN, every FF_* setting this tool reads, is in hostfile.sh (shared with thermals_capture.sh).
+# write_targets_template path: hostlist.example.csv, written by ./build from this script's own usage text so the
+# example and the help never drift: the row rules and example rows, then every documented FF_ setting at its
+# default under its help, as comments (FF_HOSTS and FF_CLIENTS are rows in this file, not settings). A default
+# is the first "(N)", "(all)" or "(none)" in the setting's help; an "=1" (or "=0") switch defaults to the other value.
+write_targets_template() {
+    local p=$1
+    { cat <<'EOF'
+# hostlist.example.csv: a target file for fabric_ferret.sh -t and thermals_capture.sh -t (the same format).
+# Copy it, keep the rows you need, and chmod 600 it when a row holds a password.
+#
+# Row format: <type>,<host>,<login>,<pw>
+#   type   backend (or host) and client: ssh targets; bmc: one BMC address, read out of band (fabric_ferret.sh
+#          skips bmc rows and says how many). A bare line (no comma) is a backend with the defaults, so a plain
+#          host list works as it is. Type * means backend and client, never bmc.
+#   host   an IP, hostname, CIDR or range (as FF_HOSTS); a bmc takes one IP or hostname. A host of * or a glob
+#          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
+#          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).
+#   login  the ssh login (a bmc: its user); empty = FF_SSH_USER, by default the user running the tool.
+#   pw     everything after the third comma, verbatim; empty = key (passwordless) ssh, or an empty BMC password.
+# Each target takes the most specific row that gives a login or a password: the row naming the one host, then a
+# CIDR or range, then a glob, then <type>,*, then *,*. That row is its credential; there is no fallback to a less
+# specific one. Passwords never appear on a command line, in an environment variable or in any output.
+#
+# Targets
+backend,10.20.1.0/28
+backend,10.20.1.16-23
+backend,storage-09,svc-fabric
+client,10.20.2.0/26
+client,gpu-node-01
+client,gpu-node-02
+bmc,10.20.100.11
+# Credential rows: the login (and password, if any) for every target a more specific row does not cover
+backend,*,svc-fabric
+*,gpu-node-*,admin
+#
+# Settings: a line FF_<setting>=value (the whole line; the value verbatim, commas and all) sets that setting for the
+# run, for both tools. A setting exported in the environment wins over the file; the other tool's names are
+# skipped and named in one log line; an unknown name, or one that looks like a credential, stops the run with its
+# line number. Below, every fabric_ferret.sh setting at its default under its help (from --help; empty = none):
+EOF
+      usage | awk '
+        function flush(   i, k, nn) {
+            if (cur == "") return
+            if (match(txt, / \(([0-9.]+|all|none)[;)]/)) def = substr(txt, RSTART + 2, RLENGTH - 3)
+            if (def == "" && flag != "") def = flag
+            printf "%s", buf; k = split(cur, nn, " "); for (i = 1; i <= k; i++) print "# " nn[i] "=" def; print "#"
+            cur = "" }
+        /^Result:/ { flush(); exit }
+        /^  FF_[A-Z0-9_]+/ { flush(); line = $0; sub(/^  /, "", line)
+            n = split(line, w, /[ ,=(]+/); names = ""
+            for (i = 1; i <= n && w[i] ~ /^FF_[A-Z0-9_]+$/; i++) names = names (names == "" ? "" : " ") w[i]
+            if (names == "FF_HOSTS" || names == "FF_CLIENTS") next
+            flag = ""; if (match(line, /^FF_[A-Z0-9_]+=[01] /)) flag = (substr(line, RLENGTH - 1, 1) == "1") ? "0" : "1"
+            help = line; sub(/^FF_[A-Z0-9_]+(, FF_[A-Z0-9_]+)*(=[A-Za-z0-9]+)? */, "", help); sub(/^\([0-9]+\) +/, "", help)
+            cur = names; def = ""; txt = line; buf = "#   " help "\n"; next }
+        cur != "" && /^            / { h = $0; sub(/^ +/, "", h); txt = txt " " h; buf = buf "#   " h "\n"; next }
+        cur != "" { flush() }
+        /^$/ { next }
+        END { flush() }'
+    } > "$p"
+}
 
 # edit_distance a b: Levenshtein distance, for the "did you mean" hint
 edit_distance() {
@@ -2320,20 +2418,15 @@ check_settings() {
 main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
+    # the FF_ names the environment set, before any default: a -t file's settings lines never override them
+    HF_ENV=" $(compgen -e | awk '/^FF_/ {printf "%s ", $0}')"; HF_KNOWN=$FF_KNOWN; HF_OTHER=$TC_KNOWN; HF_OTHER_NAME=thermals_capture.sh
 
     : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=$(id -un)}"
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_OK_PCT:=75}" "${FF_SLOW_PCT:=50}" "${FF_BUSY_OK:=0}" "${FF_SYSINFO_TIMEOUT:=300}" "${FF_RETR_PCT:=0.1}"
-    [[ $FF_RETR_PCT =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "FF_RETR_PCT must be a number (% of TCP segments sent), got '$FF_RETR_PCT'"
     : "${FF_TEMPS:=1}" "${FF_IPMI:=1}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}" "${FF_IPMI_TIMEOUT:=60}"
-    [[ $FF_TEMPS == 0 || $FF_TEMPS == 1 ]] || die "FF_TEMPS must be 0 or 1, got '$FF_TEMPS'"
-    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
-    local tv; for tv in FF_TEMP_MARGIN FF_TEMP_RISE FF_IPMI_TIMEOUT; do
-        [[ ${!tv} =~ ^[0-9]+$ ]] || die "$tv must be a whole number, got '${!tv}'"
-    done
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
-    [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
     # arguments, any order: --list, -t FILE, one duration (whole seconds); anything else is refused
     local list=0 tfile= dur=
     while (( $# )); do
@@ -2345,9 +2438,8 @@ main() {
                dur=$1; shift ;;
         esac
     done
-    [[ -n $dur ]] && FF_DURATION=$dur
+    [[ -n $dur ]] && { FF_DURATION=$dur; HF_ENV+="FF_DURATION "; }   # the argument beats a -t file's FF_DURATION line
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
-    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
     local -a TF_BE=() TF_CL=(); declare -gA TL=() TPW=()
@@ -2364,6 +2456,15 @@ main() {
         (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
         (( ${#TF_BE[@]} )) || die "-t $tfile has no backend targets"
     fi
+    # settings are checked here, after a -t file's settings lines have had their say
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    [[ $FF_RETR_PCT =~ ^([0-9]+\.?[0-9]*|\.[0-9]+)$ ]] || die "FF_RETR_PCT must be a number (% of TCP segments sent), got '$FF_RETR_PCT'"
+    [[ $FF_TEMPS == 0 || $FF_TEMPS == 1 ]] || die "FF_TEMPS must be 0 or 1, got '$FF_TEMPS'"
+    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
+    local tv; for tv in FF_TEMP_MARGIN FF_TEMP_RISE FF_IPMI_TIMEOUT; do
+        [[ ${!tv} =~ ^[0-9]+$ ]] || die "$tv must be a whole number, got '${!tv}'"
+    done
+    [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
     [[ -z $FF_UDP ]] && FF_UDP=$(( ! FF_SKIP_IPERF ))   # UDP by default, except with no load
     : "${FF_UDP_DURATION:=$FF_DURATION}"
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
