@@ -100,6 +100,8 @@ log() { echo "# $*" >&2; }
 
 #@include sh/tc_reader.sh
 
+#@include sh/auth.sh
+
 #@include sh/tc_collect.sh
 
 #@include sh/hostfile.sh

@@ -293,16 +293,8 @@ elif [ -n "$s" ] && printf '%s' "$out" | grep -q '^sudo:'; then echo "@@IPMI $h 
 else echo "@@IPMI $h none rc=${rc}_$(printf '%s' "$out" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
 EOF
 
-# ---------- collection ----------
+# ---------- passwords: one-use fifos read by an SSH_ASKPASS helper (both tools) ----------
 
-throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
-wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
-tmo() { if [[ -n $TO ]]; then "$TO" "$HOST_LIMIT" "$@"; else "$@"; fi; }
-clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
-
-# sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
-# "label host source chip dev sensor temp_c high_c crit_c status" (sensor none = no data, why in status).
-# A target with no answer at all gets a none row per source, the reason from ssh's exit code and last error line.
 # write_askpass path: ssh's SSH_ASKPASS helper (as wekatester's): no to a new host key, nothing for a key passphrase,
 # else ONE line from the fifo $THERMCAP_PW_FIFO names, once (a second prompt, a wrong password, gets nothing)
 write_askpass() {
@@ -313,6 +305,18 @@ write_askpass() {
 # pwfifo name pw: a one-use fifo in AUTH holding pw, open read-write on fd 4 (a fifo drops what it holds when its last
 # fd closes; the write can't block). The pw goes in by printf (a builtin: no argv). Caller: exec 4>&-; rm the fifo.
 pwfifo() { local f=$AUTH/$1.fifo; rm -f "$f" "$f.used"; mkfifo -m 600 "$f" || return 1; exec 4<>"$f"; printf '%s\n' "$2" >&4; PWFIFO=$f; }
+
+# ---------- collection ----------
+
+throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
+wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
+tmo() { if [[ -n $TO ]]; then "$TO" "$HOST_LIMIT" "$@"; else "$@"; fi; }
+clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
+
+# sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
+# "label host source chip dev sensor temp_c high_c crit_c status" (sensor none = no data, why in status).
+# A target with no answer at all gets a none row per source, the reason from ssh's exit code and last error line.
+# (write_askpass and pwfifo: src/sh/auth.sh, shared with fabric_ferret.sh)
 # rssh i: ssh to target i as its login; a password login reads its password through the askpass helper from a fifo,
 # never from an environment variable or a command line. Runs in its own background subshell.
 rssh() {
