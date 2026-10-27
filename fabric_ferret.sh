@@ -162,11 +162,13 @@ phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_D
 phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 # err_hist file...: the ERROR rows ("src,dst,ERROR rc=N iperf3: error - <reason>") grouped by the reason, as
 # '<runs> x "<reason>" to <N> destination(s) (<first 4> ...)', one line per reason, most runs first; a row without
-# iperf3's prefix keeps its own text. Frank's 10-27 run: 138 rows, one reason, 48 destinations, 9 that answered.
+# iperf3's prefix keeps its own text; a client row's trailing "share:K" is not part of the reason. Frank's 10-27 run:
+# 138 rows, one reason, 48 destinations, 9 that answered.
 err_hist() {
     cat "$@" | tr -s ' ' | awk -F, '$3 ~ /^ *ERROR/ {
         s = $0; sub(/^[^,]*,[^,]*, */, "", s); i = index(s, "iperf3: error - ")
         if (i) s = substr(s, i + 16); else sub(/^ERROR *(rc=[0-9]+)? */, "", s)
+        sub(/ share:[0-9]+$/, "", s)
         if (!(s in n)) ord[++no] = s
         n[s]++; if (!(($2, s) in seen)) { seen[$2, s] = 1; nd[s]++; if (nd[s] <= 4) dl[s] = dl[s] " " $2 } }
         END { for (i = 1; i <= no; i++) { s = ord[i]; printf "%d x \"%s\" to %d destination%s (%s%s)\n", n[s], s, nd[s], (nd[s] == 1 ? "" : "s"), substr(dl[s], 2), (nd[s] > 4 ? " ..." : "") } }' | sort -t x -k1,1nr

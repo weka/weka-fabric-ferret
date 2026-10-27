@@ -1978,7 +1978,7 @@ def _ip_speeds(results, ip_rail):
 
 def _err_reason(text):
     """iperf3's reason out of a run's error text: the part after 'iperf3: error - ', else the text less 'ERROR rc=N'."""
-    t = re.sub(r'\s+', ' ', text).strip()
+    t = re.sub(r'\s+share:\d+$', '', re.sub(r'\s+', ' ', text).strip())   # a client row's share:K is not the reason
     i = t.find('iperf3: error - ')
     return t[i + len('iperf3: error - '):] if i >= 0 else re.sub(r'^ERROR\s*(rc=\d+\s*)?', '', t)
 
