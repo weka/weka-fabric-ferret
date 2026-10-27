@@ -8,15 +8,18 @@ _emit() {
     _SEEN[$1]=1; TARGETS+=("$1")
     (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "$EXPANDING expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
 }
+# _ent text alt: the entry's text in a refusal, for FF_HOSTS/FF_CLIENTS; for a -t row (EXPANDING "-t FILE line N") the
+# line number says where and the text stays out (a row may hold a password: hostfile.sh's promise)
+_ent() { if [[ $EXPANDING == -t* ]]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
 _need() {  # refuse a range before looping over it
-    (( ${#TARGETS[@]} + $1 <= FF_MAX_TARGETS )) || die "$EXPANDING: '$2' adds $1 targets, past FF_MAX_TARGETS=$FF_MAX_TARGETS"
+    (( ${#TARGETS[@]} + $1 <= FF_MAX_TARGETS )) || die "$EXPANDING: $(_ent "'$2'" "the entry") adds $1 targets, past FF_MAX_TARGETS=$FF_MAX_TARGETS"
 }
 
 expand_entry() {
     local e=$1 b lo hi n
-    [[ $e == *:* ]] && die "$EXPANDING: IPv6 is not supported: '$e'"
+    [[ $e == *:* ]] && die "$EXPANDING: IPv6 is not supported$(_ent ": '$e'")"
     if [[ $e == */* ]]; then
-        b=$(cidr_bounds "$e") || die "$EXPANDING: bad CIDR: '$e'"
+        b=$(cidr_bounds "$e") || die "$EXPANDING: bad CIDR$(_ent ": '$e'")"
         lo=${b% *}; hi=${b#* }
         (( hi - lo >= 2 )) && { lo=$(( lo + 1 )); hi=$(( hi - 1 )); }
         (( hi > lo )) && INPUT_RANGES=1
@@ -24,9 +27,9 @@ expand_entry() {
         for (( n = lo; n <= hi; n++ )); do _emit "$(int2ip $n)"; done
     elif [[ $e =~ ^([0-9.]+)-([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
         local from=${BASH_REMATCH[1]} to=${BASH_REMATCH[2]}  # is_ip resets BASH_REMATCH
-        is_ip "$from" && is_ip "$to" || die "$EXPANDING: bad IP range: '$e'"
+        is_ip "$from" && is_ip "$to" || die "$EXPANDING: bad IP range$(_ent ": '$e'")"
         lo=$(ip2int "$from"); hi=$(ip2int "$to")
-        (( lo <= hi )) || die "$EXPANDING: range runs backwards: '$e'"
+        (( lo <= hi )) || die "$EXPANDING: range runs backwards$(_ent ": '$e'")"
         (( hi > lo )) && INPUT_RANGES=1
         _need $(( hi - lo + 1 )) "$e"
         for (( n = lo; n <= hi; n++ )); do _emit "$(int2ip $n)"; done
@@ -36,7 +39,7 @@ expand_entry() {
         for i in 0 1 2 3; do
             o=${oct[$i]}
             lo4[$i]=$(( 10#${o%-*} )); hi4[$i]=$(( 10#${o#*-} ))
-            (( lo4[i] <= hi4[i] && hi4[i] <= 255 )) || die "$EXPANDING: bad octet '$o' in '$e'"
+            (( lo4[i] <= hi4[i] && hi4[i] <= 255 )) || die "$EXPANDING: bad octet$(_ent " '$o' in '$e'")"
             count=$(( count * (hi4[i] - lo4[i] + 1) ))
         done
         unset IFS
@@ -47,11 +50,11 @@ expand_entry() {
             _emit "$a.$b.$c.$d"
         done; done; done; done
     elif [[ $e =~ ^[0-9.-]+$ ]]; then
-        die "$EXPANDING: not a valid IP, range or CIDR: '$e'"
+        die "$EXPANDING: not a valid IP, range or CIDR$(_ent ": '$e'")"
     elif [[ $e =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
         _emit "$e"
     else
-        die "$EXPANDING: not a hostname, IP, range or CIDR: '$e'"
+        die "$EXPANDING: not a hostname, IP, range or CIDR$(_ent ": '$e'")"
     fi
 }
 
