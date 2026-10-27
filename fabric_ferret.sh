@@ -192,7 +192,9 @@ declare -A _CIDR_CACHE=()
 declare -a TARGETS=()
 INPUT_RANGES=0   # 1 once FF_HOSTS has a CIDR or range: unanswered addresses are then normal
 declare -A _SEEN=()
+_TRACK=0; declare -a _COVER=()   # hostfile.sh: under _TRACK=1, every target an entry names, listed before or not
 _emit() {
+    (( _TRACK )) && _COVER+=("$1")
     [[ -n ${_SEEN[$1]+x} ]] && return
     _SEEN[$1]=1; TARGETS+=("$1")
     (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "$EXPANDING expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
@@ -330,19 +332,15 @@ load_target_file() {
             [[ -n $lg || -n $pw ]] && _offer B "${bidx[$h]}" "$r"
             continue
         fi
-        # an ssh target row: expanded alone, so the targets an earlier row already listed are known to be covered
+        # an ssh target row, expanded onto the list; _COVER (expand.sh) names every target it covers, listed before or not
         R_TIER[r]=5; [[ $h == */* || ( $h =~ ^[0-9.-]+$ && $h == *-* ) ]] && R_TIER[r]=4
-        local -a keep=("${TARGETS[@]}") cover; local ir=$INPUT_RANGES
-        TARGETS=(); _SEEN=(); EXPANDING="-t $f line $ln"; INPUT_RANGES=0
-        expand_entry "$h"
-        cover=("${TARGETS[@]}"); TARGETS=("${keep[@]}"); _SEEN=()
-        for t in "${TARGETS[@]}"; do _SEEN[$t]=1; done
+        local ir=$INPUT_RANGES n0=${#TARGETS[@]}
+        EXPANDING="-t $f line $ln"; INPUT_RANGES=0; _TRACK=1; _COVER=()
+        expand_entry "$h"; _TRACK=0
         (( HF_RANGES[$ty] |= INPUT_RANGES, INPUT_RANGES |= ir ))   # this row's range flag, kept per type too
-        for t in "${cover[@]}"; do
-            if [[ -z ${tidx[$t]+x} ]]; then _emit "$t"; tidx[$t]=$(( ${#TARGETS[@]} - 1 )); T_TYPE[${tidx[$t]}]=$ty; T_FROM[${tidx[$t]}]=$ln
-            elif [[ ${T_TYPE[${tidx[$t]}]} != "$ty" ]]; then
-                die "-t $f line $ln: a target here is already listed as ${T_TYPE[${tidx[$t]}]} on line ${T_FROM[${tidx[$t]}]}"
-            fi
+        for (( k = n0; k < ${#TARGETS[@]}; k++ )); do tidx[${TARGETS[k]}]=$k; T_TYPE[k]=$ty; T_FROM[k]=$ln; done
+        for t in "${_COVER[@]}"; do
+            [[ ${T_TYPE[${tidx[$t]}]} == "$ty" ]] || die "-t $f line $ln: a target here is already listed as ${T_TYPE[${tidx[$t]}]} on line ${T_FROM[${tidx[$t]}]}"
             [[ -n $lg || -n $pw ]] && _offer T "${tidx[$t]}" "$r"
         done
     done < "$f"

@@ -1,7 +1,9 @@
 declare -a TARGETS=()
 INPUT_RANGES=0   # 1 once FF_HOSTS has a CIDR or range: unanswered addresses are then normal
 declare -A _SEEN=()
+_TRACK=0; declare -a _COVER=()   # hostfile.sh: under _TRACK=1, every target an entry names, listed before or not
 _emit() {
+    (( _TRACK )) && _COVER+=("$1")
     [[ -n ${_SEEN[$1]+x} ]] && return
     _SEEN[$1]=1; TARGETS+=("$1")
     (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "$EXPANDING expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
