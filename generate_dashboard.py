@@ -471,7 +471,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <th>Sender TX</th><th>Rx socket</th><th>NIC</th><th>Backlog</th><th>Unaccounted</th><th>Expected (overload)</th><th>Beyond expected</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     # runs with no result, grouped by iperf3's reason (the collector's err_hist): runs, distinct destinations, the
-    # first four, the phases; Frank's 10-27 run: 138 runs, one reason, 48 destinations that never answered
+    # first four, the phases; a 10-27 field run: 138 runs, one reason, 48 destinations that never answered
     run_errors_html = ''
     errs = [(e['phase'], e['dst'], e['why']) for e in data.get('run_errors', [])] + \
            [(str(u['phase']), u.get('dst', ''), _err_reason(u['error'])) for u in data.get('udp', []) if 'error' in u]

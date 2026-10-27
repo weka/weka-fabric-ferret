@@ -161,7 +161,7 @@ phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_D
 phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 # err_hist file...: the ERROR rows ("src,dst,ERROR rc=N iperf3: error - <reason>") grouped by the reason, as
 # '<runs> x "<reason>" to <N> destination(s) (<first 4> ...)', one line per reason, most runs first; a row without
-# iperf3's prefix keeps its own text; a client row's trailing "share:K" is not part of the reason. Frank's 10-27 run:
+# iperf3's prefix keeps its own text; a client row's trailing "share:K" is not part of the reason. A 10-27 field run:
 # 138 rows, one reason, 48 destinations, 9 that answered.
 err_hist() {
     cat "$@" | tr -s ' ' | awk -F, '$3 ~ /^ *ERROR/ {
@@ -585,7 +585,7 @@ main() {
         done | sort -V
     } | column -t > "$COLLECT_DIR/rails.txt"
     # a rail a host lacks (no NIC x) or does not address (no IPv4 on x) is a host property, not a finding: one counted
-    # line per rail and state, the first 8 hosts named (Frank's 10-27 fleet: 112 hosts, two such rails each); a host
+    # line per rail and state, the first 8 hosts named (a GPU fleet seen 10-27: 112 hosts, two such rails each); a host
     # with any other bad rail (link DOWN, no address in the subnet, AMBIGUOUS) keeps its full row
     local bad_rails; bad_rails=$(awk '#@awk ff_main.bad_rails' "$COLLECT_DIR/rails.txt")
     log "${#ELIG[@]} hosts on the rails. Rail NIC names and MTUs seen (count, NIC, MTU):"
@@ -653,7 +653,7 @@ main() {
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
     # speed for every rail, so a whole rail that came up slow is not judged against itself. Only a usable rail's
     # NIC votes (iprail: "host nic letter", rails in state ok); a NIC a host has but does not address, or a rail
-    # it lacks, has no say and no rail letter (Frank's GPU fleet: 112 bond members with no IPv4 were keyed by that
+    # it lacks, has no say and no rail letter (a GPU fleet seen 10-27: 112 bond members with no IPv4 were keyed by that
     # "none" and the 107 with a readable speed voted as rail B; the other 5 reported speed Unknown!)
     local -a LINE=() MODE=() VOTE=() TOT=() fl=(); local LINE_GBPS k v
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $k $r && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"; done; done > "$WORK/iprail"
