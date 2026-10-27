@@ -27,7 +27,7 @@ WEKA pre-install/offline (stopped I/O) data plane investigation and performance 
 | The machine you run from (a jump host is fine) | bash 4.3+, ssh, timeout, column, sort, awk, tar |
 | Where you render the dashboard | python3 (standard library only) |
 | Viewing the dashboard | a browser with internet access: the page loads Bootstrap, DataTables, Plotly, jQuery and vis-network from public CDNs, each pinned to a version and checked with subresource integrity |
-| Each tested host | key-based ssh (the tool uses `BatchMode=yes`); root, or a user with passwordless `sudo -n` (`FF_SSH_USER`); `iperf3` (not needed with `FF_SKIP_IPERF=1`); `ethtool` |
+| Each tested host | key-based ssh (the tool uses `BatchMode=yes`); root, or a user with a passwordless escalator (`dzdo -n`, `pbrun`, `sesu`, `pmrun`, `doas -n`, `ksu -e` or `sudo -n`), or a `-t` password that `sudo -S` takes (`FF_SSH_USER`, `-t`); `iperf3` (not needed with `FF_SKIP_IPERF=1`); `ethtool` |
 | Each tested host, optional | `lldpcli` (switch neighbours), `mlxconfig` (NIC firmware settings), `journalctl` (kernel log), `ibstat` |
 
 A tool that's missing on a host is reported as not installed in its section, never as a clean reading. A missing `iperf3` stops the run (unless `FF_SKIP_IPERF=1`) and names the hosts.
@@ -84,7 +84,9 @@ With no rail setting, the tool sweeps the hosts, prints the IPv4 subnets it foun
 
 `FF_RAILS=a,b` (a comma, no `;`) is one rail with two subnets. On hosts with a NIC in each, that rail is ambiguous, and the run stops and shows the `;` form.
 
-Instead of `FF_HOSTS` and `FF_CLIENTS`, `-t FILE` reads the targets from a file in the format thermals_capture.sh reads (`<type>,<host>,<login>,<pw>`, see that section below): `backend` (or `host`) and `client` lines, each an IP, hostname, CIDR or range; `bmc` lines are skipped and counted in one log line. Not both: `-t` with `FF_HOSTS` or `FF_CLIENTS` set stops the run. This version reaches every target as `FF_SSH_USER`: a line with another login or a password, or a credential row (a host of `*` or a glob), stops the run, naming its line number. From a jump host, the file must be there: `bash -s -- -t FILE 120`. An argument the tool doesn't take (anything but `-t FILE`, `--list` and one duration) stops the run.
+Instead of `FF_HOSTS` and `FF_CLIENTS`, `-t FILE` reads the targets from a file in the format thermals_capture.sh reads (`<type>,<host>,<login>,<pw>`, see that section below): `backend` (or `host`) and `client` lines, each an IP, hostname, CIDR or range; `bmc` lines are skipped and counted in one log line. Not both: `-t` with `FF_HOSTS` or `FF_CLIENTS` set stops the run. Each target takes its line's login and password, credential rows (`*` and globs) included, resolved as thermals_capture.sh does; with no login, `FF_SSH_USER`; with no password, key ssh. A password is read once, where the target's ssh session opens, through `SSH_ASKPASS` from a one-use fifo (OpenSSH 8.4 or later, or `setsid`, on the machine running the script); it never appears on a command line, in an environment variable or in a file, the run's state file included. From a jump host, the file must be there: `bash -s -- -t FILE 120`. An argument the tool doesn't take (anything but `-t FILE`, `--list` and one duration) stops the run.
+
+What runs on a host to get root for the remote steps: during the sweep, one ssh per host runs `id -u`. A root login needs nothing more. A login with a password from `-t` runs each remote step with `sudo -S -k`, the password sent first on the ssh session's input stream (never on a command line). Any other login: the same ssh then runs `<escalator> true` for `dzdo -n`, `pbrun`, `sesu`, `pmrun`, `doas -n`, `ksu -e` and `sudo -n`, in that order (each only if installed), each under a 5 s timeout, once per host per run; the first that works runs every remote step on that host. If none works, the host answered ssh but can't run the steps: it is left out, listed with its reason, login and uid in the log and in the bundle's `unusable.txt`, and counted as missing. If a run is cut short, the cleanup that finishes from its state file can't stop iperf3 on a `sudo -S` host (the password is never saved); it says so for each such host.
 
 ### Clients (optional)
 
@@ -141,7 +143,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | `FF_BUSY_CHECK` (WEKA containers running) | command run on each host before any load: exit 0 = in production use, 1 = idle, anything else = unknown (counts as in use). Example: `'systemctl is-active --quiet myservice'`. `none` = no check |
 | `FF_BUSY_OK` | `1` = run even where the busy check says in use (stop the cluster's I/O first) |
 | `FF_IGNORE_LOCK` | `1` = run even if another run holds a host (both runs then get garbage) |
-| `FF_SSH_USER` (the current user) | ssh user; a non-root user runs remote steps with `sudo -n` |
+| `FF_SSH_USER` (the current user) | ssh user, and `-t`'s default login; a non-root login runs remote steps through the first passwordless escalator (see `-t` above for exactly what runs) |
 | `FF_SSH_PARALLEL` (64) | ssh sessions at once for sweep and collection |
 | `FF_SSH_RETRY_PARALLEL` (8) | retry targets that refused ssh under load this many at a time |
 | `FF_MAX_TARGETS` (4096) | refuse to expand `FF_HOSTS` beyond this |

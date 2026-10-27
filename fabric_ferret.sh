@@ -20,8 +20,13 @@ From a jump host (settings ride in the remote command; nothing to edit or copy f
   -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
              format thermals_capture.sh reads (# comments; a line with no comma is a backend). Types: backend (or
              host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines are skipped (counted in
-             one log line). This version takes one login, FF_SSH_USER: a row with another login or a pw, or a
-             credential row (a host of * or a glob), is refused with its line number.
+             one log line). Each target takes its row's login and password, credential rows (a host of * or a
+             glob) included, as thermals_capture.sh resolves them; no login: FF_SSH_USER; no password: key ssh.
+             A password is read once, where the target's ssh session opens, through SSH_ASKPASS from a one-use
+             fifo (OpenSSH 8.4+, or setsid, here): never an environment variable, a command line or a file.
+             Remote steps run as root: a root login directly; a row password: sudo -S -k with it; any other
+             login: the first passwordless escalator (FF_SSH_USER below). A host where none works is left out,
+             listed in unusable.txt with the reason, and counted as missing.
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
 
@@ -96,7 +101,10 @@ Optional (default)
   FF_SYSINFO_TIMEOUT  seconds per host for the system info capture before load (300); a host that runs
                    out keeps what it sent and is flagged sysinfo_partial
   FF_PORT          iperf3 port (5201)
-  FF_SSH_USER      ssh user, and -t's default login (the current user); non-root runs remote steps with sudo -n
+  FF_SSH_USER      ssh user, and -t's default login (the current user). A non-root login with no -t password runs
+                   the remote steps through the first passwordless escalator: on each host, once per run, during
+                   the sweep, `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e,
+                   sudo -n, in that order
   FF_SSH_PARALLEL  ssh sessions at once for sweep and collection (64)
   FF_SSH_RETRY_PARALLEL  retry targets that refused ssh under load (reset, kex) this many at a time (8)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
