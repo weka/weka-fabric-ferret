@@ -182,14 +182,14 @@ _emit() {
     (( ${#TARGETS[@]} <= FF_MAX_TARGETS )) || die "$EXPANDING expands past FF_MAX_TARGETS=$FF_MAX_TARGETS; narrow it or raise the cap"
 }
 _need() {  # refuse a range before looping over it
-    (( ${#TARGETS[@]} + $1 <= FF_MAX_TARGETS )) || die "'$2' adds $1 targets, past FF_MAX_TARGETS=$FF_MAX_TARGETS"
+    (( ${#TARGETS[@]} + $1 <= FF_MAX_TARGETS )) || die "$EXPANDING: '$2' adds $1 targets, past FF_MAX_TARGETS=$FF_MAX_TARGETS"
 }
 
 expand_entry() {
     local e=$1 b lo hi n
-    [[ $e == *:* ]] && die "IPv6 is not supported: '$e'"
+    [[ $e == *:* ]] && die "$EXPANDING: IPv6 is not supported: '$e'"
     if [[ $e == */* ]]; then
-        b=$(cidr_bounds "$e") || die "bad CIDR: '$e'"
+        b=$(cidr_bounds "$e") || die "$EXPANDING: bad CIDR: '$e'"
         lo=${b% *}; hi=${b#* }
         (( hi - lo >= 2 )) && { lo=$(( lo + 1 )); hi=$(( hi - 1 )); }
         (( hi > lo )) && INPUT_RANGES=1
@@ -197,9 +197,9 @@ expand_entry() {
         for (( n = lo; n <= hi; n++ )); do _emit "$(int2ip $n)"; done
     elif [[ $e =~ ^([0-9.]+)-([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
         local from=${BASH_REMATCH[1]} to=${BASH_REMATCH[2]}  # is_ip resets BASH_REMATCH
-        is_ip "$from" && is_ip "$to" || die "bad IP range: '$e'"
+        is_ip "$from" && is_ip "$to" || die "$EXPANDING: bad IP range: '$e'"
         lo=$(ip2int "$from"); hi=$(ip2int "$to")
-        (( lo <= hi )) || die "range runs backwards: '$e'"
+        (( lo <= hi )) || die "$EXPANDING: range runs backwards: '$e'"
         (( hi > lo )) && INPUT_RANGES=1
         _need $(( hi - lo + 1 )) "$e"
         for (( n = lo; n <= hi; n++ )); do _emit "$(int2ip $n)"; done
@@ -209,7 +209,7 @@ expand_entry() {
         for i in 0 1 2 3; do
             o=${oct[$i]}
             lo4[$i]=$(( 10#${o%-*} )); hi4[$i]=$(( 10#${o#*-} ))
-            (( lo4[i] <= hi4[i] && hi4[i] <= 255 )) || die "bad octet '$o' in '$e'"
+            (( lo4[i] <= hi4[i] && hi4[i] <= 255 )) || die "$EXPANDING: bad octet '$o' in '$e'"
             count=$(( count * (hi4[i] - lo4[i] + 1) ))
         done
         unset IFS
@@ -220,11 +220,11 @@ expand_entry() {
             _emit "$a.$b.$c.$d"
         done; done; done; done
     elif [[ $e =~ ^[0-9.-]+$ ]]; then
-        die "not a valid IP, range or CIDR: '$e'"
+        die "$EXPANDING: not a valid IP, range or CIDR: '$e'"
     elif [[ $e =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ ]]; then
         _emit "$e"
     else
-        die "not a hostname, IP, range or CIDR: '$e'"
+        die "$EXPANDING: not a hostname, IP, range or CIDR: '$e'"
     fi
 }
 
@@ -240,12 +240,12 @@ expand_targets() {
     local -a top=("${WORDS[@]}")
     for w in "${top[@]}"; do
         if [[ $w == @* ]]; then
-            [[ -r ${w#@} ]] || die "cannot read host file '${w#@}'"
+            [[ -r ${w#@} ]] || die "$EXPANDING: cannot read host file '${w#@}'"
             while IFS= read -r line || [[ -n $line ]]; do
                 line=${line%%#*}
                 _words "$line"
                 for e in "${WORDS[@]}"; do
-                    [[ $e == @* ]] && die "nested @file not supported: '$e' in ${w#@}"
+                    [[ $e == @* ]] && die "$EXPANDING: nested @file not supported: '$e' in ${w#@}"
                     expand_entry "$e"
                 done
             done < "${w#@}"
