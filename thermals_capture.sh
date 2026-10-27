@@ -585,10 +585,13 @@ END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C
 # name, first match wins: inlet/ambient; VRM/PSU/board/FPGA/HMC/HSC/PLX/PEX/PCH/SAS other; nic/aoc/ocp/cx<n>/port
 # (so an HGX ConnectX is a NIC); gpu/hbm/nvlink/nvsw; nvme/ssd/m.2/drive; dimm/mem; cpu/proc/soc; else other.
 # hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
-# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged).
+# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged). The data rows come before the nodata rows
+# (the spine sorts them so): a gpu nodata row on a host whose BMC rows were typed gpu (HGX GPU, HBM, NVLink) becomes
+# note: instead, since the BMC has that host's GPU temperatures; a note is not a no-data (counts, verdict, Not read).
 TYPE_AWK='
 FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
 FNR == 1 { print $0, "Min_C"; next }
+$2 == "gpu" && $12 ~ /^nodata:/ && ($1 in bg) { $12 = "note:" substr($12, 8) }
 $6 == "none" { print $0, "-"; next }
 { s = tolower($6)
   if ($2 == "gpu") $3 = "gpu"
@@ -596,6 +599,7 @@ $6 == "none" { print $0, "-"; next }
   else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
   else if ($4 ~ /^drivetemp/) $3 = "nvme"
   else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
+  if ($2 == "ipmi" && $3 == "gpu") bg[$1] = 1
   print $0, sprintf("%.1f", mn[$1 SUBSEP $2 SUBSEP $4 SUBSEP $5 SUBSEP $6]) }'
 
 # per host the hottest reading of each type and its flags: "Host Inlet CPU GPU Mem NVMe NIC Other Flags"
@@ -616,11 +620,13 @@ SRC_AWK='NR > 1 && $6 != "none" { k = $1 " " ($2 == "gpu" ? "hwmon" : $2); if (!
 # Crit Flag" (no-data rows left out; the flag is always the last column)
 VIEW_AWK='function f(x) { return x == "-" ? x : sprintf("%.1f", x) }
 NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
-$12 ~ /^nodata/ { next }
+$12 ~ /^(nodata|note):/ { next }
 ns > 1 { print $1, $2, $3, $4, $5, $6, f($7), f($13), f($8), f($9), f($10), f($11), $12; next }
 { print $1, $2, $3, $4, $5, $6, f($8), f($10), f($11), $12 }'
 
-# the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data host and source
+# the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data source and reason (hosts
+# with the same source and reason share one counted line, up to 8 named; each host's own row is in the jsonl, md and
+# html), then the notes (gpu nodata covered by the BMC)
 print_summary() {
     local ts=$WORK/temps_summary.txt
     echo ""
@@ -632,11 +638,16 @@ print_summary() {
         echo "  Flagged sensors:"
         { head -n 1 "$WORK/view"; awk 'NR > 1 && $NF != "-"' "$WORK/view" | sort -k${fk},${fk} -k${mk},${mk}nr; } | column -t | sed 's/^/    /'
     fi
-    awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts" | sort
+    awk 'NR > 1 && $12 ~ /^(nodata|note):/ { k = substr($12, 1, 4) SUBSEP $2 SUBSEP substr($12, index($12, ":") + 1)
+            if (!(k in c)) kord[++nk] = k; c[k]++; if (c[k] <= 8) hl[k] = hl[k] " " $1 }
+        END { for (i = 1; i <= nk; i++) { k = kord[i]; split(k, p, SUBSEP); more = (c[k] > 8 ? " and " (c[k] - 8) " more" : "")
+                if (p[1] == "note") printf "  NOTE: %d host(s) gave no nvidia-smi reading (%s); their GPU temperatures come from the BMC (HGX GPU, HBM, NVLink):%s%s\n", c[k], p[3], hl[k], more
+                else if (c[k] == 1) printf "  NO TEMPERATURE DATA:%s %s (%s)\n", hl[k], p[2], p[3]
+                else printf "  NO TEMPERATURE DATA: %s (%s): %d hosts:%s%s\n", p[2], p[3], c[k], hl[k], more } }' "$ts" | sort
     echo ""
 }
 
-# one JSON object per line: run, host (one per target), sample, reading, sensor (the summary), nodata, result.
+# one JSON object per line: run, host (one per target), sample, reading, sensor (the summary), nodata, note, result.
 # Strings are already [A-Za-z0-9_.:=-] (the reader and clean() map the rest to _); q() escapes anyway.
 JSONL_AWK='
 function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
@@ -655,6 +666,7 @@ FILENAME == ARGV[3] { if (FNR == 1) {
     next }
 FNR == 1 { next }
 $12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\"why\":%s}\n", q($1), q($2), q(substr($12, 8)); next }
+$12 ~ /^note:/ { printf "{\"type\":\"note\",\"host\":%s,\"source\":%s,\"why\":%s,\"temps_from\":\"bmc\"}\n", q($1), q($2), q(substr($12, 6)); next }
 { ns2++; if ($12 != "-") fl++
   printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"min_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($13), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
 END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'

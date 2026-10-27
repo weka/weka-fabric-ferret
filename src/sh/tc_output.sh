@@ -4,7 +4,9 @@
 # name, first match wins: inlet/ambient; VRM/PSU/board/FPGA/HMC/HSC/PLX/PEX/PCH/SAS other; nic/aoc/ocp/cx<n>/port
 # (so an HGX ConnectX is a NIC); gpu/hbm/nvlink/nvsw; nvme/ssd/m.2/drive; dimm/mem; cpu/proc/soc; else other.
 # hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
-# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged).
+# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged). The data rows come before the nodata rows
+# (the spine sorts them so): a gpu nodata row on a host whose BMC rows were typed gpu (HGX GPU, HBM, NVLink) becomes
+# note: instead, since the BMC has that host's GPU temperatures; a note is not a no-data (counts, verdict, Not read).
 TYPE_AWK='
 #@awk tc_type'
 
@@ -20,7 +22,9 @@ SRC_AWK='#@awk tc_src'
 # Crit Flag" (no-data rows left out; the flag is always the last column)
 VIEW_AWK='#@awk tc_view'
 
-# the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data host and source
+# the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data source and reason (hosts
+# with the same source and reason share one counted line, up to 8 named; each host's own row is in the jsonl, md and
+# html), then the notes (gpu nodata covered by the BMC)
 print_summary() {
     local ts=$WORK/temps_summary.txt
     echo ""
@@ -31,11 +35,16 @@ print_summary() {
         echo "  Flagged sensors:"
         { head -n 1 "$WORK/view"; awk 'NR > 1 && $NF != "-"' "$WORK/view" | sort -k${fk},${fk} -k${mk},${mk}nr; } | column -t | sed 's/^/    /'
     fi
-    awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts" | sort
+    awk 'NR > 1 && $12 ~ /^(nodata|note):/ { k = substr($12, 1, 4) SUBSEP $2 SUBSEP substr($12, index($12, ":") + 1)
+            if (!(k in c)) kord[++nk] = k; c[k]++; if (c[k] <= 8) hl[k] = hl[k] " " $1 }
+        END { for (i = 1; i <= nk; i++) { k = kord[i]; split(k, p, SUBSEP); more = (c[k] > 8 ? " and " (c[k] - 8) " more" : "")
+                if (p[1] == "note") printf "  NOTE: %d host(s) gave no nvidia-smi reading (%s); their GPU temperatures come from the BMC (HGX GPU, HBM, NVLink):%s%s\n", c[k], p[3], hl[k], more
+                else if (c[k] == 1) printf "  NO TEMPERATURE DATA:%s %s (%s)\n", hl[k], p[2], p[3]
+                else printf "  NO TEMPERATURE DATA: %s (%s): %d hosts:%s%s\n", p[2], p[3], c[k], hl[k], more } }' "$ts" | sort
     echo ""
 }
 
-# one JSON object per line: run, host (one per target), sample, reading, sensor (the summary), nodata, result.
+# one JSON object per line: run, host (one per target), sample, reading, sensor (the summary), nodata, note, result.
 # Strings are already [A-Za-z0-9_.:=-] (the reader and clean() map the rest to _); q() escapes anyway.
 JSONL_AWK='
 #@awk tc_jsonl'
