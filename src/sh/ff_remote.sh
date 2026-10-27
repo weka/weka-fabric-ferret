@@ -1,8 +1,14 @@
 # ---------- ssh ----------
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
-rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" "$t" "$@"; }
-rbash() { local t=$1; shift; ssh "${SSH_OPTS[@]}" "$t" $SUDO bash -s -- "$@"; }
+# TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
+rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
+# rbash [-T secs] target args...: stdin as a bash script on the target, under SUDO; -T: cut off after secs
+rbash() {
+    local -a to=(); [[ $1 == -T ]] && { to=(timeout "$2"); shift 2; }
+    local t=$1; shift
+    "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" $SUDO bash -s -- "$@"
+}
 
 # Discovery: raw facts only, parsed locally.
 read -r -d '' DISCOVER_SCRIPT <<'EOF'

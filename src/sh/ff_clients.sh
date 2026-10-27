@@ -90,13 +90,13 @@ cl_run() {
     if [[ $mode == udp ]]; then   # as run_path: the largest datagram neither end's MTU fragments
         local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))
-        ( out=$(timeout $(( FF_UDP_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+        ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "$from" \
                   "$src" "$dst" "$port" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
           echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &
         return
     fi
-    ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+    ( out=$(rbash -T $(( FF_DURATION + 30 )) "$from" \
               "$src" "$dst" "$port" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
       echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &

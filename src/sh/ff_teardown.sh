@@ -12,7 +12,7 @@ stop_servers() {
 save_state() {
     [[ -n $STATE_FILE ]] || return 0
     declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG CLI SSH_OPTS SUDO \
-        FF_SSH_USER 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+        FF_SSH_USER TL 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
 cleanup() {
@@ -21,7 +21,7 @@ cleanup() {
     stop_servers
     [[ -n $LOCKED ]] && lock_all release
     for k in "${T_TARGET[@]}" "${!REACH_ONLY[@]}"; do
-        ssh -O exit -o "ControlPath=$SOCKET_DIR/%C" -l "$FF_SSH_USER" "$k" >> "$WORK/cleanup.log" 2>&1 &
+        ssh -O exit -o "ControlPath=$SOCKET_DIR/%C" -l "${TL[$k]:-$FF_SSH_USER}" "$k" >> "$WORK/cleanup.log" 2>&1 &
     done
     wait
     if [[ -z $DONE ]]; then

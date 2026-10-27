@@ -47,7 +47,7 @@ collect_sysinfo() {
     log "System info: capturing on $(( ${#ELIG[@]} + ${#CLI[@]} )) hosts, at most ${FF_SYSINFO_TIMEOUT}s each (bundle: sysinfo/<host>/)..."
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        ( timeout "$FF_SYSINFO_TIMEOUT" ssh "${SSH_OPTS[@]}" "${T_TARGET[$k]}" $SUDO bash -s -- $(host_nics $k) \
+        ( rbash -T "$FF_SYSINFO_TIMEOUT" "${T_TARGET[$k]}" $(host_nics $k) \
               <<<"$SYSINFO_SCRIPT" > "$WORK/si.$k" 2>> "$RUNLOG_SSH"; echo $? > "$WORK/si_rc.$k" ) &
     done
     wait

@@ -99,13 +99,13 @@ run_path() {
     if [[ $mode == udp ]]; then
         local m1=${RMTU[$sk,$sr]:-1500} m2=${RMTU[$dk,$dr]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))   # largest datagram that needs no fragmenting
-        ( out=$(timeout $(( FF_UDP_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "${T_TARGET[$sk]}" $SUDO bash -s -- \
+        ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "${T_TARGET[$sk]}" \
                   "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
           echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
         return
     fi
-    ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "${T_TARGET[$sk]}" $SUDO bash -s -- \
+    ( out=$(rbash -T $(( FF_DURATION + 30 )) "${T_TARGET[$sk]}" \
               "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
       echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &

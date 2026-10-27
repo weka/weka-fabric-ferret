@@ -252,17 +252,19 @@ main() {
     [[ -n $dur ]] && FF_DURATION=$dur
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
-    # -t FILE (the format thermals_capture.sh reads): backend and client rows, one login (FF_SSH_USER) for now
-    local -a TF_BE=() TF_CL=()
+    # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own login (TL, keyed by
+    # target); row passwords and credential rows not yet
+    local -a TF_BE=() TF_CL=(); declare -gA TL=()
     if [[ -n $tfile ]]; then
         [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
         declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
         TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
         load_target_file "$tfile" "$FF_SSH_USER"
-        local k one="fabric_ferret.sh takes one login (FF_SSH_USER); row credentials come in a later version"
+        local k one="fabric_ferret.sh takes a login per row, but no row password or credential row (* or a glob) yet"
         (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
         for k in "${!TARGETS[@]}"; do
-            [[ ${T_LINE[$k]} == default ]] || [[ ${T_LOGIN[$k]} == "$FF_SSH_USER" && -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
+            [[ -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
+            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
         (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
@@ -329,6 +331,7 @@ main() {
         exit 0
     fi
     TARGETS+=("${CL_T[@]}")
+    local t; for t in "${TARGETS[@]}"; do [[ -n ${TL[$t]} ]] || TL[$t]=$FF_SSH_USER; done   # FF_HOSTS/FF_CLIENTS: FF_SSH_USER
 
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
@@ -344,7 +347,7 @@ main() {
     SUDO=""; [[ $FF_SSH_USER == root ]] || SUDO="sudo -n"
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=15m -o "ControlPath=$SOCKET_DIR/%C"
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
-              -o ServerAliveInterval=15 -l "$FF_SSH_USER")
+              -o ServerAliveInterval=15)   # the login is per target (TL, rsh/rbash)
     declare -gA T_TARGET T_HOST DISC RNIC RIP RMTU RSTATE STARTED REACH_ONLY DOWN_IP SI_CUT
     declare -gA IS_CL CN CNIC CIP CMTU CSTATE   # clients: k -> 1, data NIC count; (k,j) -> NIC, IP, MTU, state
     declare -ga RAIL_MTU=()   # per rail: highest MTU among its usable hosts
@@ -403,7 +406,7 @@ main() {
             | sort | uniq -c | sort -rn | sed 's/^/#   /' >&2
         cp "$WORK/unreachable.txt" "$COLLECT_DIR/unreachable.txt"
     fi
-    (( ${#REACH[@]} > 0 )) || die "no target answered ssh as $FF_SSH_USER"
+    (( ${#REACH[@]} > 0 )) || die "no target answered ssh (logins tried: $(printf '%s\n' "${TL[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//'))"
 
     # --- 2. discovery ---
     log "Discovering ${#REACH[@]} hosts..."

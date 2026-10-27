@@ -440,8 +440,14 @@ WEKA_BUSY_CHECK='[ -n "$(command -v weka)" ] || exit 1; s=$(weka local ps --no-h
 # ---------- ssh ----------
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
-rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" "$t" "$@"; }
-rbash() { local t=$1; shift; ssh "${SSH_OPTS[@]}" "$t" $SUDO bash -s -- "$@"; }
+# TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
+rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
+# rbash [-T secs] target args...: stdin as a bash script on the target, under SUDO; -T: cut off after secs
+rbash() {
+    local -a to=(); [[ $1 == -T ]] && { to=(timeout "$2"); shift 2; }
+    local t=$1; shift
+    "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" $SUDO bash -s -- "$@"
+}
 
 # Discovery: raw facts only, parsed locally.
 read -r -d '' DISCOVER_SCRIPT <<'EOF'
@@ -1257,13 +1263,13 @@ run_path() {
     if [[ $mode == udp ]]; then
         local m1=${RMTU[$sk,$sr]:-1500} m2=${RMTU[$dk,$dr]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))   # largest datagram that needs no fragmenting
-        ( out=$(timeout $(( FF_UDP_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "${T_TARGET[$sk]}" $SUDO bash -s -- \
+        ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "${T_TARGET[$sk]}" \
                   "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
           echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
         return
     fi
-    ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "${T_TARGET[$sk]}" $SUDO bash -s -- \
+    ( out=$(rbash -T $(( FF_DURATION + 30 )) "${T_TARGET[$sk]}" \
               "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
       echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}" >> "$PHASE_OUT" ) &
@@ -1336,7 +1342,7 @@ collect_sysinfo() {
     log "System info: capturing on $(( ${#ELIG[@]} + ${#CLI[@]} )) hosts, at most ${FF_SYSINFO_TIMEOUT}s each (bundle: sysinfo/<host>/)..."
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        ( timeout "$FF_SYSINFO_TIMEOUT" ssh "${SSH_OPTS[@]}" "${T_TARGET[$k]}" $SUDO bash -s -- $(host_nics $k) \
+        ( rbash -T "$FF_SYSINFO_TIMEOUT" "${T_TARGET[$k]}" $(host_nics $k) \
               <<<"$SYSINFO_SCRIPT" > "$WORK/si.$k" 2>> "$RUNLOG_SSH"; echo $? > "$WORK/si_rc.$k" ) &
     done
     wait
@@ -1825,13 +1831,13 @@ cl_run() {
     if [[ $mode == udp ]]; then   # as run_path: the largest datagram neither end's MTU fragments
         local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))
-        ( out=$(timeout $(( FF_UDP_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+        ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "$from" \
                   "$src" "$dst" "$port" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
           echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &
         return
     fi
-    ( out=$(timeout $(( FF_DURATION + 30 )) ssh "${SSH_OPTS[@]}" "$from" $SUDO bash -s -- \
+    ( out=$(rbash -T $(( FF_DURATION + 30 )) "$from" \
               "$src" "$dst" "$port" "$FF_STREAMS" "$FF_DURATION" "$FF_TOS" <<<"$IPERF_SCRIPT" 2>&1)
       [[ -n $out ]] || out="ERROR timeout or ssh failure"
       echo "$src,$dst,${out%%$'\n'*} share:$share" >> "$PHASE_OUT" ) &
@@ -2063,7 +2069,7 @@ stop_servers() {
 save_state() {
     [[ -n $STATE_FILE ]] || return 0
     declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG CLI SSH_OPTS SUDO \
-        FF_SSH_USER 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+        FF_SSH_USER TL 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
 cleanup() {
@@ -2072,7 +2078,7 @@ cleanup() {
     stop_servers
     [[ -n $LOCKED ]] && lock_all release
     for k in "${T_TARGET[@]}" "${!REACH_ONLY[@]}"; do
-        ssh -O exit -o "ControlPath=$SOCKET_DIR/%C" -l "$FF_SSH_USER" "$k" >> "$WORK/cleanup.log" 2>&1 &
+        ssh -O exit -o "ControlPath=$SOCKET_DIR/%C" -l "${TL[$k]:-$FF_SSH_USER}" "$k" >> "$WORK/cleanup.log" 2>&1 &
     done
     wait
     if [[ -z $DONE ]]; then
@@ -2151,17 +2157,19 @@ main() {
     [[ -n $dur ]] && FF_DURATION=$dur
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
-    # -t FILE (the format thermals_capture.sh reads): backend and client rows, one login (FF_SSH_USER) for now
-    local -a TF_BE=() TF_CL=()
+    # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own login (TL, keyed by
+    # target); row passwords and credential rows not yet
+    local -a TF_BE=() TF_CL=(); declare -gA TL=()
     if [[ -n $tfile ]]; then
         [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
         declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
         TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
         load_target_file "$tfile" "$FF_SSH_USER"
-        local k one="fabric_ferret.sh takes one login (FF_SSH_USER); row credentials come in a later version"
+        local k one="fabric_ferret.sh takes a login per row, but no row password or credential row (* or a glob) yet"
         (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
         for k in "${!TARGETS[@]}"; do
-            [[ ${T_LINE[$k]} == default ]] || [[ ${T_LOGIN[$k]} == "$FF_SSH_USER" && -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
+            [[ -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
+            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
         (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
@@ -2228,6 +2236,7 @@ main() {
         exit 0
     fi
     TARGETS+=("${CL_T[@]}")
+    local t; for t in "${TARGETS[@]}"; do [[ -n ${TL[$t]} ]] || TL[$t]=$FF_SSH_USER; done   # FF_HOSTS/FF_CLIENTS: FF_SSH_USER
 
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
@@ -2243,7 +2252,7 @@ main() {
     SUDO=""; [[ $FF_SSH_USER == root ]] || SUDO="sudo -n"
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=15m -o "ControlPath=$SOCKET_DIR/%C"
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
-              -o ServerAliveInterval=15 -l "$FF_SSH_USER")
+              -o ServerAliveInterval=15)   # the login is per target (TL, rsh/rbash)
     declare -gA T_TARGET T_HOST DISC RNIC RIP RMTU RSTATE STARTED REACH_ONLY DOWN_IP SI_CUT
     declare -gA IS_CL CN CNIC CIP CMTU CSTATE   # clients: k -> 1, data NIC count; (k,j) -> NIC, IP, MTU, state
     declare -ga RAIL_MTU=()   # per rail: highest MTU among its usable hosts
@@ -2302,7 +2311,7 @@ main() {
             | sort | uniq -c | sort -rn | sed 's/^/#   /' >&2
         cp "$WORK/unreachable.txt" "$COLLECT_DIR/unreachable.txt"
     fi
-    (( ${#REACH[@]} > 0 )) || die "no target answered ssh as $FF_SSH_USER"
+    (( ${#REACH[@]} > 0 )) || die "no target answered ssh (logins tried: $(printf '%s\n' "${TL[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//'))"
 
     # --- 2. discovery ---
     log "Discovering ${#REACH[@]} hosts..."
