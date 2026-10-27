@@ -142,7 +142,7 @@ client_phase() {
     (( FF_SKIP_IPERF )) && return 0
     phase_end $P
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
-    (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
+    (( errs > 0 )) && { log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above):"; log_hist "$WORK"/cphase.$ITER.$P.*; }
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
     collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"; collect_temps "iter${ITER}_$P"
     hostctr_delta "iter${ITER}_client$P" "$pre.hc" "$post.hc"; hc_log "client phase $P" "$post.hc"
@@ -182,7 +182,7 @@ client_udp_waves() {
     done
     phase_end $U
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$U.* | grep -c ",ERROR")
-    (( errs > 0 )) && log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above)"
+    (( errs > 0 )) && { log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above):"; log_hist "$WORK"/cphase.$ITER.$U.*; }
     collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
     collect_temps "iter${ITER}_$U"
     udp_close $U "$a" "$b"

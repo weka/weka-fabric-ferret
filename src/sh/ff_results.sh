@@ -38,7 +38,8 @@ udp_phases() {
         else xwaves "$UDP_RESULTS" udp; fi
         phase_end $PHASE
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
-        local b=$WORK/udp.$u
+        local errs b=$WORK/udp.$u; errs=$(grep -c ',ERROR' "$PHASE_OUT")
+        (( errs > 0 )) && { log "WARNING: $errs UDP runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
         collect_temps "iter${ITER}_$PHASE"
         udp_close $PHASE "$a" "$b"

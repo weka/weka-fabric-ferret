@@ -160,6 +160,18 @@ log() { echo "# $*" >&2; }
 phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); }
 phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }
 phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
+# err_hist file...: the ERROR rows ("src,dst,ERROR rc=N iperf3: error - <reason>") grouped by the reason, as
+# '<runs> x "<reason>" to <N> destination(s) (<first 4> ...)', one line per reason, most runs first; a row without
+# iperf3's prefix keeps its own text. Frank's 10-27 run: 138 rows, one reason, 48 destinations, 9 that answered.
+err_hist() {
+    cat "$@" | tr -s ' ' | awk -F, '$3 ~ /^ *ERROR/ {
+        s = $0; sub(/^[^,]*,[^,]*, */, "", s); i = index(s, "iperf3: error - ")
+        if (i) s = substr(s, i + 16); else sub(/^ERROR *(rc=[0-9]+)? */, "", s)
+        if (!(s in n)) ord[++no] = s
+        n[s]++; if (!(($2, s) in seen)) { seen[$2, s] = 1; nd[s]++; if (nd[s] <= 4) dl[s] = dl[s] " " $2 } }
+        END { for (i = 1; i <= no; i++) { s = ord[i]; printf "%d x \"%s\" to %d destination%s (%s%s)\n", n[s], s, nd[s], (nd[s] == 1 ? "" : "s"), substr(dl[s], 2), (nd[s] > 4 ? " ..." : "") } }' | sort -t x -k1,1nr
+}
+log_hist() { err_hist "$@" | sed 's/^/#   /' >&2; }
 
 # ---------- target expansion (pure bash, no ssh) ----------
 
@@ -1748,7 +1760,8 @@ udp_phases() {
         else xwaves "$UDP_RESULTS" udp; fi
         phase_end $PHASE
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
-        local b=$WORK/udp.$u
+        local errs b=$WORK/udp.$u; errs=$(grep -c ',ERROR' "$PHASE_OUT")
+        (( errs > 0 )) && { log "WARNING: $errs UDP runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
         collect_temps "iter${ITER}_$PHASE"
         udp_close $PHASE "$a" "$b"
@@ -1951,7 +1964,7 @@ client_phase() {
     (( FF_SKIP_IPERF )) && return 0
     phase_end $P
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$P.* | grep -c ",ERROR")
-    (( errs > 0 )) && log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above)"
+    (( errs > 0 )) && { log "WARNING: $errs client runs in phase $P returned no result (lines with ERROR above):"; log_hist "$WORK"/cphase.$ITER.$P.*; }
     collect_drops "$post" "${ELIG[@]}" "${CLI[@]}"
     collect_counters "$HOSTCTR_SCRIPT" "$post.hc"; collect_counters "$PRIO_SCRIPT" "$post.prio"; collect_temps "iter${ITER}_$P"
     hostctr_delta "iter${ITER}_client$P" "$pre.hc" "$post.hc"; hc_log "client phase $P" "$post.hc"
@@ -1993,7 +2006,7 @@ client_udp_waves() {
     done
     phase_end $U
     local errs; errs=$(cat "$WORK"/cphase.$ITER.$U.* | grep -c ",ERROR")
-    (( errs > 0 )) && log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above)"
+    (( errs > 0 )) && { log "WARNING: $errs client runs in phase $U returned no result (lines with ERROR above):"; log_hist "$WORK"/cphase.$ITER.$U.*; }
     collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
     collect_temps "iter${ITER}_$U"
     udp_close $U "$a" "$b"
@@ -2831,7 +2844,7 @@ main() {
                 else xwaves "$RESULTS"; fi
                 phase_end $PHASE
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
-                [[ $errs -gt 0 ]] && log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above)"
+                [[ $errs -gt 0 ]] && { log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
                 collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.$PHASE"; hostctr_delta "iter${ITER}_p$PHASE" "$hc_prev" "$WORK/hc.$PHASE"; hc_prev=$WORK/hc.$PHASE
                 collect_temps "iter${ITER}_p$PHASE"
                 hc_log "phase $PHASE" "$WORK/hc.$PHASE"
@@ -2963,7 +2976,8 @@ main() {
         fi
         echo ""
         echo "  Hosts on the rails: ${#ELIG[@]}, $( (( FF_SKIP_IPERF )) && echo "with a passed path check: $(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)" || echo "with a result: $(grep 'Gbits/sec' "$RESULTS" | awk -F'[, ]+' 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" - | sort -u | grep -c .)") | Rails unusable: $(awk 'NR > 1 {for (i = 6; i <= NF; i += 4) n += ($i != "ok")} END {print n + 0}' "$COLLECT_DIR/rails.txt") (rails.txt) | TCP paths skipped: $(awk '$2 ~ /^[12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt)"
-        echo "  Runs with no result: $(grep -c ',ERROR' "$RESULTS")"
+        echo "  Runs with no result: $(grep -c ',ERROR' "$RESULTS")$( grep -q ',ERROR' "$RESULTS" && echo " (iperf3's reason, runs, destinations):")"
+        err_hist "$RESULTS" | sed 's/^/    /'
         echo "  Directed NIC paths planned: ${#DIRECTED[@]} of $DIRECTED_TOTAL$( (( ${#DIRECTED[@]} < DIRECTED_TOTAL )) && echo " (all of them: FF_ITER=all)")"
         if [[ $FF_UDP == 1 ]]; then
             echo ""
@@ -2982,7 +2996,8 @@ main() {
             else
                 echo "  No UDP results collected."
             fi
-            echo "  UDP runs with no result: $(grep -c ',ERROR' "$UDP_RESULTS")"
+            echo "  UDP runs with no result: $(grep -c ',ERROR' "$UDP_RESULTS")$( grep -q ',ERROR' "$UDP_RESULTS" && echo " (iperf3's reason, runs, destinations):")"
+            err_hist "$UDP_RESULTS" | sed 's/^/    /'
         fi
         if (( ${#CLI[@]} )); then
             echo ""
@@ -2998,6 +3013,7 @@ main() {
                 echo "Clients: bandwidth not tested (FF_SKIP_IPERF=1). Client path checks: $(wc -l < "$WORK/cpaths_ok" | tr -d ' ') of $CL_PLANNED OK; the rest are in paths_excluded.txt."
             else echo "  No client iperf3 results collected."; fi
             echo "  Client runs with no result: $(grep -c ',ERROR' "$CRESULTS") | client paths skipped: $(awk '$2 ~ /^[CF][12]$/' "$PATH_EXCL" | wc -l | tr -d ' ') (paths_excluded.txt) | undeclared client routes: $(awk '$6 == "undeclared"' "$COLLECT_DIR/client_routes.txt" | wc -l | tr -d ' '), clients with routes unread: $(awk '$6 == "unread"' "$COLLECT_DIR/client_routes.txt" | wc -l | tr -d ' ') (client_routes.txt)"
+                err_hist "$CRESULTS" | sed 's/^/    /'
         fi
         # leaves that serve clients and backends (LLDP)
         if (( ${#CLI[@]} )); then

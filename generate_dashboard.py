@@ -470,6 +470,26 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <table class="table table-sm table-striped"><thead><tr><th>Run</th><th>From</th><th>To</th><th>Gbps</th><th>Lost/Sent</th><th>Loss %</th>
 <th>Sender TX</th><th>Rx socket</th><th>NIC</th><th>Backlog</th><th>Unaccounted</th><th>Expected (overload)</th><th>Beyond expected</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
+    # runs with no result, grouped by iperf3's reason (the collector's err_hist): runs, distinct destinations, the
+    # first four, the phases; Frank's 10-27 run: 138 runs, one reason, 48 destinations that never answered
+    run_errors_html = ''
+    errs = [(e['phase'], e['dst'], e['why']) for e in data.get('run_errors', [])] + \
+           [(str(u['phase']), u.get('dst', ''), _err_reason(u['error'])) for u in data.get('udp', []) if 'error' in u]
+    if errs:
+        groups = {}
+        for ph, dst, why in errs:
+            g = groups.setdefault(why, {'runs': 0, 'dsts': [], 'phases': set()})
+            g['runs'] += 1
+            g['phases'].add(ph)
+            if dst not in g['dsts']:
+                g['dsts'].append(dst)
+        rows = ''.join(f"<tr><td>{g['runs']}</td><td>{escape(why)}</td><td>{len(g['dsts'])}</td>"
+                       f"<td>{escape(' '.join(g['dsts'][:4]))}{' …' if len(g['dsts']) > 4 else ''}</td><td>{escape(', '.join(sorted(g['phases'])))}</td></tr>"
+                       for why, g in sorted(groups.items(), key=lambda kv: -kv[1]['runs']))
+        run_errors_html = f"""<div class="card mb-3"><div class="card-header">Runs with no result — {len(errs)} runs, by iperf3's reason (every row is in iperf3_results.txt / iperf3_udp_results.txt)</div>
+<div class="card-body"><table class="table table-sm table-striped">
+<thead><tr><th>Runs</th><th>Reason</th><th>Destinations</th><th>First destinations</th><th>Phases</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
+
     not_tested_html = ''
     if data['not_tested']:
         rows = ''.join(f"<tr><td>{escape(n['kind'])}</td><td>{escape(n['what'])}</td><td>{escape(n['why'])}</td></tr>"
@@ -555,6 +575,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 {compare_html}
 {preflight_html}
 {fec_html}
+{run_errors_html}
 {not_tested_html}
 {udp_html}
 
@@ -1955,6 +1976,13 @@ def _ip_speeds(results, ip_rail):
     return same, xonly
 
 
+def _err_reason(text):
+    """iperf3's reason out of a run's error text: the part after 'iperf3: error - ', else the text less 'ERROR rc=N'."""
+    t = re.sub(r'\s+', ' ', text).strip()
+    i = t.find('iperf3: error - ')
+    return t[i + len('iperf3: error - '):] if i >= 0 else re.sub(r'^ERROR\s*(rc=\d+\s*)?', '', t)
+
+
 def _iperf_row(line):
     """One iperf3 receiver [SUM] line ('src,dst,[SUM] ... receiver retransmits:N cpu:S/R [share:K]'), or None."""
     m = re.match(r'^(\S+),(\S+),\[SUM\]\s+\S+\s+sec\s+([\d.]+)\s+([KMGTP]?)Bytes\s+([\d.]+)\s+Gbits/sec\s+receiver\s*(?:retransmits:(\d+))?(?:\s+cpu:(\S+))?', line)
@@ -2113,6 +2141,7 @@ def parse_tar_archive(filepath):
         'down_ips': [],
         'ping_failures': [],
         'iperf_results': [],
+        'run_errors': [],   # backend runs with no result (src, dst, iperf3's reason); the UDP ones ride in 'udp'
         'nic_inventory': {'total': 0, 'at_line': 0, 'not_line': [], 'unknown': 0, 'unknown_list': []},
         'fec_top': [],
         'slow_ips': [],
@@ -2252,7 +2281,8 @@ def parse_tar_archive(filepath):
                         'sock': sock, 'nic': nic, 'back': back,
                         'unacc': unacc, 'exp': expd, 'beyond': max(0, unacc - expd)})
         elif line.strip() and ',ERROR' in line:
-            udp.append({'iter': it, 'phase': ph, 'error': line.split(',', 2)[2]})
+            p = line.split(',', 2)
+            udp.append({'iter': it, 'phase': ph, 'src': p[0], 'dst': p[1] if len(p) > 1 else '', 'error': p[2] if len(p) > 2 else ''})
     data['udp'] = udp
     data['iperf3_versions'] = [l.split() for l in read_file('iperf3_versions.txt').splitlines() if l.split()]
 
@@ -2300,6 +2330,10 @@ def parse_tar_archive(filepath):
         r = _iperf_row(line)
         if r:
             data['iperf_results'].append({'iteration': cur_iter, 'phase': cur_phase, 'wave': cur_wave, **r})
+        elif ',ERROR' in line:   # a run with no result: "src,dst,ERROR rc=N iperf3: error - <reason>"
+            p = line.split(',', 2)
+            data['run_errors'].append({'iteration': cur_iter, 'phase': str(cur_phase), 'wave': cur_wave, 'src': p[0],
+                                       'dst': p[1] if len(p) > 1 else '', 'why': _err_reason(p[2] if len(p) > 2 else '')})
 
     # host-side receive table (collector host_rx.txt; absent before system info capture)
     rx = [l.split() for l in read_file('host_rx.txt').splitlines() if l.strip()]
