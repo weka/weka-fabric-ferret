@@ -2017,6 +2017,8 @@ def _nic_rows(data, ip_to_host, ip_to_nic):
                               'retr': 0, 'gb': 0, 'bytes': 0, 'exp': None, 'mtu': _int(mtu) or 1500, 'state': state or 'ok'})
     # every expected data NIC (rails.txt, clients.txt), an unusable one too; older archives: the IPs seen
     for host, x, nic, ip, mtu, state in data.get('backend_nics', []):
+        if re.match(r'no_(NIC|IPv4_on)_', state or ''):   # a rail the host lacks or does not address: no row (as the collector)
+            continue
         row(ip if ip != 'none' else f'none_{host}_{x}', 'backend', host, nic, mtu, state, x)
     for ip in ipr:
         if ip != 'none':

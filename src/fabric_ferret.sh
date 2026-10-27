@@ -582,7 +582,10 @@ main() {
             echo "$row"
         done | sort -V
     } | column -t > "$COLLECT_DIR/rails.txt"
-    local bad_rails; bad_rails=$(awk 'NR>1 {for (i = 6; i <= NF; i += 4) if ($i != "ok") {print; next}}' "$COLLECT_DIR/rails.txt")
+    # a rail a host lacks (no NIC x) or does not address (no IPv4 on x) is a host property, not a finding: one counted
+    # line per rail and state, the first 8 hosts named (Frank's 10-27 fleet: 112 hosts, two such rails each); a host
+    # with any other bad rail (link DOWN, no address in the subnet, AMBIGUOUS) keeps its full row
+    local bad_rails; bad_rails=$(awk '#@awk ff_main.bad_rails' "$COLLECT_DIR/rails.txt")
     log "${#ELIG[@]} hosts on the rails. Rail NIC names and MTUs seen (count, NIC, MTU):"
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do echo "rail_$(rail_letter $r) ${RNIC[$k,$r]} mtu=${RMTU[$k,$r]:--}"; done; done \
         | sort | uniq -c | sed 's/^/#   /' >&2
@@ -954,9 +957,10 @@ main() {
             awk -v cg="${FF_CLIENT_GBPS:-0}" 'NR > 1 && $4 != "none" {s = $7; sub(/Mb\/s/, "", s); print $4, $1, $3, (cg > 0 ? cg : (s ~ /^[0-9]+$/ ? s / 1000 : 0))}' \
                 "$COLLECT_DIR/clients.txt" > "$WORK/cmap"
         else : > "$WORK/cmap"; fi
-        # every expected data NIC gets a row, an unusable one too (no address, link down): key ip line_gbps mtu state
+        # every expected data NIC gets a row, an unusable one too (no address, link down): key ip line_gbps mtu state;
+        # a rail the host lacks or does not address is no row (the rails block counted it; rails.txt keeps it)
         local k r; : > "$WORK/cres0"
-        { for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
+        { for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do case ${RSTATE[$k,$r]} in "no NIC "*|"no IPv4 on "*) continue ;; esac
               echo "$( [[ ${RIP[$k,$r]} == none ]] && echo "none_${T_HOST[$k]}_$(rail_letter $r)" || echo "${RIP[$k,$r]}") backend ${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r) ${LINE[r]:-0} ${RMTU[$k,$r]:-1500} ${RSTATE[$k,$r]// /_}"; done; done
           (( ${#CLI[@]} )) && awk -v cg="${FF_CLIENT_GBPS:-0}" '#@awk ff_main.client_map' "$COLLECT_DIR/clients.txt"; } > "$WORK/dnmap"
         if grep -q 'Gbits/sec' "$RESULTS" || { (( ${#CLI[@]} )) && grep -q 'Gbits/sec' "$CRESULTS"; }; then
