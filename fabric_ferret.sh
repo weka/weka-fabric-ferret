@@ -368,6 +368,19 @@ load_target_file() {
     fi
 }
 
+# ---------- passwords: one-use fifos read by an SSH_ASKPASS helper (both tools) ----------
+
+# write_askpass path: ssh's SSH_ASKPASS helper (as wekatester's): no to a new host key, nothing for a key passphrase,
+# else ONE line from the fifo $THERMCAP_PW_FIFO names, once (a second prompt, a wrong password, gets nothing)
+write_askpass() {
+    printf '%s\n' '#!/bin/sh' 'case "$1" in' '    *"continue connecting"*|*"(yes/no"*) echo no; exit 0 ;;' '    *[Pp]assphrase*) exit 1 ;;' 'esac' \
+        '[ ! -e "$THERMCAP_PW_FIFO.used" ] || exit 1' ': > "$THERMCAP_PW_FIFO.used"' 'IFS= read -r pw < "$THERMCAP_PW_FIFO"' "printf '%s\\n' \"\$pw\"" > "$1"
+    chmod 700 "$1" || die "cannot make the askpass helper executable"
+}
+# pwfifo name pw: a one-use fifo in AUTH holding pw, open read-write on fd 4 (a fifo drops what it holds when its last
+# fd closes; the write can't block). The pw goes in by printf (a builtin: no argv). Caller: exec 4>&-; rm the fifo.
+pwfifo() { local f=$AUTH/$1.fifo; rm -f "$f" "$f.used"; mkfifo -m 600 "$f" || return 1; exec 4<>"$f"; printf '%s\n' "$2" >&4; PWFIFO=$f; }
+
 # ---------- rail spec ----------
 
 # Rails: RAIL_SPEC[r] = rail r's CIDRs (space separated) or NIC name; NR rails, labelled A, B, C...
@@ -442,6 +455,17 @@ WEKA_BUSY_CHECK='[ -n "$(command -v weka)" ] || exit 1; s=$(weka local ps --no-h
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 # TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
 rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
+# sweep_ssh target cmd...: the call that opens the target's ssh master. A password login (TPW) reads its password here,
+# through the askpass helper from a one-use fifo (BatchMode=no first: ssh keeps an option's first value); every later
+# call rides the master under BatchMode=yes, so a lost master fails loud instead of prompting
+sweep_ssh() {
+    local t=$1 rc; shift
+    [[ -n ${TPW[$t]+x} ]] || { rsh "$t" "$@"; return; }
+    pwfifo "s.$BASHPID" "${TPW[$t]}" || return 255
+    THERMCAP_PW_FIFO=$PWFIFO SSH_ASKPASS=$AUTH/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-none} \
+        $SETSID ssh -n -o BatchMode=no -o NumberOfPasswordPrompts=1 "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; rc=$?
+    exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
+}
 # rbash [-T secs] target args...: stdin as a bash script on the target, under SUDO; -T: cut off after secs
 rbash() {
     local -a to=(); [[ $1 == -T ]] && { to=(timeout "$2"); shift 2; }
@@ -2159,17 +2183,16 @@ main() {
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own login (TL, keyed by
     # target); row passwords and credential rows not yet
-    local -a TF_BE=() TF_CL=(); declare -gA TL=()
+    local -a TF_BE=() TF_CL=(); declare -gA TL=() TPW=()
     if [[ -n $tfile ]]; then
         [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
         declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
         TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
         load_target_file "$tfile" "$FF_SSH_USER"
-        local k one="fabric_ferret.sh takes a login per row, but no row password or credential row (* or a glob) yet"
+        local k one="fabric_ferret.sh takes a login and a password per row, but no credential row (* or a glob) yet"
         (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
         for k in "${!TARGETS[@]}"; do
-            [[ -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
-            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}
+            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}; [[ -n ${T_PW[$k]+x} ]] && TPW[${TARGETS[$k]}]=${T_PW[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
         (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
@@ -2241,8 +2264,18 @@ main() {
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
+    # a password login (a -t row's pw): read once, where its ssh master opens (the sweep), through the askpass helper from a
+    # one-use fifo; never in an environment variable, argv or the state file. Unattended from OpenSSH 8.4, else setsid.
+    SETSID=; local ver
+    if (( ${#TPW[@]} )); then
+        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
+        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
+            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
+        fi
+    fi
 
     WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
+    AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; (( ${#TPW[@]} )) && write_askpass "$AUTH/askpass"
     SOCKET_DIR=$(mktemp -d /tmp/ff_ssh.XXXXXX)
     COLLECT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dp_validation_XXXXXX")
     RAW_DIR=$COLLECT_DIR/raw_per_host; mkdir -p "$RAW_DIR" "$WORK/disc" "$WORK/sweep"
@@ -2272,7 +2305,7 @@ main() {
     for i in "${!TARGETS[@]}"; do
         throttle
         t=${TARGETS[$i]}
-        ( if rsh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+        ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
     done
     wait
     # refusals under fan-out (sshd MaxStartups, kex resets) look like dead hosts: retry those slower
@@ -2289,7 +2322,7 @@ main() {
             for i in "${retry[@]}"; do
                 [[ -f $WORK/sweep/$i.ok ]] && continue
                 throttle; t=${TARGETS[$i]}
-                ( if rsh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+                ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
             done
             wait; sleep 1
         done

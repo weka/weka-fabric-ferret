@@ -3,6 +3,17 @@
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 # TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
 rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
+# sweep_ssh target cmd...: the call that opens the target's ssh master. A password login (TPW) reads its password here,
+# through the askpass helper from a one-use fifo (BatchMode=no first: ssh keeps an option's first value); every later
+# call rides the master under BatchMode=yes, so a lost master fails loud instead of prompting
+sweep_ssh() {
+    local t=$1 rc; shift
+    [[ -n ${TPW[$t]+x} ]] || { rsh "$t" "$@"; return; }
+    pwfifo "s.$BASHPID" "${TPW[$t]}" || return 255
+    THERMCAP_PW_FIFO=$PWFIFO SSH_ASKPASS=$AUTH/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-none} \
+        $SETSID ssh -n -o BatchMode=no -o NumberOfPasswordPrompts=1 "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; rc=$?
+    exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
+}
 # rbash [-T secs] target args...: stdin as a bash script on the target, under SUDO; -T: cut off after secs
 rbash() {
     local -a to=(); [[ $1 == -T ]] && { to=(timeout "$2"); shift 2; }

@@ -161,6 +161,8 @@ phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 
 #@include sh/hostfile.sh
 
+#@include sh/auth.sh
+
 #@include sh/ff_rails.sh
 
 #@include sh/ff_remote.sh
@@ -254,17 +256,16 @@ main() {
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own login (TL, keyed by
     # target); row passwords and credential rows not yet
-    local -a TF_BE=() TF_CL=(); declare -gA TL=()
+    local -a TF_BE=() TF_CL=(); declare -gA TL=() TPW=()
     if [[ -n $tfile ]]; then
         [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
         declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
         TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
         load_target_file "$tfile" "$FF_SSH_USER"
-        local k one="fabric_ferret.sh takes a login per row, but no row password or credential row (* or a glob) yet"
+        local k one="fabric_ferret.sh takes a login and a password per row, but no credential row (* or a glob) yet"
         (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
         for k in "${!TARGETS[@]}"; do
-            [[ -z ${T_PW[$k]+x} ]] || die "-t $tfile line ${T_LINE[$k]}: $one"
-            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}
+            TL[${TARGETS[$k]}]=${T_LOGIN[$k]}; [[ -n ${T_PW[$k]+x} ]] && TPW[${TARGETS[$k]}]=${T_PW[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
         (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
@@ -336,8 +337,18 @@ main() {
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
+    # a password login (a -t row's pw): read once, where its ssh master opens (the sweep), through the askpass helper from a
+    # one-use fifo; never in an environment variable, argv or the state file. Unattended from OpenSSH 8.4, else setsid.
+    SETSID=; local ver
+    if (( ${#TPW[@]} )); then
+        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
+        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
+            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
+        fi
+    fi
 
     WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
+    AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; (( ${#TPW[@]} )) && write_askpass "$AUTH/askpass"
     SOCKET_DIR=$(mktemp -d /tmp/ff_ssh.XXXXXX)
     COLLECT_DIR=$(mktemp -d "${TMPDIR:-/tmp}/dp_validation_XXXXXX")
     RAW_DIR=$COLLECT_DIR/raw_per_host; mkdir -p "$RAW_DIR" "$WORK/disc" "$WORK/sweep"
@@ -367,7 +378,7 @@ main() {
     for i in "${!TARGETS[@]}"; do
         throttle
         t=${TARGETS[$i]}
-        ( if rsh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+        ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
     done
     wait
     # refusals under fan-out (sshd MaxStartups, kex resets) look like dead hosts: retry those slower
@@ -384,7 +395,7 @@ main() {
             for i in "${retry[@]}"; do
                 [[ -f $WORK/sweep/$i.ok ]] && continue
                 throttle; t=${TARGETS[$i]}
-                ( if rsh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+                ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
             done
             wait; sleep 1
         done
