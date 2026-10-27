@@ -185,7 +185,7 @@ RESULT coverage=COMPLETE|PARTIAL|NONE hosts=t/e paths=r/p ... [clients=t/e clien
 
 COMPLETE describes coverage, not health. A COMPLETE run can still have slow or critical hosts; read the summary and the dashboard.
 
-The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `metadata.txt`, `phase_times.txt` (each phase's start and end, UTC, to line up with switch and monitoring data), `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt`, `client_routes.txt` and `client_rx.txt`.
+The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `pairing.txt` (only when a host has no partner sharing its rails or is tested on fewer rails), `metadata.txt`, `phase_times.txt` (each phase's start and end, UTC, to line up with switch and monitoring data), `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt`, `client_routes.txt` and `client_rx.txt`.
 
 ## Dashboard
 

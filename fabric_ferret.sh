@@ -1240,16 +1240,19 @@ mesh_check() {
     sed 's/^/#   /' "$WORK/mesh_anom" | head -n 10 >&2
 }
 
-# LLDP: a rail NIC whose switch most hosts reach on the other rail is cabled to the wrong rail.
+# LLDP: a rail NIC whose switch most hosts reach on the other rail is cabled to the wrong rail. A bond's
+# member rows carry the bond's IP, so the map also names it: a member is checked against its bond's rail.
 lldp_rail_check() {
     local railmap=$WORK/railmap k r
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
-        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"
+        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r) ${RIP[$k,$r]}"
     done; done > "$railmap"
     # compared with the rail most NICs on that switch use (with two rails: the other one)
     awk 'FNR == 1 {f++}
-         f == 1 {rail[$1 " " $2] = $3; rails[$3] = 1; next}
-         $4 != "unknown" && (($1 " " $2) in rail) {n++; h[n] = $1; nic[n] = $2; sw[n] = $4; rl[n] = rail[$1 " " $2]; c[$4 " " rl[n]]++}
+         f == 1 {rail[$1 " " $2] = $3; rails[$3] = 1; if ($4 != "" && $4 != "none") byip[$1 " " $4] = $3; next}
+         # a row'\''s rail: by host and NIC, else by host and IP (a bond member'\''s row carries the bond'\''s IP)
+         $4 != "unknown" {r = ""; if (($1 " " $2) in rail) r = rail[$1 " " $2]; else if (($1 " " $3) in byip) r = byip[$1 " " $3]
+                          if (r != "") {n++; h[n] = $1; nic[n] = $2; sw[n] = $4; rl[n] = r; c[$4 " " r]++}}
          END {for (i = 1; i <= n; i++) {o = ""; for (r in rails) if (r != rl[i] && (o == "" || c[sw[i] " " r] > c[sw[i] " " o])) o = r
                   if (o != "" && c[sw[i] " " o] > c[sw[i] " " rl[i]])
                       printf "%s lldp_wrong_rail rail %s NIC %s is cabled to %s, which %d other NICs reach on rail %s\n", h[i], rl[i], nic[i], sw[i], c[sw[i] " " o], o}}' \
@@ -2884,6 +2887,11 @@ main() {
         local nl; nl=$(wc -w <<<"$lone" | tr -d ' ')
         log "$nl host$( (( nl > 1 )) && echo s have || echo " has") no partner sharing $( (( nl > 1 )) && echo their || echo its) rails (not tested): $(awk '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? " " : ""), $i; if (NF > 8) printf " and %d more", NF - 8}' <<<"$lone")"
     fi
+    # pairing.txt (only when a host is tested on fewer rails or not at all): "host<TAB>why", for the dashboard's Not tested card
+    if [[ -n $JOINED$lone ]]; then
+        { [[ -n $JOINED ]] && awk -F'; ' '{for (i = 1; i <= NF; i++) { h = $i; sub(/:.*/, "", h); w = $i; sub(/^[^:]*: /, "", w); printf "%s\t%s\n", h, w }}' <<<"$JOINED"
+          for sk in $lone; do printf '%s\tno partner sharing its rails\n' "$sk"; done; } > "$COLLECT_DIR/pairing.txt"
+    fi
     # a pair's directed NIC paths (8 with two rails): cycle 1 runs half, cycle 2 (same pairings, client and server
     # swapped) the other half; with more rails, each further pair of cycles covers one more rail pair
     log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
@@ -3271,7 +3279,9 @@ main() {
         echo "paths_ok=$paths_ok"
         echo "drop_nics_read_min=$DROP_READS_MIN"
         local ncl=0; for k in "${CLI[@]}"; do ncl=$(( ncl + CN[$k] )); done
-        echo "drop_nics_expected=$(( ${#ELIG[@]} * NR + ncl ))"
+        # the rail NICs that exist (a host lacking a rail has none there: a 10-27 field run read 478 of a hosts x rails 717)
+        local nex=0; for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do [[ ${RNIC[$k,$r]} != - ]] && nex=$(( nex + 1 )); done; done
+        echo "drop_nics_expected=$(( nex + ncl ))"
         echo "nic_diag_lines=$(wc -l < "$NIC_DIAG" | tr -d ' ')"
         echo "mesh_pings=${MESH_PINGS:-}"
         echo "mesh_failures=${MESH_FAILS:-}"

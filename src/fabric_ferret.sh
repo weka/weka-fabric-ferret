@@ -801,6 +801,11 @@ main() {
         local nl; nl=$(wc -w <<<"$lone" | tr -d ' ')
         log "$nl host$( (( nl > 1 )) && echo s have || echo " has") no partner sharing $( (( nl > 1 )) && echo their || echo its) rails (not tested): $(awk '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? " " : ""), $i; if (NF > 8) printf " and %d more", NF - 8}' <<<"$lone")"
     fi
+    # pairing.txt (only when a host is tested on fewer rails or not at all): "host<TAB>why", for the dashboard's Not tested card
+    if [[ -n $JOINED$lone ]]; then
+        { [[ -n $JOINED ]] && awk -F'; ' '{for (i = 1; i <= NF; i++) { h = $i; sub(/:.*/, "", h); w = $i; sub(/^[^:]*: /, "", w); printf "%s\t%s\n", h, w }}' <<<"$JOINED"
+          for sk in $lone; do printf '%s\tno partner sharing its rails\n' "$sk"; done; } > "$COLLECT_DIR/pairing.txt"
+    fi
     # a pair's directed NIC paths (8 with two rails): cycle 1 runs half, cycle 2 (same pairings, client and server
     # swapped) the other half; with more rails, each further pair of cycles covers one more rail pair
     log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
@@ -1168,7 +1173,9 @@ main() {
         echo "paths_ok=$paths_ok"
         echo "drop_nics_read_min=$DROP_READS_MIN"
         local ncl=0; for k in "${CLI[@]}"; do ncl=$(( ncl + CN[$k] )); done
-        echo "drop_nics_expected=$(( ${#ELIG[@]} * NR + ncl ))"
+        # the rail NICs that exist (a host lacking a rail has none there: a 10-27 field run read 478 of a hosts x rails 717)
+        local nex=0; for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do [[ ${RNIC[$k,$r]} != - ]] && nex=$(( nex + 1 )); done; done
+        echo "drop_nics_expected=$(( nex + ncl ))"
         echo "nic_diag_lines=$(wc -l < "$NIC_DIAG" | tr -d ' ')"
         echo "mesh_pings=${MESH_PINGS:-}"
         echo "mesh_failures=${MESH_FAILS:-}"

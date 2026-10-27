@@ -1431,7 +1431,7 @@ $(document).ready(function() {{
 
     function edgeSpeed(e) {{
         if (!e.title) return 999;
-        var m = e.title.match(/([\d.]+)\s*Gbps/);
+        var m = e.title.match(/([\\d.]+)\\s*Gbps/);
         return m ? parseFloat(m[1]) : 999;
     }}
 
@@ -2239,6 +2239,10 @@ def parse_tar_archive(filepath):
         p = l.split(None, 1)
         if p:
             nt.append({'kind': 'host', 'what': p[0], 'why': p[1] if len(p) > 1 else ''})
+    for l in read_file('pairing.txt').splitlines():   # a host with no partner sharing its rails, or tested on fewer rails
+        p = l.split('\t', 1)
+        if len(p) == 2:
+            nt.append({'kind': 'host', 'what': p[0], 'why': p[1]})
     unreach = Counter(re.sub(r'^ssh: connect to host \S+ port \d+: ', '', l.split(None, 1)[1]) if len(l.split(None, 1)) > 1
                       else 'no error text' for l in read_file('unreachable.txt').splitlines() if l.strip())
     for why, n in unreach.most_common():

@@ -71,11 +71,12 @@ mesh_check() {
     sed 's/^/#   /' "$WORK/mesh_anom" | head -n 10 >&2
 }
 
-# LLDP: a rail NIC whose switch most hosts reach on the other rail is cabled to the wrong rail.
+# LLDP: a rail NIC whose switch most hosts reach on the other rail is cabled to the wrong rail. A bond's
+# member rows carry the bond's IP, so the map also names it: a member is checked against its bond's rail.
 lldp_rail_check() {
     local railmap=$WORK/railmap k r
     for k in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do
-        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r)"
+        [[ ${RNIC[$k,$r]} != - ]] && echo "${T_HOST[$k]} ${RNIC[$k,$r]} $(rail_letter $r) ${RIP[$k,$r]}"
     done; done > "$railmap"
     # compared with the rail most NICs on that switch use (with two rails: the other one)
     awk '#@awk ff_lldp_rail_check' \
