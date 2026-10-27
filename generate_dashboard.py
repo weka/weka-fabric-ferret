@@ -2208,12 +2208,17 @@ def parse_tar_archive(filepath):
         data['client_ips'] = {n['ip'] for n in cnics}
 
     # What the run could not test (collector files; absent in older archives)
-    nt = []
+    nt, absent = [], {}
     for p in rail_rows:
         for rail in rails:
             nic, ip, st = (p[rcol[c]] for c in (f'Rail_{rail}_NIC', f'Rail_{rail}_IP', f'State_{rail}'))
-            if st != 'ok':
+            if re.match(r'no_(NIC|IPv4_on)_', st):   # a rail the host lacks or does not address: counted per rail and state (as the collector's log)
+                absent.setdefault((rail, st), []).append(p[0])
+            elif st != 'ok':
                 nt.append({'kind': 'rail', 'what': f'{p[0]} rail {rail} {nic} {ip}', 'why': st.replace('_', ' ')})
+    for (rail, st), hosts in absent.items():
+        nt.append({'kind': 'rail', 'what': f'{len(hosts)} host{"s" if len(hosts) != 1 else ""}: rail {rail}',
+                   'why': f"{st.replace('_', ' ')}: {' '.join(hosts[:8])}{f' and {len(hosts) - 8} more' if len(hosts) > 8 else ''}"})
     for n in (data['clients'] or {}).get('nics', []):
         if n['state'] != 'ok':
             nt.append({'kind': 'client', 'what': f"{n['host']} {n['nic']} {n['ip']}", 'why': n['state'].replace('_', ' ')})
