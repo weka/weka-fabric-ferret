@@ -321,7 +321,8 @@ pw_transport() {
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
-tmo() { if [[ -n $TO ]]; then "$TO" "$HOST_LIMIT" "$@"; else "$@"; fi; }
+tmo_s() { local s=$1; shift; if [[ -n $TO ]]; then "$TO" "$s" "$@"; else "$@"; fi; }   # under timeout s, where timeout exists
+tmo() { tmo_s "$HOST_LIMIT" "$@"; }
 clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 
 # sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
@@ -346,7 +347,7 @@ rssh() {
 rbmc() {
     local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
     if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
-    if [[ -n $TO ]]; then "$TO" "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; else ipmitool "${a[@]}" sensor <<<""; fi; rc=$?
+    tmo_s "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; rc=$?
     [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
 }
 
@@ -360,15 +361,16 @@ END { if (!n) { w = (rc == 124 ? "ipmitool_timed_out_after_" to "s" : "rc=" rc "
           print t, h, "ipmi", "bmc", "lanplus", "none", "-", "-", "-", substr(w, 1, 120) } }'
 
 sample() {
-    local n=$1 lab=s$1 i o rc why host j
+    local n=$1 lab=s$1 i o rc why host j esc
     echo "$lab $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WORK/samples"
     for i in "${!TARGETS[@]}"; do
         throttle
         # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
         # bash -s reads the script a line at a time, so the first line's read takes the second line
         # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
+        esc=; [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
         { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
-              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$( [[ -r $WORK/esc.$i ]] && cat "$WORK/esc.$i")" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
           echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
     done
     for j in "${!BMCS[@]}"; do
@@ -1001,8 +1003,8 @@ main() {
     [[ -n $TO ]] || log "no timeout command here: a hung host would stall the capture"
 
     WORK=$(mktemp -d "${TMPDIR:-/tmp}/thermals.XXXXXX") || die "mktemp failed"
+    trap cleanup EXIT   # from here every exit removes WORK, and SOCKET_DIR once it exists
     SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
-    trap cleanup EXIT
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
               -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
@@ -1060,7 +1062,7 @@ main() {
     (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
     if (( verbose && ${#UNREACH[@]} )); then
         echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2
-        for i in "${UNREACH[@]}"; do echo "  ${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V >&2
+        sed 's/^/  /' "$WORK/unreachlist" >&2
         echo "" >&2
     fi
 

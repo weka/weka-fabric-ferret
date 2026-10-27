@@ -187,8 +187,8 @@ main() {
     [[ -n $TO ]] || log "no timeout command here: a hung host would stall the capture"
 
     WORK=$(mktemp -d "${TMPDIR:-/tmp}/thermals.XXXXXX") || die "mktemp failed"
+    trap cleanup EXIT   # from here every exit removes WORK, and SOCKET_DIR once it exists
     SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
-    trap cleanup EXIT
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
               -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
@@ -244,7 +244,7 @@ main() {
     (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
     if (( verbose && ${#UNREACH[@]} )); then
         echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2
-        for i in "${UNREACH[@]}"; do echo "  ${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V >&2
+        sed 's/^/  /' "$WORK/unreachlist" >&2
         echo "" >&2
     fi
 
