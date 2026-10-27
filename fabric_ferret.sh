@@ -585,6 +585,15 @@ for nic in "$@"; do
     f() { echo "$inf" | awk -F': ' -v k="$1" '$1==k {print $2; exit}'; }
     drv=$(f driver); ver=$(f version); ver=${ver// /_}; fw=$(f firmware-version); bus=$(f bus-info)
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"
+    # a bond: its slaves' MII state as "@@BOND host nic up total down_slaves" (none = all up) and the kernel's
+    # whole report, so a bond at half speed names the member without link. FF_PROCNET (default /proc/net) is a test hook.
+    if [ "$drv" = bonding ] && [ -r "${FF_PROCNET:-/proc/net}/bonding/$nic" ]; then
+        bnd=$(cat "${FF_PROCNET:-/proc/net}/bonding/$nic" 2>&1)
+        echo "$bnd" | awk -v h="$h" -v n="$nic" '/^Slave Interface:/ { s = $3; t++ }
+            /^MII Status:/ && s != "" { if ($3 == "up") u++; else d = d (d == "" ? "" : ",") s; s = "" }
+            END { printf "@@BOND %s %s %d %d %s\n", h, n, u + 0, t + 0, (d == "" ? "none" : d) }'
+        echo "=== bonding $nic ==="; echo "$bnd"
+    fi
     echo "=== ethtool $nic ==="; echo "$eth"
     echo "=== ethtool -i $nic ==="; echo "$inf"
     echo "=== ethtool -m $nic ==="; echo "$mod"
@@ -2181,7 +2190,7 @@ cleanup() {
 
 # Every FF_* setting this tool reads. Any other FF_* in the environment is a typo that would be silently
 # ignored (a dropped letter, say), so it stops the run. A regress test keeps the list complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 
 # edit_distance a b: Levenshtein distance, for the "did you mean" hint
 edit_distance() {
@@ -2609,7 +2618,8 @@ main() {
     # --- 4. diagnostics ---
     log "Collecting NIC diagnostics..."
     local NIC_DIAG=$COLLECT_DIR/nic_diagnostics.txt LLDP_DATA=$COLLECT_DIR/lldp_neighbors.txt DRV_DATA=$COLLECT_DIR/driver_info.txt
-    : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"
+    local BOND_DATA=$COLLECT_DIR/bonds.txt   # "host nic slaves_up slaves_total down_slaves" per bond NIC (raw_per_host has the kernel's report)
+    : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"; : > "$BOND_DATA"
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
         rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
@@ -2619,9 +2629,10 @@ main() {
         grep '^@@NIC_DIAG ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$NIC_DIAG"
         grep '^@@LLDP ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$LLDP_DATA"
         grep '^@@DRV ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$DRV_DATA"
+        grep '^@@BOND ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$BOND_DATA"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
-    log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines"
+    log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
     lldp_rail_check "$LLDP_DATA"
 
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
@@ -2659,7 +2670,9 @@ main() {
             "$WORK/iprail" "$NIC_DIAG" > "$WORK/offspeed"
         if [[ -s $WORK/offspeed ]]; then
             if [[ -n $same ]]; then log "NICs not at ${LINE[0]}G:"; else log "NICs not at their rail's speed:"; fi
-            cat "$WORK/offspeed" >&2
+            # a bond's line says how many slaves have link (bonds.txt: host nic up total down_slaves)
+            awk 'FILENAME == ARGV[1] { b[$1 " " $2] = $3 " of " $4 " slaves up" ($5 == "none" ? "" : ", " $5 " down (MII)"); next }
+                 { k = $2 " " $3; print $0 ((k in b) ? ": " b[k] : "") }' "$BOND_DATA" "$WORK/offspeed" >&2
         fi
     else
         log "WARNING: no link speed from ethtool and FF_LINE_GBPS unset; no OK/SLOW status"

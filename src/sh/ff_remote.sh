@@ -103,6 +103,15 @@ for nic in "$@"; do
     f() { echo "$inf" | awk -F': ' -v k="$1" '$1==k {print $2; exit}'; }
     drv=$(f driver); ver=$(f version); ver=${ver// /_}; fw=$(f firmware-version); bus=$(f bus-info)
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"
+    # a bond: its slaves' MII state as "@@BOND host nic up total down_slaves" (none = all up) and the kernel's
+    # whole report, so a bond at half speed names the member without link. FF_PROCNET (default /proc/net) is a test hook.
+    if [ "$drv" = bonding ] && [ -r "${FF_PROCNET:-/proc/net}/bonding/$nic" ]; then
+        bnd=$(cat "${FF_PROCNET:-/proc/net}/bonding/$nic" 2>&1)
+        echo "$bnd" | awk -v h="$h" -v n="$nic" '/^Slave Interface:/ { s = $3; t++ }
+            /^MII Status:/ && s != "" { if ($3 == "up") u++; else d = d (d == "" ? "" : ",") s; s = "" }
+            END { printf "@@BOND %s %s %d %d %s\n", h, n, u + 0, t + 0, (d == "" ? "none" : d) }'
+        echo "=== bonding $nic ==="; echo "$bnd"
+    fi
     echo "=== ethtool $nic ==="; echo "$eth"
     echo "=== ethtool -i $nic ==="; echo "$inf"
     echo "=== ethtool -m $nic ==="; echo "$mod"
