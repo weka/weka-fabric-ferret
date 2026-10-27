@@ -63,10 +63,14 @@ fi
 [ "$1" = ipmi ] || exit 0
 if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
 # not root: sudo -S with the login's password when the -t file gave one (TC_PW, read from stdin ahead of this
-# script, never argv), else sudo -n. $0 of the inner sh picks the mode.
-s=; [ "$(id -u)" = 0 ] || { s=n; [ -n "${TC_PW+x}" ] && s=S; }; export TC_PW
-c='case $0 in S) printf "%s\n" "$TC_PW" | sudo -S -p "" ipmitool sensor ;; n) sudo -n ipmitool sensor ;; *) ipmitool sensor ;; esac'
-if [ -n "$(command -v timeout)" ]; then out=$(timeout "${2:-60}" sh -c "$c" "${s:--}" 2>&1); else out=$(sh -c "$c" "${s:--}" 2>&1); fi; rc=$?
+# script: a shell variable, never exported, never argv), else sudo -n
+s=; [ "$(id -u)" = 0 ] || { s=n; [ -n "${TC_PW+x}" ] && s=S; }
+ito=${2:-60}; ipt() { if [ -n "$(command -v timeout)" ]; then timeout "$ito" "$@"; else "$@"; fi; }
+case $s in
+    S) out=$(printf '%s\n' "$TC_PW" | ipt sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
+    n) out=$(ipt sudo -n ipmitool sensor 2>&1); rc=$? ;;
+    *) out=$(ipt ipmitool sensor 2>&1); rc=$? ;;
+esac
 # ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
 r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
     $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ {nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm)

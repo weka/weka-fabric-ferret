@@ -35,9 +35,9 @@ Options
                    or range > glob > <type>,* > *,*. That row is its credential, no fallback; two rows at one
                    level that differ: the first, warned; a row matching nothing: warned.
                    No login: FF_SSH_USER. No pw: key (passwordless) ssh; for a bmc, an empty password.
-                   The pw is everything after the third comma. Passwords reach ssh only through the environment
-                   (sshpass -e if installed, else SSH_ASKPASS: OpenSSH 8.4+ here) and ipmitool through -E,
-                   never a command line, and are never written out. chmod 600 the file (warned otherwise).
+                   The pw is everything after the third comma. A password reaches ssh (SSH_ASKPASS: OpenSSH 8.4+,
+                   or setsid, here) and ipmitool (-f) only through a one-use fifo in a private temp dir: never an
+                   environment variable or a command line, never written out. chmod 600 the file (warned otherwise).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
                    stdin stream, not argv); without a pw, sudo -n. -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
@@ -173,14 +173,13 @@ main() {
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
     LOCAL_IPMITOOL=; (( ${#BMCS[@]} )) && { LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; }
-    # a password ssh login: sshpass -e if installed, else SSH_ASKPASS, which works unattended from OpenSSH 8.4
-    SSHPASS_CMD=; local ver
+    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); unattended
+    # from OpenSSH 8.4 (SSH_ASKPASS_REQUIRE), or under setsid (no tty) before that
+    SETSID=; local ver
     if (( ${#T_PW[@]} )); then
-        SSHPASS_CMD=$(command -v sshpass)
-        if [[ -z $SSHPASS_CMD ]]; then
-            ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
-            [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] && (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )) \
-                || die "password logins in -t need sshpass or OpenSSH 8.4+ here (ssh -V: ${ver:-unknown})"
+        ver=$(ssh -V 2>&1); ver=${ver#*OpenSSH_}; ver=${ver%%[!0-9.]*}
+        if ! [[ $ver =~ ^([0-9]+)\.([0-9]+) ]] || ! (( BASH_REMATCH[1] > 8 || (BASH_REMATCH[1] == 8 && BASH_REMATCH[2] >= 4) )); then
+            SETSID=$(command -v setsid) || die "password logins in -t need OpenSSH 8.4+ or setsid here (ssh -V: ${ver:-unknown})"
         fi
     fi
     MODE=-; (( FF_IPMI )) && MODE=ipmi
@@ -194,7 +193,7 @@ main() {
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
               -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
-    printf '#!/bin/sh\nprintf "%%s\\n" "$THERMCAP_PW"\n' > "$WORK/askpass"; chmod 700 "$WORK/askpass"
+    AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; write_askpass "$AUTH/askpass"
     echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$WORK/temps.txt"
     : > "$WORK/samples"; : > "$WORK/hosts"
 

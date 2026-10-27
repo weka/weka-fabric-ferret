@@ -8,24 +8,36 @@ clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; 
 # sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
 # "label host source chip dev sensor temp_c high_c crit_c status" (sensor none = no data, why in status).
 # A target with no answer at all gets a none row per source, the reason from ssh's exit code and last error line.
-# rssh i: ssh to target i as its login, with its password from the environment when it has one (sshpass -e, else
-# SSH_ASKPASS), never on a command line. Runs in its own background subshell, so the exports stay there.
+# write_askpass path: ssh's SSH_ASKPASS helper (as wekatester's): no to a new host key, nothing for a key passphrase,
+# else ONE line from the fifo $THERMCAP_PW_FIFO names, once (a second prompt, a wrong password, gets nothing)
+write_askpass() {
+    printf '%s\n' '#!/bin/sh' 'case "$1" in' '    *"continue connecting"*|*"(yes/no"*) echo no; exit 0 ;;' '    *[Pp]assphrase*) exit 1 ;;' 'esac' \
+        '[ ! -e "$THERMCAP_PW_FIFO.used" ] || exit 1' ': > "$THERMCAP_PW_FIFO.used"' 'IFS= read -r pw < "$THERMCAP_PW_FIFO"' "printf '%s\\n' \"\$pw\"" > "$1"
+    chmod 700 "$1" || die "cannot make the askpass helper executable"
+}
+# pwfifo name pw: a one-use fifo in AUTH holding pw, open read-write on fd 4 (a fifo drops what it holds when its last
+# fd closes; the write can't block). The pw goes in by printf (a builtin: no argv). Caller: exec 4>&-; rm the fifo.
+pwfifo() { local f=$AUTH/$1.fifo; rm -f "$f" "$f.used"; mkfifo -m 600 "$f" || return 1; exec 4<>"$f"; printf '%s\n' "$2" >&4; PWFIFO=$f; }
+# rssh i: ssh to target i as its login; a password login reads its password through the askpass helper from a fifo,
+# never from an environment variable or a command line. Runs in its own background subshell.
 rssh() {
-    local i=$1; shift
+    local i=$1 rc; shift
     local -a o=("${SSH_OPTS[@]}" -l "${T_LOGIN[$i]}")
     if [[ -z ${T_PW[$i]+x} ]]; then tmo ssh "${o[@]}" -o BatchMode=yes "${TARGETS[$i]}" "$@"; return; fi
     o+=(-o BatchMode=no -o NumberOfPasswordPrompts=1)
-    if [[ -n $SSHPASS_CMD ]]; then export SSHPASS=${T_PW[$i]}; tmo "$SSHPASS_CMD" -e ssh "${o[@]}" "${TARGETS[$i]}" "$@"
-    else export THERMCAP_PW=${T_PW[$i]} SSH_ASKPASS=$WORK/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-none}
-        tmo ssh "${o[@]}" "${TARGETS[$i]}" "$@"; fi
+    pwfifo "t$i.$BASHPID" "${T_PW[$i]}" || return 255
+    THERMCAP_PW_FIFO=$PWFIFO SSH_ASKPASS=$AUTH/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-none} \
+        tmo $SETSID ssh "${o[@]}" "${TARGETS[$i]}" "$@"; rc=$?
+    exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
 }
 
-# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus), the password in IPMI_PASSWORD (-E)
+# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus); a password through -f from a one-use fifo, an
+# empty one as -E with IPMI_PASSWORD empty (no secret in it)
 rbmc() {
-    local j=$1
-    export IPMI_PASSWORD=${B_PW[$j]}
-    if [[ -n $TO ]]; then "$TO" "$FF_IPMI_TIMEOUT" ipmitool -I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}" -E sensor <<<""
-    else ipmitool -I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}" -E sensor <<<""; fi
+    local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
+    if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
+    if [[ -n $TO ]]; then "$TO" "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; else ipmitool "${a[@]}" sensor <<<""; fi; rc=$?
+    [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
 }
 
 # ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
