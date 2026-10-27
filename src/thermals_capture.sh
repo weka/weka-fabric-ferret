@@ -93,7 +93,7 @@ log() { echo "# $*" >&2; }
 
 #@include sh/tc_collect.sh
 
-#@include sh/tc_hostfile.sh
+#@include sh/hostfile.sh
 
 #@include sh/tc_unreach.sh
 
