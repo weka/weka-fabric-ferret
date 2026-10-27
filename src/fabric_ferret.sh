@@ -254,16 +254,15 @@ main() {
     [[ -n $dur ]] && FF_DURATION=$dur
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
-    # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own login (TL, keyed by
-    # target); row passwords and credential rows not yet
+    # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
+    # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
     local -a TF_BE=() TF_CL=(); declare -gA TL=() TPW=()
     if [[ -n $tfile ]]; then
         [[ -n $FF_HOSTS$FF_CLIENTS ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
         declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=()
         TARGETS=(); _SEEN=(); INPUT_RANGES=0; HAVE_PW=0
         load_target_file "$tfile" "$FF_SSH_USER"
-        local k one="fabric_ferret.sh takes a login and a password per row, but no credential row (* or a glob) yet"
-        (( ${#HF_WILD_LINES[@]} )) && die "-t $tfile line ${HF_WILD_LINES[0]}: $one"
+        local k
         for k in "${!TARGETS[@]}"; do
             TL[${TARGETS[$k]}]=${T_LOGIN[$k]}; [[ -n ${T_PW[$k]+x} ]] && TPW[${TARGETS[$k]}]=${T_PW[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
@@ -355,7 +354,7 @@ main() {
     SI=$COLLECT_DIR/sysinfo
     RUNLOG_SSH=$COLLECT_DIR/ssh_errors.log
 
-    SUDO=""; [[ $FF_SSH_USER == root ]] || SUDO="sudo -n"
+    declare -gA TESC=()   # per target: how remote steps get root (the sweep's probe; rbash)
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=15m -o "ControlPath=$SOCKET_DIR/%C"
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
               -o ServerAliveInterval=15)   # the login is per target (TL, rsh/rbash)
@@ -378,7 +377,7 @@ main() {
     for i in "${!TARGETS[@]}"; do
         throttle
         t=${TARGETS[$i]}
-        ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+        ( if sweep_probe "$t" > "$WORK/sweep/$i.priv" 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
     done
     wait
     # refusals under fan-out (sshd MaxStartups, kex resets) look like dead hosts: retry those slower
@@ -395,7 +394,7 @@ main() {
             for i in "${retry[@]}"; do
                 [[ -f $WORK/sweep/$i.ok ]] && continue
                 throttle; t=${TARGETS[$i]}
-                ( if sweep_ssh "$t" true 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
+                ( if sweep_probe "$t" > "$WORK/sweep/$i.priv" 2> "$WORK/sweep/$i.err"; then echo "$i" > "$WORK/sweep/$i.ok"; fi ) &
             done
             wait; sleep 1
         done
@@ -403,9 +402,20 @@ main() {
         local rec=0; for i in "${retry[@]}"; do [[ -f $WORK/sweep/$i.ok ]] && rec=$(( rec + 1 )); done
         log "Retry recovered $rec of ${#retry[@]}"
     fi
-    local -a REACH=()
+    local -a REACH=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0
     for i in "${!TARGETS[@]}"; do
-        if [[ -f $WORK/sweep/$i.ok ]]; then REACH+=("$i")
+        if [[ -f $WORK/sweep/$i.ok ]]; then
+            # root: none needed; a -t password: sudo -S; else the escalator the probe found, or none: unusable for the
+            # remote steps (reported, out of the run, counted against coverage)
+            read -r pu pe < <(tail -n 1 "$WORK/sweep/$i.priv"); t=${TARGETS[$i]}
+            if [[ $pu == 0 ]]; then TESC[$t]=
+            elif [[ -n ${TPW[$t]+x} ]]; then TESC[$t]=S
+            elif [[ -n $pe && $pe != none && $pe != - ]]; then TESC[$t]=${pe//_/ }
+            else
+                echo "$t no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo (login ${TL[$t]}, uid ${pu:-unknown})" >> "$WORK/unusable.txt"
+                (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); continue
+            fi
+            REACH+=("$i")
         else
             local why; why=$(grep -v '^Warning: Permanently added' "$WORK/sweep/$i.err" | tail -n1)
             echo "${TARGETS[$i]} ${why:-no error text}" >> "$WORK/unreachable.txt"
@@ -417,6 +427,12 @@ main() {
             | sort | uniq -c | sort -rn | sed 's/^/#   /' >&2
         cp "$WORK/unreachable.txt" "$COLLECT_DIR/unreachable.txt"
     fi
+    if [[ -s $WORK/unusable.txt ]]; then
+        log "$(wc -l < "$WORK/unusable.txt" | tr -d ' ') of ${#TARGETS[@]} targets answered ssh but can't run the remote steps as root (left out, counted as missing):"
+        sed 's/^/#   /' "$WORK/unusable.txt" >&2
+        cp "$WORK/unusable.txt" "$COLLECT_DIR/unusable.txt"
+    fi
+    save_state
     (( ${#REACH[@]} > 0 )) || die "no target answered ssh (logins tried: $(printf '%s\n' "${TL[@]}" | sort -u | tr '\n' ' ' | sed 's/ $//'))"
 
     # --- 2. discovery ---
@@ -990,7 +1006,7 @@ main() {
     # --- 8. coverage verdict: never a clean result on partial or empty data ---
     local expect hosts_tested paths_ok skipped noresult coverage cov_rc
     if [[ -n $FF_EXPECT_HOSTS ]]; then expect=$FF_EXPECT_HOSTS
-    elif (( INPUT_RANGES )); then expect=${#ELIG[@]}
+    elif (( INPUT_RANGES )); then expect=$(( ${#ELIG[@]} + NUNUSE_B ))   # a host that answered but can't run the steps is missing, not normal
     else expect=$(( NHT - (dups - cdups) )); fi
     if (( FF_SKIP_IPERF )); then   # no load: a path counts once its check passed
         hosts_tested=$(awk 'NR==FNR {h[$1]=$2; next} {print h[$1]; print h[$2]}' "$WORK/ipmap" "$WORK/paths_ok" | sort -u | grep -c .)
@@ -1005,7 +1021,7 @@ main() {
     local cl_expect=0 cl_tested=0 cl_paths_ok=0 cl_done=1
     if [[ $CLIENT_MODE != none ]]; then
         if [[ -n $FF_EXPECT_CLIENTS ]]; then cl_expect=$FF_EXPECT_CLIENTS
-        elif (( CL_RANGES )); then cl_expect=${#CLI[@]}
+        elif (( CL_RANGES )); then cl_expect=$(( ${#CLI[@]} + NUNUSE_C ))
         else cl_expect=$(( ${#CL_T[@]} - cdups )); fi
         local cok; if (( FF_SKIP_IPERF )); then cok=$(cat "$WORK/cpaths_ok"); else cok=$(grep 'Gbits/sec' "$CRESULTS" | awk -F'[, ]+' '{print $1, $2}'); fi
         cl_paths_ok=$(grep -c . <<<"$cok")

@@ -2,7 +2,13 @@ stop_servers() {
     (( ${#STARTED[@]} > 0 )) || return 0
     local k
     log "Stopping iperf3 on ${#STARTED[@]} hosts..."
-    for k in "${!STARTED[@]}"; do rsh "${T_TARGET[$k]}" $SUDO pkill -x iperf3 >> "$WORK/cleanup.log" 2>&1 & done
+    for k in "${!STARTED[@]}"; do
+        local t=${T_TARGET[$k]}
+        if [[ ${TESC[$t]-} == S && -z ${TPW[$t]+x} ]]; then   # the cleanup after a crash: no password in the state file
+            log "iperf3 on $t not stopped: its sudo needs the -t password, which is never saved; stop it by hand"; continue
+        fi
+        rroot "$t" pkill -x iperf3 >> "$WORK/cleanup.log" 2>&1 &
+    done
     wait
     STARTED=()
 }
@@ -11,8 +17,8 @@ stop_servers() {
 # Ctrl-C runs under load) bash running the INT trap's exit but never the EXIT trap. Written whole, then renamed.
 save_state() {
     [[ -n $STATE_FILE ]] || return 0
-    declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG CLI SSH_OPTS SUDO \
-        FF_SSH_USER TL 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
+    declare -p WORK SOCKET_DIR COLLECT_DIR LOADED DONE LOCKED RUN_ID STARTED T_TARGET REACH_ONLY ELIG CLI SSH_OPTS \
+        FF_SSH_USER TL TESC 2>&1 | grep '^declare ' > "$STATE_FILE.tmp" && mv -f "$STATE_FILE.tmp" "$STATE_FILE"
 }
 
 cleanup() {
