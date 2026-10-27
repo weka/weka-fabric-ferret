@@ -44,7 +44,9 @@ Options
                    -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
-                   page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
+                   page per type with its OS and BMC tables, one row per host, sortable; md: the same layout).
+                   A run that saw an ssh failure also writes thermcap_<UTC>.ssh_errors.log: one line per failed
+                   read, "s<sample> <target> rc=<rc>: <ssh's stderr>" (the no-data reason is its last line)
   -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
@@ -360,19 +362,36 @@ $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ { nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_",
 END { if (!n) { w = (rc == 124 ? "ipmitool_timed_out_after_" to "s" : "rc=" rc "_" first); gsub(/[^A-Za-z0-9_.:=-]/, "_", w)
           print t, h, "ipmi", "bmc", "lanplus", "none", "-", "-", "-", substr(w, 1, 120) } }'
 
+# read_target n i: the reader on target i for sample n, in the background (o/e/rc.n.i)
+read_target() {
+    local n=$1 i=$2 esc=
+    # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
+    # bash -s reads the script a line at a time, so the first line's read takes the second line
+    # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
+    [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
+    { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
+          | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+      echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
+}
+# refusals under fan-out look like dead hosts (sshd MaxStartups, kex resets, a control master that died as it opened):
+# those targets get one more try, 8 at a time (as fabric_ferret.sh's sweep does)
+RETRY_RE='Failed to connect to new control master|Connection reset|kex_exchange_identification|ssh_exchange_identification|Connection closed by|too many'
 sample() {
-    local n=$1 lab=s$1 i o rc why host j esc
+    local n=$1 lab=s$1 i o rc why host j
     echo "$lab $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WORK/samples"
+    for i in "${!TARGETS[@]}"; do throttle; read_target "$n" "$i"; done
+    wait_all
+    local -a retry=()
     for i in "${!TARGETS[@]}"; do
-        throttle
-        # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
-        # bash -s reads the script a line at a time, so the first line's read takes the second line
-        # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
-        esc=; [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
-        { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
-              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
-          echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
+        [[ $(<"$WORK/rc.$n.$i") == 255 ]] && grep -qiE "$RETRY_RE" "$WORK/e.$n.$i" && retry+=("$i")
     done
+    if (( ${#retry[@]} )); then
+        local keep=$FF_SSH_PARALLEL rec=0; FF_SSH_PARALLEL=8
+        for i in "${retry[@]}"; do throttle; mv -f "$WORK/e.$n.$i" "$WORK/e1.$n.$i"; read_target "$n" "$i"; done
+        wait_all; FF_SSH_PARALLEL=$keep
+        for i in "${retry[@]}"; do [[ $(<"$WORK/rc.$n.$i") == 255 ]] || rec=$(( rec + 1 )); done
+        log "sample $n: ${#retry[@]} target(s) refused ssh under load (control master, reset, kex); retried 8 at a time, recovered $rec"
+    fi
     for j in "${!BMCS[@]}"; do
         [[ -n $LOCAL_IPMITOOL ]] || break
         throttle
@@ -400,7 +419,7 @@ sample() {
         case $rc in
             0) why=no_output ;;
             124) why=ssh_cut_off_after_${HOST_LIMIT}s ;;
-            255) why=ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")") ;;
+            255) why=ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")"); [[ $why == ssh_failed_ ]] && why=ssh_failed_rc255_no_message ;;
             *) why=remote_rc=${rc}_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")") ;;
         esac
         awk -v t="$lab" -v host="$host" -v why="$why" -v ipmi="$([[ $MODE == ipmi ]] && echo 1 || echo 0)" '
@@ -1083,6 +1102,16 @@ main() {
         esac && mv "$f.tmp" "$f" || die "could not write $f"
         out+=("$f")
     done
+    # every ssh error the run saw (each failed or noisy read: "sample target rc: stderr"), when there were any: the reason
+    # a host gave no data is its last line; the whole text separates a dead host from one refused under load
+    local i e trc; for n in $(seq 1 "$NSAMP"); do for i in "${!TARGETS[@]}"; do
+        if [[ -e $WORK/e1.$n.$i ]]; then   # the first try of a read that was retried
+            printf 's%s %s rc=255 (retried): ' "$n" "${TARGETS[$i]}"; tr -d '\r' < "$WORK/e1.$n.$i" | tr '\n' '|'; echo; fi
+        e=$WORK/e.$n.$i; trc=$(<"$WORK/rc.$n.$i")
+        { [[ $trc != 0 ]] || [[ -s $e ]]; } || continue
+        printf 's%s %s rc=%s: ' "$n" "${TARGETS[$i]}" "$trc"; if [[ -s $e ]]; then tr -d '\r' < "$e" | tr '\n' '|'; else printf '(no message)'; fi; echo
+    done; done > "$base.ssh_errors.log.tmp"
+    if [[ -s $base.ssh_errors.log.tmp ]]; then mv "$base.ssh_errors.log.tmp" "$base.ssh_errors.log"; out+=("$base.ssh_errors.log"); else rm -f "$base.ssh_errors.log.tmp"; fi
     for f in "${out[@]}"; do log "Wrote $f"; done
     log "To copy here from a jump host: scp '$(hostname -f 2>&1):$(cd "$(dirname "${out[0]}")" && pwd)/${base##*/}.*' ."
     # the closing count: unreachable (no ssh connection) and unavailable (reachable, no reading at all)

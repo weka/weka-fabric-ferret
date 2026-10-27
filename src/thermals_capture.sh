@@ -43,7 +43,9 @@ Options
                    -t or FF_HOSTS, not both.
   -o LIST         output files, comma separated, any of jsonl (default), html, md:
                    thermcap_<UTC>.jsonl|.html|.md in FF_OUT_DIR (jsonl: every reading; html: an overview, then a
-                   page per type with its OS and BMC tables, one row per host, sortable; md: the same layout)
+                   page per type with its OS and BMC tables, one row per host, sortable; md: the same layout).
+                   A run that saw an ssh failure also writes thermcap_<UTC>.ssh_errors.log: one line per failed
+                   read, "s<sample> <target> rc=<rc>: <ssh's stderr>" (the no-data reason is its last line)
   -d SECONDS       0 (default): one point-in-time reading. Above 0: read now and again SECONDS later, giving
                    each sensor's first, min, max and last (and the rise flag)
   -i SECONDS       with -d, read every SECONDS instead (the first at 0, the last at or before -d)
@@ -265,6 +267,16 @@ main() {
         esac && mv "$f.tmp" "$f" || die "could not write $f"
         out+=("$f")
     done
+    # every ssh error the run saw (each failed or noisy read: "sample target rc: stderr"), when there were any: the reason
+    # a host gave no data is its last line; the whole text separates a dead host from one refused under load
+    local i e trc; for n in $(seq 1 "$NSAMP"); do for i in "${!TARGETS[@]}"; do
+        if [[ -e $WORK/e1.$n.$i ]]; then   # the first try of a read that was retried
+            printf 's%s %s rc=255 (retried): ' "$n" "${TARGETS[$i]}"; tr -d '\r' < "$WORK/e1.$n.$i" | tr '\n' '|'; echo; fi
+        e=$WORK/e.$n.$i; trc=$(<"$WORK/rc.$n.$i")
+        { [[ $trc != 0 ]] || [[ -s $e ]]; } || continue
+        printf 's%s %s rc=%s: ' "$n" "${TARGETS[$i]}" "$trc"; if [[ -s $e ]]; then tr -d '\r' < "$e" | tr '\n' '|'; else printf '(no message)'; fi; echo
+    done; done > "$base.ssh_errors.log.tmp"
+    if [[ -s $base.ssh_errors.log.tmp ]]; then mv "$base.ssh_errors.log.tmp" "$base.ssh_errors.log"; out+=("$base.ssh_errors.log"); else rm -f "$base.ssh_errors.log.tmp"; fi
     for f in "${out[@]}"; do log "Wrote $f"; done
     log "To copy here from a jump host: scp '$(hostname -f 2>&1):$(cd "$(dirname "${out[0]}")" && pwd)/${base##*/}.*' ."
     # the closing count: unreachable (no ssh connection) and unavailable (reachable, no reading at all)

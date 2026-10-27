@@ -35,19 +35,36 @@ rbmc() {
 # ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
 BMC_AWK='#@awk tc_bmc'
 
+# read_target n i: the reader on target i for sample n, in the background (o/e/rc.n.i)
+read_target() {
+    local n=$1 i=$2 esc=
+    # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
+    # bash -s reads the script a line at a time, so the first line's read takes the second line
+    # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
+    [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
+    { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
+          | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+      echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
+}
+# refusals under fan-out look like dead hosts (sshd MaxStartups, kex resets, a control master that died as it opened):
+# those targets get one more try, 8 at a time (as fabric_ferret.sh's sweep does)
+RETRY_RE='Failed to connect to new control master|Connection reset|kex_exchange_identification|ssh_exchange_identification|Connection closed by|too many'
 sample() {
-    local n=$1 lab=s$1 i o rc why host j esc
+    local n=$1 lab=s$1 i o rc why host j
     echo "$lab $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WORK/samples"
+    for i in "${!TARGETS[@]}"; do throttle; read_target "$n" "$i"; done
+    wait_all
+    local -a retry=()
     for i in "${!TARGETS[@]}"; do
-        throttle
-        # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
-        # bash -s reads the script a line at a time, so the first line's read takes the second line
-        # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
-        esc=; [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
-        { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
-              | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
-          echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
+        [[ $(<"$WORK/rc.$n.$i") == 255 ]] && grep -qiE "$RETRY_RE" "$WORK/e.$n.$i" && retry+=("$i")
     done
+    if (( ${#retry[@]} )); then
+        local keep=$FF_SSH_PARALLEL rec=0; FF_SSH_PARALLEL=8
+        for i in "${retry[@]}"; do throttle; mv -f "$WORK/e.$n.$i" "$WORK/e1.$n.$i"; read_target "$n" "$i"; done
+        wait_all; FF_SSH_PARALLEL=$keep
+        for i in "${retry[@]}"; do [[ $(<"$WORK/rc.$n.$i") == 255 ]] || rec=$(( rec + 1 )); done
+        log "sample $n: ${#retry[@]} target(s) refused ssh under load (control master, reset, kex); retried 8 at a time, recovered $rec"
+    fi
     for j in "${!BMCS[@]}"; do
         [[ -n $LOCAL_IPMITOOL ]] || break
         throttle
@@ -75,7 +92,7 @@ sample() {
         case $rc in
             0) why=no_output ;;
             124) why=ssh_cut_off_after_${HOST_LIMIT}s ;;
-            255) why=ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")") ;;
+            255) why=ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")"); [[ $why == ssh_failed_ ]] && why=ssh_failed_rc255_no_message ;;
             *) why=remote_rc=${rc}_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")") ;;
         esac
         awk -v t="$lab" -v host="$host" -v why="$why" -v ipmi="$([[ $MODE == ipmi ]] && echo 1 || echo 0)" '#@awk tc_sample' "$o" >> "$WORK/temps.txt"
