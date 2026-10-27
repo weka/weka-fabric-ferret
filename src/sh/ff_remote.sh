@@ -14,23 +14,29 @@ sweep_ssh() {
         $SETSID ssh -n -o BatchMode=no -o NumberOfPasswordPrompts=1 "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; rc=$?
     exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
 }
-# The sweep's probe (sh, stdin empty under ssh -n): "uid escalator". Not root and no -t password: the first passwordless
-# escalator that runs `true` within 5 s, in this order; "none" if none does ("-" for root or a password login).
-# One line (it travels as an ssh argument, %q-quoted for the remote sh): $1 probe or uid (a password login: sudo -S).
-PRIV_PROBE='u=$(id -u); e=-; if [ "$u" != 0 ] && [ "$1" = probe ]; then e=none; T=; [ -n "$(command -v timeout)" ] && T="timeout 5"; for c in "dzdo -n" pbrun sesu pmrun "doas -n" "ksu -e" "sudo -n"; do [ -n "$(command -v ${c%% *})" ] || continue; if $T $c true; then e=$c; break; fi; done; fi; echo "$u $(echo "$e" | tr " " _)"'
+# The sweep's probe (sh, stdin empty under ssh -n): "uid escalator". Not root: the first passwordless escalator that
+# runs `true` within 5 s, in this order; "none" if none does ("-" for root). Every login is probed, a password login
+# too: a passwordless escalator wins, and sudo -S with the password is the fallback.
+# One line (it travels as an ssh argument, %q-quoted for the remote sh).
+PRIV_PROBE='u=$(id -u); e=-; if [ "$u" != 0 ]; then e=none; T=; [ -n "$(command -v timeout)" ] && T="timeout 5"; for c in "dzdo -n" pbrun sesu pmrun "doas -n" "ksu -e" "sudo -n"; do [ -n "$(command -v ${c%% *})" ] || continue; if $T $c true; then e=$c; break; fi; done; fi; echo "$u $(echo "$e" | tr " " _)"'
 # sweep_probe target: the sweep's one ssh to the target, the probe its command
-sweep_probe() { sweep_ssh "$1" sh -c "$(printf '%q' "$PRIV_PROBE")" ff-probe "$( [[ -n ${TPW[$1]+x} ]] && echo uid || echo probe)"; }
-# TESC[target]: how remote steps get root there: "" (root), S (sudo -S -k with its -t password on the stdin stream, ahead
-# of the script), or the escalator the probe found. -k: sudo always asks, so it always takes that first line.
+sweep_probe() { sweep_ssh "$1" sh -c "$(printf '%q' "$PRIV_PROBE")" ff-probe; }
+# TESC[target]: how remote steps get root there: "" (root), the escalator the probe found, or S: sudo -S -k with its -t
+# password. The stream to a sudo -S host is "password, SENTINEL, then the script or nothing": sudo takes the first
+# line when it asks; when it doesn't (NOPASSWD, or -k not honoured), the guard below reads the password line away
+# itself, so no line of the stream is ever run as a command. SENTINEL is a per-run random token, never the password.
 # privv target: PRIV, the words that go before the remote command
 privv() { case ${TESC[$1]-} in "") PRIV=() ;; S) PRIV=(sudo -S -k -p "''") ;; *) read -ra PRIV <<<"${TESC[$1]}" ;; esac; }
+# sudo_guard "<what runs next>": the remote one-liner (%q-quoted for the shell) that skips to the sentinel first
+sudo_guard() { printf '%q' "IFS= read -r l; [ \"\$l\" = \"$SENTINEL\" ] || IFS= read -r l; exec $1"; }
 # rbash [-T secs] target args...: stdin as a bash script on the target, as root (TESC); -T: cut off after secs
 rbash() {
     local -a to=() PRIV; [[ $1 == -T ]] && { to=(timeout "$2"); shift 2; }
     local t=$1; shift; privv "$t"
     if [[ ${TESC[$t]-} == S ]]; then
         [[ -n ${TPW[$t]+x} ]] || return 3   # after a crash: no password to give sudo (never saved); no blank try
-        { printf '%s\n' "${TPW[$t]}"; cat; } | "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"
+        { printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL"; cat; } | "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
+            "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo -- "$@"
     else "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
 }
 # rroot target cmd...: one command as root (TESC). Returns 3, running nothing, for a sudo -S host whose password isn't
@@ -39,7 +45,8 @@ rroot() {
     local t=$1 PRIV; shift; privv "$t"
     if [[ ${TESC[$t]-} != S ]]; then rsh "$t" "${PRIV[@]}" "$@"; return; fi
     [[ -n ${TPW[$t]+x} ]] || return 3
-    printf '%s\n' "${TPW[$t]}" | ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" "$@"
+    printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL" | ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
+        "${PRIV[@]}" sh -c "$(sudo_guard '"$@"')" ff-sudo "$@"
 }
 
 # Discovery: raw facts only, parsed locally.

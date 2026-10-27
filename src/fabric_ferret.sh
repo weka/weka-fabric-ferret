@@ -23,9 +23,10 @@ From a jump host (settings ride in the remote command; nothing to edit or copy f
              glob) included, as thermals_capture.sh resolves them; no login: FF_SSH_USER; no password: key ssh.
              A password is read once, where the target's ssh session opens, through SSH_ASKPASS from a one-use
              fifo (OpenSSH 8.4+, or setsid, here): never an environment variable, a command line or a file.
-             Remote steps run as root: a root login directly; a row password: sudo -S -k with it; any other
-             login: the first passwordless escalator (FF_SSH_USER below). A host where none works is left out,
-             listed in unusable.txt with the reason, and counted as missing.
+             Remote steps run as root: a root login directly; any other login through the first passwordless
+             escalator (FF_SSH_USER below); where none works, a row password runs them with sudo -S -k (the
+             password first on the ssh input stream, behind a guard that never lets it run as a command). A host
+             with neither is left out, listed in unusable.txt with the reason, and counted as missing.
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
 
@@ -357,6 +358,8 @@ main() {
     RUNLOG_SSH=$COLLECT_DIR/ssh_errors.log
 
     declare -gA TESC=()   # per target: how remote steps get root (the sweep's probe; rbash)
+    # the sudo -S stream's sentinel (ff_remote.sh): random per run, never a secret; printed nowhere
+    SENTINEL=ff-$(od -An -N8 -tx1 /dev/urandom 2>&1 | tr -dc 'a-f0-9'); [[ ${#SENTINEL} -ge 10 ]] || SENTINEL=ff-$RANDOM$RANDOM$RANDOM
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=15m -o "ControlPath=$SOCKET_DIR/%C"
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
               -o ServerAliveInterval=15)   # the login is per target (TL, rsh/rbash)
@@ -407,12 +410,12 @@ main() {
     local -a REACH=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0
     for i in "${!TARGETS[@]}"; do
         if [[ -f $WORK/sweep/$i.ok ]]; then
-            # root: none needed; a -t password: sudo -S; else the escalator the probe found, or none: unusable for the
+            # root: none needed; else the escalator the probe found; else a -t password: sudo -S; else unusable for the
             # remote steps (reported, out of the run, counted against coverage)
             read -r pu pe < <(tail -n 1 "$WORK/sweep/$i.priv"); t=${TARGETS[$i]}
             if [[ $pu == 0 ]]; then TESC[$t]=
-            elif [[ -n ${TPW[$t]+x} ]]; then TESC[$t]=S
             elif [[ -n $pe && $pe != none && $pe != - ]]; then TESC[$t]=${pe//_/ }
+            elif [[ -n ${TPW[$t]+x} ]]; then TESC[$t]=S
             else
                 echo "$t no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo (login ${TL[$t]}, uid ${pu:-unknown})" >> "$WORK/unusable.txt"
                 (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); continue
