@@ -1,4 +1,4 @@
-# NIC_SUM_AWK: one row per data NIC, backends and clients alike (Frank 10-25). Columns: Same (backend to backend,
+# NIC_SUM_AWK: one row per data NIC, backends and clients alike (10-25). Columns: Same (backend to backend,
 # same rail), Cross (rail to rail), CB_Out / CB_In (client<->backend waves, this NIC sending / receiving), All_Out /
 # All_In (the all-at-once phase). Each run is judged at its expected rate: its rail's line (Cross: the slower rail's),
 # a client run min(client line, backend rail line / flows sharing that backend NIC). Status: each column's average

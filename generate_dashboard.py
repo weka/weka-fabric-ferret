@@ -2018,7 +2018,7 @@ def _iperf_row(line):
 
 
 def _nic_rows(data, ip_to_host, ip_to_nic):
-    """One row per data NIC, backends and clients alike (Frank 10-25), as the collector summary: columns S (backend
+    """One row per data NIC, backends and clients alike (10-25), as the collector summary: columns S (backend
     to backend, same rail), X (rail to rail), CO/CI (client<->backend waves, this NIC sending/receiving), FO/FI (all
     at once); each run judged at its expected rate, Status the worst column, (cross) when only X is that bad."""
     meta = data['metadata']
