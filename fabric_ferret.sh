@@ -111,6 +111,7 @@ Optional (default)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
   FF_OUT_DIR       where the .tgz bundle goes (.)
+  FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); default 0
   FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
                    the rails differ by design (e.g. 100,50). Default: the fastest rail's most common
                    NIC speed for all, so a rail that came up slow everywhere shows as slow
@@ -296,7 +297,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS"
 
 # load_settings_lines file: a -t file's settings lines, "FF_<setting>=value" as the whole line (the value verbatim,
@@ -314,6 +315,7 @@ load_settings_lines() {
         nm=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}; val=${val#"${val%%[![:space:]]*}"}
         [[ $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
         [[ $nm == FF_HOSTS || $nm == FF_CLIENTS ]] && die "-t $f line $ln: $nm is not a setting here; list the targets as rows"
+        [[ $nm == FF_FERRET ]] && die "-t $f line $ln: FF_FERRET is read before the file; set it in the environment"
         if [[ " $HF_KNOWN " == *" $nm "* ]]; then
             if [[ " $HF_ENV " == *" $nm "* ]]; then log "-t $f line $ln: $nm is set in the environment; the file's value is ignored"
             else
@@ -2434,7 +2436,8 @@ cleanup() {
 # FF_KNOWN, every FF_* setting this tool reads, is in hostfile.sh (shared with thermals_capture.sh).
 # write_targets_template path: hostlist.example.csv, written by ./build from this script's own usage text so the
 # example and the help never drift: the row rules and example rows, then every documented FF_ setting at its
-# default under its help, as comments (FF_HOSTS and FF_CLIENTS are rows in this file, not settings). A default
+# default under its help, as comments (FF_HOSTS and FF_CLIENTS are rows in this file, not settings; FF_FERRET is
+# read before the file, so it is left out). A default
 # is the first "(N)", "(all)" or "(none)" in the setting's help; an "=1" (or "=0") switch defaults to the other value.
 write_targets_template() {
     local p=$1
@@ -2483,7 +2486,7 @@ EOF
         /^  FF_[A-Z0-9_]+/ { flush(); line = $0; sub(/^  /, "", line)
             n = split(line, w, /[ ,=(]+/); names = ""
             for (i = 1; i <= n && w[i] ~ /^FF_[A-Z0-9_]+$/; i++) names = names (names == "" ? "" : " ") w[i]
-            if (names == "FF_HOSTS" || names == "FF_CLIENTS") next
+            if (names == "FF_HOSTS" || names == "FF_CLIENTS" || names == "FF_FERRET") next
             flag = ""; if (match(line, /^FF_[A-Z0-9_]+=[01] /)) flag = (substr(line, RLENGTH - 1, 1) == "1") ? "0" : "1"
             help = line; sub(/^FF_[A-Z0-9_]+(, FF_[A-Z0-9_]+)*(=[A-Za-z0-9]+)? */, "", help); sub(/^\([0-9]+\) +/, "", help)
             cur = names; def = ""; txt = line; buf = "#   " help "\n"; next }
@@ -3580,7 +3583,27 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/ff_runlog.XXXXXX") || exit 2
     STATE_FILE=$FF_RUNLOG.state
     trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
-    { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; exec tee -a "$FF_RUNLOG" >&2 3>&- ); rc=${PIPESTATUS[0]}; } 3>&1
+    # FF_FERRET (default off): on a terminal the log goes through ferret_view.py to fd 2; anything missing is
+    # said once, then the plain path; no terminal, plain path. A dead viewer: its reader restores the terminal,
+    # says so, copies the rest (no EPIPE). FF_VIEWER (the viewer's command) is a test hook.
+    view=()
+    if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
+        if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
+        elif ! py=$(command -v python3); then echo "# FF_FERRET: python3 not found, running without the ferret" | tee -a "$FF_RUNLOG" >&2
+        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" | tee -a "$FF_RUNLOG" >&2
+        elif [[ -t 2 ]]; then view=("$py" "$(dirname "$0")/ferret_view.py"); fi
+    fi
+    if (( ${#view[@]} )); then
+        # fd 3 carries main's stdout (the result rows); on a terminal they would land on the curses screen, so they
+        # are held in a file until the viewer has exited and replayed the log, then printed. Not a terminal: as today.
+        viewed() { { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; tee -a "$FF_RUNLOG" 3>&- | { "${view[@]}" || { vrc=$?; [[ -t 2 ]] && printf '\033[?1049l\033[?25h\033[0m'; echo "# FF_FERRET: the ferret viewer stopped (rc $vrc); the run continues plainly, the full log is in run.log"; cat; }; } >&2 3>&- ); rc=${PIPESTATUS[0]}; }; }
+        if [[ -t 1 ]]; then
+            rows=$(mktemp "${TMPDIR:-/tmp}/ff_rows.XXXXXX") || exit 2
+            viewed "$@" 3>"$rows"; cat "$rows"; rm -f "$rows"
+        else viewed "$@" 3>&1; fi
+    else
+        { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; exec tee -a "$FF_RUNLOG" >&2 3>&- ); rc=${PIPESTATUS[0]}; } 3>&1
+    fi
     if [[ -s $STATE_FILE ]]; then   # main ended without finishing its cleanup: do it here, with main's state and exit code
         echo "# Run ended (rc=$rc) without its cleanup; finishing it now" | tee -a "$FF_RUNLOG" >&2
         ( source "$STATE_FILE"; (exit "$rc"); cleanup )

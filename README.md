@@ -156,6 +156,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 |---|---|
 | `FF_LABEL` (first tested hostname) | name in the report and the bundle file name |
 | `FF_OUT_DIR` (.) | where the `.tgz` bundle goes |
+| `FF_FERRET` (0) | `1` = on a terminal, a ferret roams over the log while the run goes (see below). Needs `python3` only when set |
 
 ## How a run works
 
@@ -168,6 +169,8 @@ Each iteration pairs the hosts and runs two phases at once across all pairs:
 A host's status is the worst of its rail columns, Cross and XGrp. `SLOW(cross)` or `CRITICAL(cross)` means only the cross-rail runs were that slow, which points at inter-rail routing or spine capacity rather than the host; `(xgrp)` says the same of the cross-group runs (the routed path between the groups), `(cross,xgrp)` of both.
 
 With clients set, each iteration ends with a client phase: C1 clients→backends and C2 backends→clients in waves, then (with `full`) F1 and F2 with every client at once.
+
+**The ferret (off by default):** `FF_FERRET=1` on a terminal draws a ferret roaming over the log while the run goes (`ferret_view.py`, kept beside the tool; `python3`, no packages). Keys: `r` rolls it, `q` hides it; nothing else, the run is never touched. When the run ends the complete log is written plainly, so the scrollback reads as it would without the ferret. Without a terminal, or with `FF_FERRET` unset or `0`, the output is exactly the plain run's.
 
 ## Results
 

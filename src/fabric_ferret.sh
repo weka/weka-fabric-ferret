@@ -110,6 +110,7 @@ Optional (default)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
   FF_OUT_DIR       where the .tgz bundle goes (.)
+  FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); default 0
   FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
                    the rails differ by design (e.g. 100,50). Default: the fastest rail's most common
                    NIC speed for all, so a rail that came up slow everywhere shows as slow
@@ -1265,7 +1266,27 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/ff_runlog.XXXXXX") || exit 2
     STATE_FILE=$FF_RUNLOG.state
     trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
-    { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; exec tee -a "$FF_RUNLOG" >&2 3>&- ); rc=${PIPESTATUS[0]}; } 3>&1
+    # FF_FERRET (default off): on a terminal the log goes through ferret_view.py to fd 2; anything missing is
+    # said once, then the plain path; no terminal, plain path. A dead viewer: its reader restores the terminal,
+    # says so, copies the rest (no EPIPE). FF_VIEWER (the viewer's command) is a test hook.
+    view=()
+    if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
+        if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
+        elif ! py=$(command -v python3); then echo "# FF_FERRET: python3 not found, running without the ferret" | tee -a "$FF_RUNLOG" >&2
+        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" | tee -a "$FF_RUNLOG" >&2
+        elif [[ -t 2 ]]; then view=("$py" "$(dirname "$0")/ferret_view.py"); fi
+    fi
+    if (( ${#view[@]} )); then
+        # fd 3 carries main's stdout (the result rows); on a terminal they would land on the curses screen, so they
+        # are held in a file until the viewer has exited and replayed the log, then printed. Not a terminal: as today.
+        viewed() { { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; tee -a "$FF_RUNLOG" 3>&- | { "${view[@]}" || { vrc=$?; [[ -t 2 ]] && printf '\033[?1049l\033[?25h\033[0m'; echo "# FF_FERRET: the ferret viewer stopped (rc $vrc); the run continues plainly, the full log is in run.log"; cat; }; } >&2 3>&- ); rc=${PIPESTATUS[0]}; }; }
+        if [[ -t 1 ]]; then
+            rows=$(mktemp "${TMPDIR:-/tmp}/ff_rows.XXXXXX") || exit 2
+            viewed "$@" 3>"$rows"; cat "$rows"; rm -f "$rows"
+        else viewed "$@" 3>&1; fi
+    else
+        { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; exec tee -a "$FF_RUNLOG" >&2 3>&- ); rc=${PIPESTATUS[0]}; } 3>&1
+    fi
     if [[ -s $STATE_FILE ]]; then   # main ended without finishing its cleanup: do it here, with main's state and exit code
         echo "# Run ended (rc=$rc) without its cleanup; finishing it now" | tee -a "$FF_RUNLOG" >&2
         ( source "$STATE_FILE"; (exit "$rc"); cleanup )
