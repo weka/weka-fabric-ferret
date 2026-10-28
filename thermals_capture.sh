@@ -73,6 +73,9 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
   FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
+  FF_FERRET (0)    1 = on a terminal a ferret roams over the log during the run (ferret_view.py beside it,
+                   python3; r rolls it, q hides it). A dead viewer is said once, the run goes on plainly; its
+                   lines are not replayed (the files hold the data)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
 nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A sensor with a crit
@@ -442,7 +445,7 @@ sample() {
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
 FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
-TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS"
+TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's settings lines, "FF_<setting>=value" as the whole line (the value verbatim,
 # commas and all), read before the rows so FF_SSH_USER from the file is the rows' default login. The caller sets
@@ -459,7 +462,7 @@ load_settings_lines() {
         nm=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}; val=${val#"${val%%[![:space:]]*}"}
         [[ $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
         [[ $nm == FF_HOSTS || $nm == FF_CLIENTS ]] && die "-t $f line $ln: $nm is not a setting here; list the targets as rows"
-        [[ $nm == FF_FERRET ]] && die "-t $f line $ln: FF_FERRET is read before the file; set it in the environment"
+        [[ $nm == FF_FERRET || $nm == FF_VIEWER ]] && die "-t $f line $ln: $nm is read before the file; set it in the environment"
         if [[ " $HF_KNOWN " == *" $nm "* ]]; then
             if [[ " $HF_ENV " == *" $nm "* ]]; then log "-t $f line $ln: $nm is set in the environment; the file's value is ignored"
             else
@@ -1183,4 +1186,26 @@ main() {
 }
 
 # run when executed or fed on stdin (ssh jump 'bash -s' < script: BASH_SOURCE is empty); not when sourced
-if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
+# FF_FERRET: on a terminal the log goes through ferret_view.py (beside this script) to stderr. Missing python3
+# or file: said once, then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
+# line, the rest copied. FF_VIEWER (its command): a test hook.
+if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    view=()
+    if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
+        if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
+        elif ! py=$(command -v python3); then echo "# FF_FERRET: python3 not found, running without the ferret" >&2
+        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" >&2
+        elif [[ -t 2 ]]; then view=("$py" "$(dirname "$0")/ferret_view.py"); fi
+    fi
+    if (( ${#view[@]} )); then
+        trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
+        # fd 3 carries main's stdout (the rows); on a terminal they would land on the curses screen, so they are held
+        # in a file until the viewer has exited and replayed the log, then printed. Not a terminal: straight through.
+        viewed() { { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; { "${view[@]}" || { vrc=$?; [[ -t 2 ]] && printf '\033[?1049l\033[?25h\033[0m'; echo "# FF_FERRET: the ferret viewer stopped (rc $vrc); the run continues plainly"; cat; }; } >&2 3>&- ); rc=${PIPESTATUS[0]}; }; }
+        if [[ -t 1 ]]; then
+            rows=$(mktemp "${TMPDIR:-/tmp}/tc_rows.XXXXXX") || exit 2
+            viewed "$@" 3>"$rows"; cat "$rows"; rm -f "$rows"
+        else viewed "$@" 3>&1; fi
+        exit "$rc"
+    else main "$@"; fi
+fi

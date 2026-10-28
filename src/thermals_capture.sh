@@ -72,6 +72,9 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
   FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
+  FF_FERRET (0)    1 = on a terminal a ferret roams over the log during the run (ferret_view.py beside it,
+                   python3; r rolls it, q hides it). A dead viewer is said once, the run goes on plainly; its
+                   lines are not replayed (the files hold the data)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
 nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A sensor with a crit
@@ -294,4 +297,26 @@ main() {
 }
 
 # run when executed or fed on stdin (ssh jump 'bash -s' < script: BASH_SOURCE is empty); not when sourced
-if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi
+# FF_FERRET: on a terminal the log goes through ferret_view.py (beside this script) to stderr. Missing python3
+# or file: said once, then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
+# line, the rest copied. FF_VIEWER (its command): a test hook.
+if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    view=()
+    if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
+        if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
+        elif ! py=$(command -v python3); then echo "# FF_FERRET: python3 not found, running without the ferret" >&2
+        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" >&2
+        elif [[ -t 2 ]]; then view=("$py" "$(dirname "$0")/ferret_view.py"); fi
+    fi
+    if (( ${#view[@]} )); then
+        trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
+        # fd 3 carries main's stdout (the rows); on a terminal they would land on the curses screen, so they are held
+        # in a file until the viewer has exited and replayed the log, then printed. Not a terminal: straight through.
+        viewed() { { main "$@" 2>&1 1>&3 3>&- | ( trap '' INT TERM HUP; { "${view[@]}" || { vrc=$?; [[ -t 2 ]] && printf '\033[?1049l\033[?25h\033[0m'; echo "# FF_FERRET: the ferret viewer stopped (rc $vrc); the run continues plainly"; cat; }; } >&2 3>&- ); rc=${PIPESTATUS[0]}; }; }
+        if [[ -t 1 ]]; then
+            rows=$(mktemp "${TMPDIR:-/tmp}/tc_rows.XXXXXX") || exit 2
+            viewed "$@" 3>"$rows"; cat "$rows"; rm -f "$rows"
+        else viewed "$@" 3>&1; fi
+        exit "$rc"
+    else main "$@"; fi
+fi

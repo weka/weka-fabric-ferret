@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ferret_view.py: fabric_ferret.sh's log full-screen with a ferret roaming over it; at the end, or on error, every
-line is written plainly to stderr. Keys: r rolls it, q hides it; the run is never touched. Without a terminal the
-lines are copied plainly as they come. FF_FERRET=1 turns it on."""
+"""ferret_view.py: the log of fabric_ferret.sh or thermals_capture.sh full-screen with a ferret roaming over it; at
+the end, or on error, every line goes plainly to stderr. Keys: r rolls it, q hides it; the run is never touched.
+Without a terminal the lines are copied plainly. FF_FERRET=1 turns it on."""
 import math
 import os
 import random
@@ -432,7 +432,7 @@ def run():
             curses.endwin()
         except Exception:
             pass
-        log.append("# FF_FERRET: the ferret viewer stopped (%s: %s); the run continues plainly, the full log is in run.log" % (type(e).__name__, e))
+        log.append("# FF_FERRET: the ferret viewer stopped (%s: %s); the run continues plainly" % (type(e).__name__, e))
     emit(log)
     copy_plain(stream)
     return 0
