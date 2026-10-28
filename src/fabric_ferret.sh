@@ -251,8 +251,7 @@ check_settings() {
 main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
-    # the FF_ names the environment set, before any default: a -t file's settings lines never override them
-    HF_ENV=" $(compgen -e | awk '/^FF_/ {printf "%s ", $0}')"; HF_KNOWN=$FF_KNOWN; HF_OTHER=$TC_KNOWN; HF_OTHER_NAME=thermals_capture.sh
+    local pl; for pl in "${HF_PRELOG[@]}"; do log "$pl"; done   # the -t file's settings notes (settings_prepass, run first)
 
     : "${FF_ITER:=3}" "${FF_STREAMS:=16}" "${FF_PORT:=5201}" "${FF_SSH_USER:=$(id -un)}"
     : "${FF_SSH_PARALLEL:=64}" "${FF_SSH_RETRY_PARALLEL:=8}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
@@ -271,7 +270,7 @@ main() {
                dur=$1; shift ;;
         esac
     done
-    [[ -n $dur ]] && { FF_DURATION=$dur; HF_ENV+="FF_DURATION "; }   # the argument beats a -t file's FF_DURATION line
+    [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
@@ -1264,6 +1263,16 @@ START_TS=$(date -u +%Y%m%dT%H%M%SZ)
 # bare `wait` also waits for a process substitution, which never exits while main runs.
 # tee ignores INT/TERM/HUP (Ctrl-C, group kill, dropped session) so cleanup can still write.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
+    # the file works as the command line does. -t FILE / -tFILE found as main finds them; a bad line dies here, rc 2.
+    HF_PRELOG=(); HF_KNOWN=$FF_KNOWN; HF_OTHER=$TC_KNOWN; HF_OTHER_NAME=thermals_capture.sh
+    pre_t=; pre_n=0
+    for pre_a in "$@"; do
+        if (( pre_n )); then pre_t=$pre_a; pre_n=0
+        elif [[ $pre_a == -t ]]; then pre_n=1
+        elif [[ $pre_a == -t?* ]]; then pre_t=${pre_a#-t}; fi
+    done
+    [[ -n $pre_t ]] && settings_prepass "$pre_t"
     FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/ff_runlog.XXXXXX") || exit 2
     STATE_FILE=$FF_RUNLOG.state
     trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)

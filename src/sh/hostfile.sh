@@ -4,38 +4,46 @@
 FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
-# load_settings_lines file: a -t file's settings lines, "FF_<setting>=value" as the whole line (the value verbatim,
-# commas and all), read before the rows so FF_SSH_USER from the file is the rows' default login. The caller sets
-# HF_KNOWN (its own names), HF_OTHER and HF_OTHER_NAME (the other tool's) and HF_ENV (the FF_ names exported in
-# the environment at startup, " a b "): the environment beats the file; the other tool's names are skipped and
-# named once; FF_HOSTS/FF_CLIENTS, a credential-looking name or an unknown one stops the run by line number, the
-# value never printed. Sets HF_SET_USER when the file set FF_SSH_USER.
+# load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
+# each tool, which exports what it sets (HF_SET): as on the command line. HF_ENV's names win (noted in HF_PRELOG);
+# other tool's names skipped; bad names die by line, value unprinted.
 load_settings_lines() {
     local f=$1 line ln=0 nm val; local -a skipped=()
-    HF_SET_USER=
+    HF_SET=; HF_PRELOG=()
     while IFS= read -r line || [[ -n $line ]]; do
         ln=$(( ln + 1 )); line=${line%$'\r'}
         [[ $line =~ ^[[:space:]]*(FF_[A-Z0-9_]+)[[:space:]]*=(.*)$ ]] || continue
         nm=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}; val=${val#"${val%%[![:space:]]*}"}
         [[ $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
         [[ $nm == FF_HOSTS || $nm == FF_CLIENTS ]] && die "-t $f line $ln: $nm is not a setting here; list the targets as rows"
-        [[ $nm == FF_FERRET || $nm == FF_VIEWER ]] && die "-t $f line $ln: $nm is read before the file; set it in the environment"
         if [[ " $HF_KNOWN " == *" $nm "* ]]; then
-            if [[ " $HF_ENV " == *" $nm "* ]]; then log "-t $f line $ln: $nm is set in the environment; the file's value is ignored"
+            if [[ " $HF_ENV " == *" $nm "* ]]; then HF_PRELOG+=("-t $f line $ln: $nm is set in the environment; the file's value is ignored")
             else
-                printf -v "$nm" '%s' "$val"; [[ $nm == FF_SSH_USER ]] && HF_SET_USER=1
+                printf -v "$nm" '%s' "$val"; HF_SET+="$nm "
                 # the rows below expand against FF_MAX_TARGETS, so a file value is checked here, not after the load
                 [[ $nm == FF_MAX_TARGETS ]] && { [[ $val =~ ^[0-9]+$ ]] && (( val > 0 )) || die "-t $f line $ln: FF_MAX_TARGETS must be a positive integer"; }
             fi
         elif [[ " $HF_OTHER " == *" $nm "* ]]; then skipped+=("$nm")
         else die "-t $f line $ln: unknown setting $nm; this tool reads: ${HF_KNOWN// /, }"; fi
     done < "$f"
-    (( ${#skipped[@]} )) && log "-t $f: ${#skipped[@]} setting line(s) for $HF_OTHER_NAME skipped: ${skipped[*]}"
+    (( ${#skipped[@]} )) && HF_PRELOG+=("-t $f: ${#skipped[@]} setting line(s) for $HF_OTHER_NAME skipped: ${skipped[*]}")
     return 0
 }
 
+# settings_prepass file: each tool's first step with a -t file, before anything reads a setting: HF_ENV from the
+# environment, the file's settings lines, every value taken exported (children see it). Its notes wait in
+# HF_PRELOG for main's first log lines (run log and viewer get them).
+settings_prepass() {
+    local nm
+    HF_PRELOG=()
+    [[ -r $1 && -f $1 ]] || die "-t: cannot read '$1'"
+    HF_ENV=" $(compgen -e | awk '/^FF_/ {printf "%s ", $0}')"
+    load_settings_lines "$1"
+    for nm in $HF_SET; do export "$nm"; done
+}
+
 # load_target_file file deflogin: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped; FF_<setting>=value
-# lines are settings, load_settings_lines). type backend
+# lines are settings, read by settings_prepass before, skipped here). type backend
 # (host = backend) or client: ssh targets (IP, name, CIDR or range, as FF_HOSTS); bmc: one BMC address read out of
 # band. A host field * or a glob (* ? [...], any case) is a credential row: it adds no targets. Type * = backend
 # and client, never bmc. Each target takes the most specific row that gives a login or pw: one host > CIDR/range >
@@ -48,7 +56,6 @@ load_target_file() {
     local -a R_LN=() R_TY=() R_H=() R_LG=() R_PW=() R_TIER=() wild=()
     local -A tidx=() bidx=() warned=()
     [[ -r $f && -f $f ]] || die "-t: cannot read '$f'"
-    load_settings_lines "$f"; [[ -n $HF_SET_USER ]] && def=$FF_SSH_USER
     [[ $def =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     me=$(id -un); T_ROW=(); B_ROW=()
     # also set: HF_RANGES[backend|client] (1 once a row of that type has a CIDR or range: INPUT_RANGES per type, so a

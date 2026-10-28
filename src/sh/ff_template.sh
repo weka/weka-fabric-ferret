@@ -1,7 +1,6 @@
 # write_targets_template path: hostlist.example.csv, written by ./build from this script's own usage text so the
 # example and the help never drift: the row rules and example rows, then every documented FF_ setting at its
-# default under its help, as comments (FF_HOSTS and FF_CLIENTS are rows in this file, not settings; FF_FERRET is
-# read before the file, so it is left out). A default
+# default under its help, as comments (FF_HOSTS and FF_CLIENTS are rows in this file, not settings). A default
 # is the first "(N)", "(all)" or "(none)" in the setting's help; an "=1" (or "=0") switch defaults to the other value.
 write_targets_template() {
     local p=$1
@@ -35,7 +34,7 @@ backend,*,svc-fabric
 *,gpu-node-*,admin
 #
 # Settings: a line FF_<setting>=value (the whole line; the value verbatim, commas and all) sets that setting for the
-# run, for both tools. A setting exported in the environment wins over the file; the other tool's names are
+# run as on the command line, for both tools (read first, exported). A setting exported in the environment wins over the file; the other tool's names are
 # skipped and named in one log line; an unknown name, or one that looks like a credential, stops the run with its
 # line number. Below, every fabric_ferret.sh setting at its default under its help (from --help; empty = none):
 EOF
@@ -50,7 +49,7 @@ EOF
         /^  FF_[A-Z0-9_]+/ { flush(); line = $0; sub(/^  /, "", line)
             n = split(line, w, /[ ,=(]+/); names = ""
             for (i = 1; i <= n && w[i] ~ /^FF_[A-Z0-9_]+$/; i++) names = names (names == "" ? "" : " ") w[i]
-            if (names == "FF_HOSTS" || names == "FF_CLIENTS" || names == "FF_FERRET") next
+            if (names == "FF_HOSTS" || names == "FF_CLIENTS") next
             flag = ""; if (match(line, /^FF_[A-Z0-9_]+=[01] /)) flag = (substr(line, RLENGTH - 1, 1) == "1") ? "0" : "1"
             help = line; sub(/^FF_[A-Z0-9_]+(, FF_[A-Z0-9_]+)*(=[A-Za-z0-9]+)? */, "", help); sub(/^\([0-9]+\) +/, "", help)
             cur = names; def = ""; txt = line; buf = "#   " help "\n"; next }

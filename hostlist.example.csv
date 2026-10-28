@@ -27,7 +27,7 @@ backend,*,svc-fabric
 *,gpu-node-*,admin
 #
 # Settings: a line FF_<setting>=value (the whole line; the value verbatim, commas and all) sets that setting for the
-# run, for both tools. A setting exported in the environment wins over the file; the other tool's names are
+# run as on the command line, for both tools (read first, exported). A setting exported in the environment wins over the file; the other tool's names are
 # skipped and named in one log line; an unknown name, or one that looks like a credential, stops the run with its
 # line number. Below, every fabric_ferret.sh setting at its default under its help (from --help; empty = none):
 #   each rail's data subnets: ';' between rails (A first), ',' between a rail's subnets.
@@ -140,6 +140,10 @@ backend,*,svc-fabric
 #
 #   where the .tgz bundle goes (.)
 # FF_OUT_DIR=.
+#
+#   draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
+#   for a font without braille; default 0
+# FF_FERRET=0
 #
 #   link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
 #   the rails differ by design (e.g. 100,50). Default: the fastest rail's most common

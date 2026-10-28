@@ -132,8 +132,7 @@ cleanup() {
 
 main() {
     [[ $1 == --help ]] && { usage; exit 0; }
-    # the FF_ names the environment set, before any default: a -t file's settings lines never override them
-    HF_ENV=" $(compgen -e | awk '/^FF_/ {printf "%s ", $0}')"; HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh
+    local pl; for pl in "${HF_PRELOG[@]}"; do log "$pl"; done   # the -t file's settings notes (settings_prepass, run first)
     : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
     : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
     local v; for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
@@ -302,6 +301,13 @@ main() {
 # or file: said once, then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
 # line, the rest copied. FF_VIEWER (its command): a test hook.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
+    # the file works as the command line does. -t found as main's getopts finds it; a bad line dies here, rc 2.
+    HF_PRELOG=(); HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh
+    pre_t=; OPTIND=1
+    while getopts ":o:i:d:t:vh" pre_o; do [[ $pre_o == t ]] && pre_t=$OPTARG; done
+    OPTIND=1
+    [[ -n $pre_t ]] && settings_prepass "$pre_t"
     view=()
     if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
         if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
