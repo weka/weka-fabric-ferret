@@ -83,9 +83,9 @@ but no high gets high = 95% of crit. A host or source that
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
-Output: stdout gets one row per host and source (hwmon, with nvidia-smi's GPUs, and ipmi): "Host Source Sensors Inlet CPU GPU Mem NVMe
-NIC Other Flags", the hottest reading of each type; stderr gets the progress, the flagged sensors, the no-data
-list and the result. Every sensor, one row each, is in the files (-o).
+Output: stdout gets one row per host and source (hwmon, with nvidia-smi's GPUs, and ipmi): "Host Source Sensors Inlet Avg CPU Avg
+GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags", the hottest and the average of each type; stderr gets the progress,
+the flagged sensors, the no-data list and the result. Every sensor, one row each, is in the files (-o).
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
@@ -654,12 +654,15 @@ HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 
 # stdout: one row per host and source (hwmon, which takes nvidia-smi's GPUs too, and ipmi), the hottest reading
-# of each type and the flags
+# of each type with its average beside it (the mean of the same readings the hottest is the max of), and the flags
 SRC_AWK='NR > 1 && $6 != "none" { k = $1 " " ($2 == "gpu" ? "hwmon" : $2); if (!(k in n)) ord[++nk] = k; n[k]++
     if (!((k, $3) in m) || $8 > m[k, $3]) m[k, $3] = $8
+    s[k, $3] += $8; c[k, $3]++
     if ($12 != "-" && index("," fl[k] ",", "," $3 ":" $12 ",") == 0) fl[k] = fl[k] (fl[k] == "" ? "" : ",") $3 ":" $12 }
-    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet CPU GPU Mem NVMe NIC Other Flags"
-          for (i = 1; i <= nk; i++) { k = ord[i]; l = k " " n[k]; for (j = 1; j <= 7; j++) l = l " " (((k, ty[j]) in m) ? m[k, ty[j]] : "-"); print l, (k in fl ? fl[k] : "-") } }'
+    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet Avg CPU Avg GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags"
+          for (i = 1; i <= nk; i++) { k = ord[i]; l = k " " n[k]
+              for (j = 1; j <= 7; j++) l = l " " (((k, ty[j]) in m) ? m[k, ty[j]] " " sprintf("%.1f", s[k, ty[j]] / c[k, ty[j]]) : "- -")
+              print l, (k in fl ? fl[k] : "-") } }'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)

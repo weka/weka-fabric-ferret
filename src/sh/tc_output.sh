@@ -15,7 +15,7 @@ HOST_MAX_AWK='#@awk tc_host_max'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 
 # stdout: one row per host and source (hwmon, which takes nvidia-smi's GPUs too, and ipmi), the hottest reading
-# of each type and the flags
+# of each type with its average beside it (the mean of the same readings the hottest is the max of), and the flags
 SRC_AWK='#@awk tc_src'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High

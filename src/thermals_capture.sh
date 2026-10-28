@@ -82,9 +82,9 @@ but no high gets high = 95% of crit. A host or source that
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.
 
-Output: stdout gets one row per host and source (hwmon, with nvidia-smi's GPUs, and ipmi): "Host Source Sensors Inlet CPU GPU Mem NVMe
-NIC Other Flags", the hottest reading of each type; stderr gets the progress, the flagged sensors, the no-data
-list and the result. Every sensor, one row each, is in the files (-o).
+Output: stdout gets one row per host and source (hwmon, with nvidia-smi's GPUs, and ipmi): "Host Source Sensors Inlet Avg CPU Avg
+GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags", the hottest and the average of each type; stderr gets the progress,
+the flagged sensors, the no-data list and the result. Every sensor, one row each, is in the files (-o).
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
