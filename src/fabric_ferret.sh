@@ -110,7 +110,8 @@ Optional (default)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
   FF_OUT_DIR       where the .tgz bundle goes (.)
-  FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); default 0
+  FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
+                   for a font without braille; default 0
   FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
                    the rails differ by design (e.g. 100,50). Default: the fastest rail's most common
                    NIC speed for all, so a rail that came up slow everywhere shows as slow

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""ferret_view.py: the log of fabric_ferret.sh or thermals_capture.sh full-screen with a ferret roaming over it; at
-the end, or on error, every line goes plainly to stderr. Keys: r rolls it, q hides it; the run is never touched.
-Without a terminal the lines are copied plainly. FF_FERRET=1 turns it on."""
+"""ferret_view.py: a ferret roams over the log of fabric_ferret.sh or thermals_capture.sh, full-screen; at the end,
+or on error, every line goes plainly to stderr. Keys: r rolls it, q hides it. No terminal: plain copy.
+FF_FERRET=1 turns it on; FF_FERRET=blocks uses half blocks (a font without braille)."""
 import math
 import os
 import random
@@ -228,7 +228,38 @@ def cells(rows):
                         count[r[cx + dx]] = count.get(r[cx + dx], 0) + 1
             if bits:
                 color = max(count, key=count.get)
-                out.append((cy // 4, cx // 2, chr(0x2800 + bits), color))
+                out.append((cy // 4, cx // 2, chr(0x2800 + bits), color, None))
+    return out
+
+
+def cells_blocks(rows):
+    """(cy, cx, char, fg, bg) in half blocks, the same footprint as cells(): a cell's top and bottom halves are
+    2x2 pixels each, lit when two or more are lit, in the majority colour; both lit and differing: fg over bg."""
+    H, W = len(rows), len(rows[0])
+
+    def half(y0, x0):
+        count = {}
+        for dy in range(2):
+            if y0 + dy >= H:
+                break
+            r = rows[y0 + dy]
+            for dx in range(2):
+                if x0 + dx < W and r[x0 + dx] != ".":
+                    count[r[x0 + dx]] = count.get(r[x0 + dx], 0) + 1
+        return max(count, key=count.get) if sum(count.values()) >= 2 else None
+
+    out = []
+    for cy in range(0, H, 4):
+        for cx in range(0, W, 2):
+            top, bot = half(cy, cx), half(cy + 2, cx)
+            if top is None and bot is None:
+                continue
+            if top is None:
+                out.append((cy // 4, cx // 2, "▄", bot, None))
+            elif bot is None or top == bot:
+                out.append((cy // 4, cx // 2, "▀" if bot is None else "█", top, None))
+            else:
+                out.append((cy // 4, cx // 2, "▀", top, bot))
     return out
 
 
@@ -299,9 +330,16 @@ def run_curses(stream, log):
             else:
                 pal = {"b": curses.COLOR_MAGENTA, "d": curses.COLOR_BLUE, "k": curses.COLOR_BLACK,
                        "w": curses.COLOR_WHITE, "p": curses.COLOR_MAGENTA, "L": curses.COLOR_BLUE}
-            for n, (key, col) in enumerate(pal.items(), 1):
-                curses.init_pair(n, col, -1)
-                attr[key] = curses.color_pair(n)
+            n = 1                                   # pairs: each colour on the default background, and each on each
+            for fg in pal:                          # other (a half-block cell whose halves differ)
+                for bg in [None] + list(pal):
+                    if n >= curses.COLOR_PAIRS:
+                        break
+                    curses.init_pair(n, pal[fg], -1 if bg is None else pal[bg])
+                    attr[(fg, bg)] = curses.color_pair(n)
+                    n += 1
+        # FF_FERRET=blocks: half-block cells for a font without braille (not detectable, so never chosen by itself)
+        render = cells_blocks if os.environ.get("FF_FERRET", "") == "blocks" else cells
         hidden = False                              # q: the log alone for the rest of the run
         t = 0
         rows_c, cols_c = (PH * scale) // 4, (PW * scale) // 2       # the ferret's cell footprint
@@ -394,11 +432,11 @@ def run_curses(stream, log):
                     rows = rotate(rows, roll_angle)
                     ox -= (S // 2 - CX * scale) // 2
                     oy -= (S // 2 - CY * scale) // 4
-                for cy, cx, chr_, key in cells(rows):
+                for cy, cx, chr_, fg, bg in render(rows):
                     sy, sx = oy + cy, ox + cx
                     if 0 <= sy < rows_total and 0 <= sx < cols - 1:
                         try:
-                            scr.addstr(sy, sx, chr_, attr.get(key, 0))
+                            scr.addstr(sy, sx, chr_, attr.get((fg, bg), attr.get((fg, None), 0)))
                         except curses.error:
                             pass
             scr.refresh()

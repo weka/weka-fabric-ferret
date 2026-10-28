@@ -170,7 +170,7 @@ A host's status is the worst of its rail columns, Cross and XGrp. `SLOW(cross)` 
 
 With clients set, each iteration ends with a client phase: C1 clients→backends and C2 backends→clients in waves, then (with `full`) F1 and F2 with every client at once.
 
-**The ferret (off by default):** `FF_FERRET=1` on a terminal draws a ferret roaming over the log while the run goes, in either tool (`ferret_view.py`, kept beside the tool; `python3`, no packages). Keys: `r` rolls it, `q` hides it; nothing else, the run is never touched. When the run ends the complete log is written plainly, so the scrollback reads as it would without the ferret. Without a terminal, or with `FF_FERRET` unset or `0`, the output is exactly the plain run's.
+**The ferret (off by default):** `FF_FERRET=1` on a terminal draws a ferret roaming over the log while the run goes, in either tool (`ferret_view.py`, kept beside the tool; `python3`, no packages). Keys: `r` rolls it, `q` hides it; nothing else, the run is never touched. When the run ends the complete log is written plainly, so the scrollback reads as it would without the ferret. Without a terminal, or with `FF_FERRET` unset or `0`, the output is exactly the plain run's. `FF_FERRET=blocks` draws it in half-block characters instead, for a terminal font without braille; that cannot be detected, so it is never chosen by itself.
 
 ## Results
 

@@ -73,9 +73,9 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
   FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
-  FF_FERRET (0)    1 = on a terminal a ferret roams over the log during the run (ferret_view.py beside it,
-                   python3; r rolls it, q hides it). A dead viewer is said once, the run goes on plainly; its
-                   lines are not replayed (the files hold the data)
+  FF_FERRET (0)    1 = on a terminal a ferret roams over the log (ferret_view.py beside it, python3; r rolls it,
+                   q hides it; blocks = half blocks for a font without braille). A dead viewer: said once, the
+                   run goes on, its lines not replayed (the files hold the data)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
 nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A sensor with a crit
