@@ -1857,6 +1857,9 @@ $(document).ready(function() {{
             var back = Object.keys(topoRadialLabels).map(function(id) {{ return {{ id: id, label: topoRadialLabels[id] }}; }});
             if (back.length) {{ topoNodes.update(back); topoRadialLabels = {{}}; }}   // the labels Radial hid come back
             topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode] }});
+            // vis puts Hierarchical's physics back inside the call that turns hierarchical off, and writes them into
+            // our options object, so Radial switches physics off again in a call of its own, keyed on the mode
+            if (mode === 'radial') topoNetwork.setOptions({{ physics: {{ enabled: false }} }});
             if (mode === 'radial') topoRadialPlace();
             else if (mode !== 'hierarchical') topoNetwork.stabilize(300);
             topoApplyLabels();   // after setOptions, which put every font back at its base size
