@@ -40,6 +40,7 @@ if os.path.abspath(OUTPUT_FILE) == os.path.abspath(INPUT_FILE):   # never write 
 # (IEEE 802.3, 200/400G PAM4); NRZ links on RS(528,514) correct less. The watch level is a heuristic.
 FEC_LIMIT_BER = 2.4e-4
 FEC_WATCH_BER = 1e-5
+TOPO_DEFAULT_LAYOUT = 'radial'   # the topology map's opening layout: 'radial', 'hierarchical' or 'force' (10-29)
 
 
 def generate_html(data, output_path):
@@ -345,6 +346,7 @@ def generate_html(data, output_path):
 
     # clients: own node type, colored by their judged status (a client line is not the rail line)
     ccol = {'OK': '#4ecca3', 'SLOW': '#ffc107', 'CRITICAL': '#e94560'}
+    hot_hosts = {t['Host'] for t in data.get('temps', []) if t['Flag'].split('+')[0] in ('crit', 'high')}   # heat before fabric: these keep their label
     for host in [h for h, ns in host_nics.items() if all(n['ip'] in cnic for n in ns)]:
         nics = host_nics.pop(host)
         st = max((cnic[n['ip']]['status'] for n in nics), key=lambda s: {'OK': 0, 'SLOW': 1, 'CRITICAL': 2}.get(s, 3))
@@ -353,7 +355,7 @@ def generate_html(data, output_path):
             'id': host, 'label': host, 'group': 'client', 'level': hlevel,
             'color': {'background': ccol.get(st, '#666666'), 'border': '#ffffff'},
             'title': f'{host} (client, {st}, avg {avg:.0f} Gbps)' + ''.join(nic_line(n, f" ({cnic[n['ip']]['status']})") for n in nics),
-            'hostAvg': round(avg, 1), 'isDown': st not in ccol,
+            'hostAvg': round(avg, 1), 'isDown': st not in ccol, 'hot': host in hot_hosts,
         }
         for n in nics:
             nic_edges(host, 'client', n, ccol.get(cnic[n['ip']]['status'], '#666666'), [6, 4])
@@ -367,7 +369,7 @@ def generate_html(data, output_path):
             'color': {'background': color, 'border': color},
             'title': f'{host} (avg {host_avg:.0f} Gbps)' + ''.join(nic_line(n) for n in nics),
             'hostAvg': round(host_avg, 1),
-            'isDown': is_down,
+            'isDown': is_down, 'hot': host in hot_hosts,
         }
         for n in nics:
             edge_color = '#4ecca3' if n['avg_gbps'] >= G else '#0dcaf0' if n['avg_gbps'] >= F else '#ffc107' if n['avg_gbps'] >= S else '#e94560'
@@ -835,9 +837,9 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div>
                 <label style="color:#8899aa;">Layout:</label>
                 <div class="btn-group btn-group-sm ms-1">
-                    <button class="btn btn-outline-light active" id="tBtnHier" onclick="topoSetLayout('hierarchical')">Hierarchical</button>
-                    <button class="btn btn-outline-light" id="tBtnForce" onclick="topoSetLayout('force')">Force</button>
-                    <button class="btn btn-outline-light" id="tBtnRadial" onclick="topoSetLayout('radial')">Radial</button>
+                    <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'hierarchical' else ''}" id="tBtnHier" onclick="topoSetLayout('hierarchical')">Hierarchical</button>
+                    <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'force' else ''}" id="tBtnForce" onclick="topoSetLayout('force')">Force</button>
+                    <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'radial' else ''}" id="tBtnRadial" onclick="topoSetLayout('radial')">Radial</button>
                 </div>
             </div>
             <!-- Filter mode toggle -->
@@ -907,6 +909,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         </div>
         <div class="card-body p-0" style="position:relative;">
             <div id="topoNetwork" style="min-height:420px; background:#1a1a2e;"></div>
+            <div id="topoToast" style="position:absolute; bottom:24px; left:50%; transform:translateX(-50%); background:#0f3460; color:#4ecca3; border:1px solid #4ecca3; border-radius:6px; padding:6px 14px; font-size:0.9rem; opacity:0; transition:opacity 0.3s; pointer-events:none;"></div>
             <!-- Legend overlay — top-left of map, hover to expand -->
             <div id="topoLegend" style="position:absolute; top:10px; left:10px; background:rgba(15,52,96,0.95); padding:8px 12px; border-radius:6px; font-size:0.8rem; color:#e0e0e0; line-height:1.7; z-index:10; min-width:160px; cursor:default;">
                 <div style="font-weight:600; margin-bottom:4px; color:#4ecca3;">Displayed</div>
@@ -1355,48 +1358,96 @@ $(document).ready(function() {{
     }};
 
     // Radial: spines at the centre (half a step off the leaves' angles), leaves on a ring, hosts and clients on an
-    // outer ring grouped by the leaves they reach (a dual-homed host between its two), each group spread on the
-    // arc between its leaves; pinned, leafless last
-    var topoRingIds = [];
+    // outer ring grouped by the leaves they reach; each group's arc sized by its host count (a floor of 12 hosts
+    // plus a share of the rest), centred on its leaves, overflow on outer rings; labels go when hosts sit
+    // closer than a label is wide
+    var topoRingIds = [], topoRadialLabels = {{}};   // the labels Radial hid, by node id, for the other layouts
+    var R_HOST = 680, RING = 46, MINGAP = 22, LABELW = 90, GAP = 0.04;   // px: host ring, between rings, between hosts, a label; rad between groups
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
         var leavesOf = {{}};   // a host's leaves: its links' leaves, and through a bond node its members' leaves
         topoEdgesData.forEach(function(e) {{ if (!e.uplink && !e.bondtrunk) (leavesOf[e.from] = leavesOf[e.from] || {{}})[e.to] = 1; }});
         topoEdgesData.forEach(function(e) {{ if (e.bondtrunk) Object.keys(leavesOf[e.to] || {{}}).forEach(function(l) {{ (leavesOf[e.from] = leavesOf[e.from] || {{}})[l] = 1; }}); }});
         var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']), bonds = byGroup(['bond']);
-        var last = -Math.PI / 2, angleOf = {{}};
-        var pin = function(n, r, a) {{ topoNodes.update({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: {{ x: true, y: true }} }});
-                                      topoRingIds.push(n.id); angleOf[n.id] = a; if (a > last) last = a; }};
+        var angleOf = {{}}, ringOf = {{}}, placed = [];   // one DataSet update at the end: thousands of single updates stall the page
+        // placed, not fixed: physics is off, so a node stays where it is put and can still be dragged (dragEnd pins it)
+        var pin = function(n, r, a) {{ placed.push({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: false }});
+                                      topoRingIds.push(n.id); angleOf[n.id] = a; }};
         topoRingIds = [];
         sp.forEach(function(n, i) {{ pin(n, sp.length > 1 ? 90 : 0, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length); }});
         var leafAngle = {{}};
         lf.forEach(function(n, i) {{ leafAngle[n.id] = -Math.PI / 2 + 2 * Math.PI * i / lf.length; pin(n, 340, leafAngle[n.id]); }});
-        var groups = {{}}, loose = [], sector = 2 * Math.PI / Math.max(1, lf.length);
+        var groups = {{}};
         hs.forEach(function(n) {{
             var ls = Object.keys(leavesOf[n.id] || {{}}).filter(function(l) {{ return l in leafAngle; }}).sort();
-            if (ls.length) (groups[ls.join('|')] = groups[ls.join('|')] || {{ leaves: ls, hosts: [] }}).hosts.push(n); else loose.push(n);
+            (groups[ls.join('|')] = groups[ls.join('|')] || {{ leaves: ls, hosts: [] }}).hosts.push(n);
         }});
-        Object.keys(groups).sort().forEach(function(k) {{
-            // the group's centre = the midpoint of the shorter arc over its leaves' angles (the arc after the widest
-            // gap); its width = 0.84 of that arc, at least 0.84 of one sector; hosts spread inside it
+        // a group's preferred angle: the midpoint of the shorter arc over its leaves (the arc after the widest gap);
+        // leafless hosts prefer the left. Groups go round in that order
+        var gl = Object.keys(groups).map(function(k) {{
             var g = groups[k], as = g.leaves.map(function(l) {{ return leafAngle[l]; }}).sort(function(p, q) {{ return p - q; }});
+            if (!as.length) {{ g.pref = Math.PI; return g; }}
             var start = as[0], span = as[as.length - 1] - as[0], gap = 2 * Math.PI - span;
             for (var j = 0; j + 1 < as.length; j++) if (as[j + 1] - as[j] > gap) {{ gap = as[j + 1] - as[j]; start = as[j + 1]; span = 2 * Math.PI - gap; }}
-            var a = start + span / 2, w = Math.max(0.84 * span, 0.84 * sector);
-            g.hosts.sort(function(p, q) {{ return p.id < q.id ? -1 : 1; }});
-            g.hosts.forEach(function(n, i) {{ pin(n, 680, a + (i - (g.hosts.length - 1) / 2) * w / g.hosts.length); }});
+            g.pref = start + span / 2; g.span = span; return g;
+        }}).sort(function(p, q) {{ return (p.pref + 2 * Math.PI) % (2 * Math.PI) - (q.pref + 2 * Math.PI) % (2 * Math.PI); }});
+        var total = Math.max(1, hs.length), room = 2 * Math.PI - GAP * gl.length, fsum = 0;
+        gl.forEach(function(g) {{ g.floor = Math.min(g.hosts.length, 12) * MINGAP / R_HOST; fsum += g.floor; }});
+        if (fsum > room) gl.forEach(function(g) {{ g.floor *= room / fsum; }});   // many groups: the floors shrink to fit, arcs never overlap
+        var rest = Math.max(0, room - fsum);
+        // a group's arc: at most what its hosts need (label width if the share allows labels, else host spacing),
+        // and a multi-leaf group stays within 0.84 of its leaves' span (outside it a link crosses the map),
+        // spilling onto outer rings instead
+        gl.forEach(function(g) {{
+            var share = g.floor + rest * g.hosts.length / total, n = g.hosts.length;
+            g.arc = Math.min(share, (share * R_HOST / n >= LABELW ? LABELW : MINGAP) * n / R_HOST, g.span ? 0.84 * g.span : Infinity);
+            g.mid = (g.pref + 2 * Math.PI) % (2 * Math.PI);   // 0..2pi, so the ring order below is the sorted order
         }});
-        var tail = last, step = 2 * Math.PI / Math.max(1, hs.length);
-        loose.forEach(function(n, i) {{ pin(n, 680, tail + (i + 1) * step); }});
-        bonds.forEach(function(n) {{ if (n.host in angleOf) pin(n, 560, angleOf[n.host]); }});   // a bond just inside its host
-        // a member's no-switch marker beside its bond, a little outward, each one a step aside
+        // each group centred on its preferred angle; neighbours that overlap are pushed apart equally, round the ring,
+        // until none do (the arcs fit the circle, so this settles)
+        for (var pass = 0; pass < 60 && gl.length > 1; pass++) {{
+            var moved = false;
+            for (var i = 0; i < gl.length; i++) {{
+                var a = gl[i], b = gl[(i + 1) % gl.length], d = b.mid - a.mid + (i + 1 === gl.length ? 2 * Math.PI : 0), need = (a.arc + b.arc) / 2 + GAP;
+                if (d < need - 1e-9) {{ var push = (need - d) / 2; a.mid -= push; b.mid += push; moved = true; }}
+            }}
+            if (!moved) break;
+        }}
+        var relabel = [];
+        gl.forEach(function(g) {{
+            var per = Math.max(1, Math.floor(g.arc * R_HOST / MINGAP)), rings = Math.ceil(g.hosts.length / per), m = Math.ceil(g.hosts.length / rings);
+            var labels = g.arc * R_HOST / m >= LABELW;
+            g.hosts.sort(function(p, q) {{ return p.id < q.id ? -1 : 1; }});
+            g.hosts.forEach(function(n, i) {{
+                var ring = Math.floor(i / m), k = i % m, cnt = Math.min(m, g.hosts.length - ring * m);
+                pin(n, R_HOST + ring * RING, g.mid - g.arc / 2 + g.arc * (k + 0.5) / cnt);
+                ringOf[n.id] = ring;
+                if (!labels && !n.hot && !(n.id in topoRadialLabels)) {{ topoRadialLabels[n.id] = n.label; relabel.push({{ id: n.id, label: '' }}); }}
+            }});
+        }});
+        // a bond sits in the band inside its host, one radius per host ring, so spilled rings never stack the bonds;
+        // a member's no-switch marker a little outside its bond, each one a step aside; both lose their label with the host
+        var bondR = {{}};
+        bonds.forEach(function(n) {{
+            if (!(n.host in angleOf)) return;
+            bondR[n.id] = R_HOST - 70 - (ringOf[n.host] % 9) * 26;
+            pin(n, bondR[n.id], angleOf[n.host]);
+            if (n.host in topoRadialLabels && !(n.id in topoRadialLabels)) {{ topoRadialLabels[n.id] = n.label; relabel.push({{ id: n.id, label: '' }}); }}
+        }});
         var stubs = byGroup(['stub']), aside = {{}};
-        stubs.forEach(function(n) {{ if (n.host in angleOf) {{ aside[n.host] = (aside[n.host] || 0) + 1; pin(n, 600, angleOf[n.host] + 0.03 * aside[n.host]); }} }});
+        stubs.forEach(function(n) {{
+            if (!(n.bond in bondR)) return;
+            aside[n.bond] = (aside[n.bond] || 0) + 1;
+            pin(n, bondR[n.bond] + 40, angleOf[n.host] + 0.03 * aside[n.bond]);
+            if (n.host in topoRadialLabels && !(n.id in topoRadialLabels)) {{ topoRadialLabels[n.id] = n.label; relabel.push({{ id: n.id, label: '' }}); }}
+        }});
+        topoNodes.update(placed.concat(relabel));
         topoNetwork.fit();
     }}
 
     var topoNetwork = null;
-    var topoCurrentLayout = 'hierarchical';
+    var topoCurrentLayout = '{TOPO_DEFAULT_LAYOUT}';   // the opening layout: TOPO_DEFAULT_LAYOUT at the top of generate_dashboard.py
+    var TOPO_BIG = 400;   // above this many nodes only Radial is offered: at 2000 clients Hierarchical blocked the page for seconds, then crawled
     var topoBondHost = {{}};   // bond node id -> its host
     topoNodesData.forEach(function(n) {{ if (n.group === 'bond') topoBondHost[n.id] = n.host; }});
     var topoInitialized = false;
@@ -1527,8 +1578,9 @@ $(document).ready(function() {{
         // Count visible links by bucket
         var l350=0, l300=0, l250=0, l200=0, lLow=0, lDown=0, lVis=0;
         var downIps = new Set({json.dumps(data['down_ips'])});
+        var edgeIdList = topoEdges.getIds();   // once, not per edge: getIds in the loop was quadratic
         topoEdgesData.forEach(function(e, i) {{
-            var eid = topoEdges.getIds()[i];
+            var eid = edgeIdList[i];
             if (!eid) return;
             var edge = topoEdges.get(eid);
             if (edge.hidden) return;
@@ -1597,8 +1649,21 @@ $(document).ready(function() {{
     // Lazy init on tab show
     $('a[href="#tab-topology"]').on('shown.bs.tab', function() {{
         topoSize();
-        if (!topoInitialized) {{ topoInit(); topoInitialized = true; topoUpdateLegend(); }}
+        if (!topoInitialized) {{ topoInit(); topoInitialized = true; topoLayoutLimit(); topoSetLayout(topoCurrentLayout); topoUpdateLegend(); }}
     }});
+    // above TOPO_BIG nodes the physics layouts are off the menu (their buttons say why) and the map stays Radial
+    function topoLayoutLimit() {{
+        var big = topoNodesData.length > TOPO_BIG;
+        [['tBtnHier', 'hierarchical'], ['tBtnForce', 'force']].forEach(function(b) {{
+            var el = document.getElementById(b[0]); el.disabled = big; el.style.opacity = big ? 0.4 : '';
+            el.title = big ? 'Radial only above ' + TOPO_BIG + ' nodes: this layout stalls the page with ' + topoNodesData.length : '';
+        }});
+        if (big) topoCurrentLayout = 'radial';
+    }}
+    function topoToast(msg) {{
+        var t = document.getElementById('topoToast'); t.textContent = msg; t.style.opacity = '1';
+        clearTimeout(topoToast.h); topoToast.h = setTimeout(function() {{ t.style.opacity = '0'; }}, 1800);
+    }}
 
     // --- Layout toggle ---
     window.topoSetLayout = function(mode) {{
@@ -1608,6 +1673,8 @@ $(document).ready(function() {{
         document.getElementById(btnId).classList.add('active');
         if (topoNetwork) {{
             if (topoRingIds.length) {{ topoNodes.update(topoRingIds.map(function(id) {{ return {{ id: id, fixed: false }}; }})); topoRingIds = []; }}
+            var back = Object.keys(topoRadialLabels).map(function(id) {{ return {{ id: id, label: topoRadialLabels[id] }}; }});
+            if (back.length) {{ topoNodes.update(back); topoRadialLabels = {{}}; }}   // the labels Radial hid come back
             topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode] }});
             if (mode === 'radial') topoRadialPlace();
             else if (mode !== 'hierarchical') topoNetwork.stabilize(300);
@@ -1755,9 +1822,13 @@ $(document).ready(function() {{
         document.getElementById('topoSwitchSelect').value = '';
         document.querySelectorAll('#topoFilterBtns .btn').forEach(function(b) {{ b.classList.remove('active'); }});
         document.querySelector('#topoFilterBtns .btn').classList.add('active');  // "All" is first
-        topoSetLayout(topoCurrentLayout);
+        // the map as it opened: the panel closed, nothing selected, the opening layout (Radial puts every node back)
+        topoHidePanel();
+        topoNetwork.unselectAll();
+        topoSetLayout('{TOPO_DEFAULT_LAYOUT}');
         topoNetwork.fit();
         topoUpdateLegend();
+        topoToast('Map reset');
     }};
 }});
 </script>
