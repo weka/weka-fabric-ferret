@@ -562,6 +562,8 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         tonly = data.get('temps_only', [])   # hosts with no root for the tests, read for temperatures only
         if tonly:
             nlist += f"<li class=\"text-info\">Temperatures only (no root for the tests): {escape(', '.join(tonly))}</li>"
+        if 'bmc' in types:
+            nlist += '<li class="text-info">older bundle: BMC sensors untyped (read before the seven types)</li>'
         bad = sum(1 for t in flg if fr(t['Flag']) <= 1)
         temps_flagged, temps_bad = len(flg), bad
         m = data['metadata']
