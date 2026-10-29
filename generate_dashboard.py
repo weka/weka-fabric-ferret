@@ -1290,20 +1290,27 @@ $(document).ready(function() {{
         }},
     }};
 
-    // Radial: spines at the centre, leaves on a ring, hosts and clients on an outer ring beside their leaf; pinned there
+    // Radial: spines at the centre (half a step off the leaves' angles), leaves on a ring, hosts and clients on an
+    // outer ring in their own leaf's sector, so no two rings line up; pinned there, leafless hosts last
     var topoRingIds = [];
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
         var leafOf = {{}};
         topoEdgesData.forEach(function(e) {{ if (!e.uplink && !(e.from in leafOf)) leafOf[e.from] = e.to; }});
         var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']);
-        var order = {{}}; lf.forEach(function(n, i) {{ order[n.id] = i; }});
-        hs.sort(function(a, b) {{ return (order[leafOf[a.id]] || 0) - (order[leafOf[b.id]] || 0) || (a.id < b.id ? -1 : 1); }});
-        var place = function(list, r) {{ list.forEach(function(n, i) {{
-            var a = -Math.PI / 2 + 2 * Math.PI * i / list.length;
-            topoNodes.update({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: {{ x: true, y: true }} }}); topoRingIds.push(n.id); }}); }};
+        var last = -Math.PI / 2;
+        var pin = function(n, r, a) {{ topoNodes.update({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: {{ x: true, y: true }} }});
+                                      topoRingIds.push(n.id); if (a > last) last = a; }};
         topoRingIds = [];
-        place(sp, sp.length > 1 ? 90 : 0); place(lf, 340); place(hs, 680);
+        sp.forEach(function(n, i) {{ pin(n, sp.length > 1 ? 90 : 0, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length); }});
+        var leafAngle = {{}};
+        lf.forEach(function(n, i) {{ leafAngle[n.id] = -Math.PI / 2 + 2 * Math.PI * i / lf.length; pin(n, 340, leafAngle[n.id]); }});
+        var step = 2 * Math.PI / Math.max(1, hs.length), byLeaf = {{}}, loose = [];
+        hs.forEach(function(n) {{ var l = leafOf[n.id]; if (l in leafAngle) (byLeaf[l] = byLeaf[l] || []).push(n); else loose.push(n); }});
+        lf.forEach(function(l) {{ var m = (byLeaf[l.id] || []).sort(function(a, b) {{ return a.id < b.id ? -1 : 1; }});
+            m.forEach(function(n, i) {{ pin(n, 680, leafAngle[l.id] + (i - (m.length - 1) / 2) * step); }}); }});
+        var tail = last;
+        loose.forEach(function(n, i) {{ pin(n, 680, tail + (i + 1) * step); }});
         topoNetwork.fit();
     }}
 
