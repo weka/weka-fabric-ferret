@@ -874,7 +874,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <!-- Layout -->
             <div>
                 <label style="color:#8899aa;">Layout:</label>
-                <div class="btn-group btn-group-sm ms-1">
+                <div class="btn-group btn-group-sm ms-1" id="tLayoutBtns">
                     <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'hierarchical' else ''}" id="tBtnHier" onclick="topoSetLayout('hierarchical')">Hierarchical</button>
                     <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'force' else ''}" id="tBtnForce" onclick="topoSetLayout('force')">Force</button>
                     <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'radial' else ''}" id="tBtnRadial" onclick="topoSetLayout('radial')">Radial</button>
@@ -886,6 +886,15 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <button class="btn btn-sm btn-outline-light" onclick="topoFit()">Fit</button>
                 <button class="btn btn-sm btn-outline-light" onclick="topoUnpinAll()">Unpin all</button>
                 <button class="btn btn-sm btn-outline-success" onclick="resetTopo()">Reset</button>
+            </div>
+            <!-- Labels: Auto hides the names Radial crowds, All shows every name, None clears every node label -->
+            <div>
+                <label style="color:#8899aa;">Labels:</label>
+                <div class="btn-group btn-group-sm ms-1" id="topoLabelBtns">
+                    <button class="btn btn-outline-light active" id="tLblAuto" onclick="topoSetLabels('auto')">Auto</button>
+                    <button class="btn btn-outline-light" id="tLblAll" onclick="topoSetLabels('all')">All</button>
+                    <button class="btn btn-outline-light" id="tLblNone" onclick="topoSetLabels('none')">None</button>
+                </div>
             </div>
             <!-- Filter mode toggle -->
             <div class="form-check form-switch">
@@ -906,10 +915,6 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div>
             <!-- Toggles -->
             <div class="form-check form-switch ms-2">
-                <input class="form-check-input" type="checkbox" id="topoToggleLabels" checked onchange="topoToggleOpt('labels')">
-                <label class="form-check-label" for="topoToggleLabels" style="color:#8899aa;">Labels</label>
-            </div>
-            <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="topoTogglePhysics" checked onchange="topoToggleOpt('physics')">
                 <label class="form-check-label" for="topoTogglePhysics" style="color:#8899aa;">Physics</label>
             </div>
@@ -1485,6 +1490,7 @@ $(document).ready(function() {{
         }});
         topoNodes.update(placed.concat(relabel));
         topoNetwork.fit();
+        topoApplyLabels();
     }}
 
     var topoNetwork = null;
@@ -1820,10 +1826,30 @@ $(document).ready(function() {{
         clearTimeout(topoToast.h); topoToast.h = setTimeout(function() {{ t.style.opacity = '0'; }}, 1800);
     }}
 
+    // --- Labels: Auto, All, None ---
+    var topoLabelMode = 'auto';
+    // the label text by mode (Auto hides the names Radial crowded, All brings them back, None leaves the text alone),
+    // then the font sizes from topoBaseOpts (None sets every node font to 0; edge labels are verdict marks, untouched)
+    function topoApplyLabels() {{
+        if (!topoNetwork) return;
+        var ids = Object.keys(topoRadialLabels);
+        if (topoLabelMode === 'auto' && topoCurrentLayout === 'radial') topoNodes.update(ids.map(function(id) {{ return {{ id: id, label: '' }}; }}));
+        else if (topoLabelMode !== 'none') topoNodes.update(ids.map(function(id) {{ return {{ id: id, label: topoRadialLabels[id] }}; }}));
+        var none = topoLabelMode === 'none', groups = {{}};
+        Object.keys(topoBaseOpts.groups).forEach(function(g) {{ if (topoBaseOpts.groups[g].font) groups[g] = {{ font: {{ size: none ? 0 : topoBaseOpts.groups[g].font.size }} }}; }});
+        topoNetwork.setOptions({{ nodes: {{ font: {{ size: none ? 0 : topoBaseOpts.nodes.font.size }} }}, groups: groups }});
+    }}
+    window.topoSetLabels = function(mode) {{
+        topoLabelMode = mode;
+        var btnId = {{ auto: 'tLblAuto', all: 'tLblAll', none: 'tLblNone' }}[mode];
+        document.querySelectorAll('#topoLabelBtns .btn').forEach(function(b) {{ b.classList.toggle('active', b.id === btnId); }});
+        topoApplyLabels();
+    }};
+
     // --- Layout toggle ---
     window.topoSetLayout = function(mode) {{
         topoCurrentLayout = mode;
-        document.querySelectorAll('#tab-topology .btn-group-sm .btn').forEach(function(b) {{ b.classList.remove('active'); }});
+        document.querySelectorAll('#tLayoutBtns .btn').forEach(function(b) {{ b.classList.remove('active'); }});
         var btnId = {{ hierarchical: 'tBtnHier', force: 'tBtnForce', radial: 'tBtnRadial' }}[mode];
         document.getElementById(btnId).classList.add('active');
         if (topoNetwork) {{
@@ -1833,6 +1859,7 @@ $(document).ready(function() {{
             topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode] }});
             if (mode === 'radial') topoRadialPlace();
             else if (mode !== 'hierarchical') topoNetwork.stabilize(300);
+            topoApplyLabels();   // after setOptions, which put every font back at its base size
         }}
     }};
 
@@ -1949,10 +1976,7 @@ $(document).ready(function() {{
     // --- Option toggles ---
     window.topoToggleOpt = function(opt) {{
         if (!topoNetwork) return;
-        if (opt === 'labels') {{
-            var show = document.getElementById('topoToggleLabels').checked;
-            topoNetwork.setOptions({{ nodes: {{ font: {{ size: show ? 11 : 0 }} }}, groups: {{ switch: {{ font: {{ size: show ? 14 : 0 }} }} }} }});
-        }} else if (opt === 'physics') {{
+        if (opt === 'physics') {{
             var on = document.getElementById('topoTogglePhysics').checked;
             topoNetwork.setOptions({{ physics: {{ enabled: on }} }});
         }} else if (opt === 'smooth') {{
@@ -1981,6 +2005,7 @@ $(document).ready(function() {{
         topoHidePanel();
         topoNetwork.unselectAll();
         topoSetLayout('{TOPO_DEFAULT_LAYOUT}');
+        topoSetLabels('auto');
         topoNetwork.fit();
         topoNetwork.unselectAll();   // once more after the layout call, which left the dragged node highlighted
         topoUpdateLegend();
