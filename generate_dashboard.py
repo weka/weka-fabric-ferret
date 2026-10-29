@@ -547,6 +547,10 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         def fcls(f):
             return 'text-danger' if fr(f) <= 1 else 'text-warning' if f != '-' else ''
         types = ('inlet', 'cpu', 'gpu', 'mem', 'nvme', 'nic', 'other')   # thermals_capture.sh's order
+        # a bundle from before the seven types calls every BMC sensor bmc: its own column then, so no reading is dropped
+        if any(t['Type'] == 'bmc' for t in rd):
+            types += ('bmc',)
+        theads = ''.join(f"<th>{x.upper() if x in ('cpu', 'gpu', 'nic', 'bmc') else 'NVMe' if x == 'nvme' else x.capitalize()} max</th>" for x in types)
         hosts = sorted(per, key=lambda h: (min([fr(f.split(':', 1)[1]) for f in hflags[h]] or [9]), h))
         hrows = ''.join(f"<tr><td>{escape(h)}</td>" + ''.join(f"<td>{per[h][x]:g}</td>" if x in per[h] else '<td>-</td>' for x in types)
                         + f"<td class=\"{fcls(hflags[h][0].split(':', 1)[1]) if hflags[h] else ''}\">{escape(', '.join(hflags[h]) or '-')}</td></tr>" for h in hosts)
@@ -567,7 +571,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
 <div class="card-body" style="max-height:420px; overflow-y:auto;">
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Read as thermals_capture.sh reads them: hwmon (CPU, NVMe, NIC…) and nvidia-smi (GPUs) before the run and after every phase; the BMC (ipmitool sensor: inlet, exhaust, GPU board, drives…) on the host once per iteration and at the end, and a -t file's bmc lines out of band. Each sensor is typed by what it measures: inlet, cpu, gpu, mem, nvme, nic or other. Flags: crit / high at or above the sensor's threshold (BMC: its own status), near = within {escape(m.get('temp_margin', '5'))}C of high, rise = up more than {escape(m.get('temp_rise', '10'))}C over the run. Module (optic) temperatures are in the NIC tables.</p>
 {'<ul class="mb-2">' + nlist + '</ul>' if nlist else ''}
-<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Inlet max</th><th>CPU max</th><th>GPU max</th><th>Mem max</th><th>NVMe max</th><th>NIC max</th><th>Other max</th><th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
+<table class="table table-sm table-striped"><thead><tr><th>Host</th>{theads}<th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
 {('<p class="mb-1"><b>Flagged sensors</b></p><table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Type</th><th>Chip / device</th><th>Sensor</th><th>First</th><th>Min</th><th>Max</th><th>Last</th><th>High</th><th>Crit</th><th>Flag</th></tr></thead><tbody>' + frows + '</tbody></table>') if frows else ''}
 </div></div>"""
 
