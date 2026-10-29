@@ -319,30 +319,59 @@ def generate_html(data, output_path):
                                    'name': f"{host} {n['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps']})
             return
         b, bid = n['bond'], f"{host}|{n['nic']}"
+        bpanel = {**panel('bond', host, role, n, n), 'members': [m['nic'] for m in n['members']], 'up': b['up'], 'total': b['total'],
+                  'leaves': [{'nic': m['nic'], 'leaf': leaf_of(m), 'down': m['nic'] in b['down']} for m in n['members']]}
         topo_nodes[bid] = {
-            'id': bid, 'label': f"{n['nic']} {n['ip']}", 'group': 'bond', 'level': 2, 'host': host,
+            'id': bid, 'label': f"{n['nic']} {n['ip']}", 'group': 'bond', 'level': 2, 'host': host, 'panel': bpanel,
             'title': f"{host} {n['nic']} {n['ip']}: {b['up']} of {b['total']} members up" + ''.join(
                 f"\n{m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen'}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members']),
         }
         topo_edges.append({'from': host, 'to': bid, 'color': {'color': color, 'highlight': '#ffffff'}, 'dashes': dashes, 'bondtrunk': True,
                            'title': f"{host} {n['nic']} {n['ip']} → {n['switch']} — {n['avg_gbps']} Gbps (bond, {b['up']} of {b['total']} members up)",
-                           'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {n['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'],
-                           'panel': {**panel('bond', host, role, n, n), 'members': [m['nic'] for m in n['members']], 'up': b['up'], 'total': b['total']}})
+                           'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {n['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'], 'panel': bpanel})
         for m in n['members']:
             mdown = m['nic'] in b['down']
             seen = m['switch'] in topo_nodes and m['switch'] != 'unknown'
+            mpanel = {**panel('member', host, role, {**n, 'nic': m['nic']}, m), 'member_of': n['nic'], 'member_down': mdown, 'no_switch': not seen}
             if not seen:
                 # no switch seen (a down port sends no LLDP): a short stub to a marker that floats beside the bond,
                 # never a link to a leaf nobody saw and no guess at one (a miscabled server lands where it lands)
                 sid = f"{host}|{m['nic']}"
-                topo_nodes[sid] = {'id': sid, 'label': f"✕ {m['nic']}", 'group': 'stub', 'level': 2, 'host': host, 'bond': bid,
+                topo_nodes[sid] = {'id': sid, 'label': f"✕ {m['nic']}", 'group': 'stub', 'level': 2, 'host': host, 'bond': bid, 'panel': mpanel,
                                    'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']}: {'down' if mdown else 'up'}, no switch seen"}
             topo_edges.append({'from': bid, 'to': m['switch'] if seen else sid, 'label': m['nic'], 'font': {'size': 10, 'color': '#8899aa', 'strokeWidth': 0},
                                'color': {'color': '#e94560' if mdown else '#8899aa', 'highlight': '#ffffff'}, 'dashes': [4, 4] if mdown else False,   # by member state; the trunk carries the run's colour
                                'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']} → {m['switch'] if seen else 'no switch seen'}{' — member down' if mdown else ''}",
                                'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {m['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'], 'stub': not seen,
-                               'panel': {**panel('member', host, role, {**n, 'nic': m['nic']}, m), 'member_of': n['nic'], 'member_down': mdown,
-                                         'no_switch': not seen}})
+                               'panel': mpanel})
+
+    def leaf_of(l):
+        return l['switch'] if l['switch'] not in ('unknown', '') else 'no switch seen'
+
+    def temps_of(host):
+        """A host's heat for its panel: the hottest reading per sensor type, and every flagged sensor."""
+        per, flags = {}, []
+        for t in data.get('temps', []):
+            if t['Host'] != host or t['Sensor'] == 'none':
+                continue
+            per[t['Type']] = max(per.get(t['Type'], -999.0), float(t['Max_C']))
+            if t['Flag'] != '-':
+                flags.append(f"{t['Type']} {t['Sensor']} {t['Max_C']}C {t['Flag']}")
+        return {'max': [f'{k} {v:g}C' for k, v in sorted(per.items())], 'flags': flags}
+
+    def host_panel(host, role, nics, status=None):
+        """What a tap on a host shows: its NICs (the leaf from LLDP, bond members), the worst run, its heat."""
+        return {'kind': 'host', 'host': host, 'role': role, 'status': status, 'worst': min((n['avg_gbps'] for n in nics), default=0),
+                'nics': [{'nic': n['nic'], 'ip': n['ip'], 'leaf': leaf_of(n), 'gbps': n['avg_gbps'], 'down': n['ip'] in data['down_ips'],
+                          'status': cnic[n['ip']]['status'] if n['ip'] in cnic else '',
+                          'members': [{'nic': m['nic'], 'leaf': leaf_of(m), 'down': m['nic'] in n['bond']['down']} for m in n['members']]} for n in nics],
+                'temps': temps_of(host)}
+
+    on_leaf = defaultdict(list)   # leaf -> the NICs on it (a bond by its members), for the leaf's panel
+
+    def note_leaf(host, n):
+        for l in (n['members'] or [n]):
+            on_leaf[l['switch']].append({'host': host, 'nic': l['nic'], 'ip': n['ip'], 'gbps': n['avg_gbps']})
 
     # clients: own node type, colored by their judged status (a client line is not the rail line)
     ccol = {'OK': '#4ecca3', 'SLOW': '#ffc107', 'CRITICAL': '#e94560'}
@@ -355,9 +384,10 @@ def generate_html(data, output_path):
             'id': host, 'label': host, 'group': 'client', 'level': hlevel,
             'color': {'background': ccol.get(st, '#666666'), 'border': '#ffffff'},
             'title': f'{host} (client, {st}, avg {avg:.0f} Gbps)' + ''.join(nic_line(n, f" ({cnic[n['ip']]['status']})") for n in nics),
-            'hostAvg': round(avg, 1), 'isDown': st not in ccol, 'hot': host in hot_hosts,
+            'hostAvg': round(avg, 1), 'isDown': st not in ccol, 'hot': host in hot_hosts, 'panel': host_panel(host, 'client', nics, st),
         }
         for n in nics:
+            note_leaf(host, n)
             nic_edges(host, 'client', n, ccol.get(cnic[n['ip']]['status'], '#666666'), [6, 4])
 
     for host, nics in host_nics.items():
@@ -369,13 +399,21 @@ def generate_html(data, output_path):
             'color': {'background': color, 'border': color},
             'title': f'{host} (avg {host_avg:.0f} Gbps)' + ''.join(nic_line(n) for n in nics),
             'hostAvg': round(host_avg, 1),
-            'isDown': is_down, 'hot': host in hot_hosts,
+            'isDown': is_down, 'hot': host in hot_hosts, 'panel': host_panel(host, 'backend', nics),
         }
         for n in nics:
             edge_color = '#4ecca3' if n['avg_gbps'] >= G else '#0dcaf0' if n['avg_gbps'] >= F else '#ffc107' if n['avg_gbps'] >= S else '#e94560'
             if n['ip'] in data['down_ips']:
                 edge_color = '#666666'
+            note_leaf(host, n)
             nic_edges(host, 'backend', n, edge_color, False)
+
+    # the leaf and spine panels, once the hosts are placed: a leaf's NICs (a bond by its members); the uplinks of
+    # either come from the uplink edges' panels on the page (topoUplinksOf), not a second copy here
+    for sw in real_switches:
+        topo_nodes[sw]['panel'] = {'kind': 'leaf', 'leaf': sw, 'ports': switch_counts[sw], 'nics': on_leaf.get(sw, [])}
+    for sid in spines:
+        topo_nodes[sid]['panel'] = {'kind': 'spine', 'spine': topo_nodes[sid]['label'], 'spines': ns}
 
     leg_clients = ' &nbsp; Clients: <b id="legClients">0</b>' if cnic else ''
     topo_nodes_json = json.dumps(list(topo_nodes.values()))
@@ -842,6 +880,13 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                     <button class="btn btn-outline-light{' active' if TOPO_DEFAULT_LAYOUT == 'radial' else ''}" id="tBtnRadial" onclick="topoSetLayout('radial')">Radial</button>
                 </div>
             </div>
+            <!-- the map's buttons sit on the left, clear of the drawer a panel opens on the right -->
+            <div>
+                <button class="btn btn-sm btn-outline-info" onclick="topoShowPanel('uplinks')">Uplinks</button>
+                <button class="btn btn-sm btn-outline-light" onclick="topoFit()">Fit</button>
+                <button class="btn btn-sm btn-outline-light" onclick="topoUnpinAll()">Unpin all</button>
+                <button class="btn btn-sm btn-outline-success" onclick="resetTopo()">Reset</button>
+            </div>
             <!-- Filter mode toggle -->
             <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="topoFilterMode">
@@ -871,11 +916,6 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div class="form-check form-switch">
                 <input class="form-check-input" type="checkbox" id="topoToggleSmooth" checked onchange="topoToggleOpt('smooth')">
                 <label class="form-check-label" for="topoToggleSmooth" style="color:#8899aa;">Smooth edges</label>
-            </div>
-            <div class="ms-auto">
-                <button class="btn btn-sm btn-outline-info" onclick="topoShowPanel('uplinks')">Uplinks</button>
-                <button class="btn btn-sm btn-outline-light" onclick="topoNetwork && topoNetwork.fit()">Fit</button>
-                <button class="btn btn-sm btn-outline-success" onclick="resetTopo()">Reset</button>
             </div>
         </div>
         <!-- Controls toolbar row 2: focus/exclude -->
@@ -930,7 +970,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         </div>
     </div>
     <!-- the uplinks card: a drawer over the map (nothing sits below the map), opened by the toolbar's Uplinks button -->
-    <div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
+    <div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" data-bs-backdrop="false" data-bs-scroll="true" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
         <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" id="topoPanelTitle" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
         <div class="offcanvas-body"><div id="topoUplinksCard">{uplinks_html}</div><div id="topoLinkPanel" style="display:none;"></div></div>
     </div>
@@ -1362,6 +1402,7 @@ $(document).ready(function() {{
     // plus a share of the rest), centred on its leaves, overflow on outer rings; labels go when hosts sit
     // closer than a label is wide
     var topoRingIds = [], topoRadialLabels = {{}};   // the labels Radial hid, by node id, for the other layouts
+    var topoRadialHome = {{}};   // each node's last ring place, by id: where "Put back" and a double click return it
     var R_HOST = 680, RING = 46, MINGAP = 22, LABELW = 90, GAP = 0.04;   // px: host ring, between rings, between hosts, a label; rad between groups
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
@@ -1372,8 +1413,9 @@ $(document).ready(function() {{
         var angleOf = {{}}, ringOf = {{}}, placed = [];   // one DataSet update at the end: thousands of single updates stall the page
         // placed, not fixed: physics is off, so a node stays where it is put and can still be dragged (dragEnd pins it)
         var pin = function(n, r, a) {{ placed.push({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: false }});
+                                      var p = placed[placed.length - 1]; topoRadialHome[n.id] = {{ x: p.x, y: p.y }};
                                       topoRingIds.push(n.id); angleOf[n.id] = a; }};
-        topoRingIds = [];
+        topoRingIds = []; topoRadialHome = {{}};
         sp.forEach(function(n, i) {{ pin(n, sp.length > 1 ? 90 : 0, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length); }});
         var leafAngle = {{}};
         lf.forEach(function(n, i) {{ leafAngle[n.id] = -Math.PI / 2 + 2 * Math.PI * i / lf.length; pin(n, 340, leafAngle[n.id]); }});
@@ -1456,28 +1498,132 @@ $(document).ready(function() {{
         var opts = {{ ...topoBaseOpts, ...topoLayouts[topoCurrentLayout] }};
         topoNetwork = new vis.Network(topoContainer, topoData, opts);
 
-        // Drag to pin
+        // Drag to pin; a node picked up off its pin (below) is dropped unpinned
+        var topoCarried = null, topoDropped = null;
         topoNetwork.on('dragEnd', function(p) {{
             if (p.nodes.length > 0) {{
-                var pos = topoNetwork.getPositions([p.nodes[0]]);
-                topoNodes.update({{ id: p.nodes[0], x: pos[p.nodes[0]].x, y: pos[p.nodes[0]].y, fixed: {{ x: true, y: true }} }});
+                var id = p.nodes[0], pos = topoNetwork.getPositions([id]);
+                topoNodes.update({{ id: id, x: pos[id].x, y: pos[id].y, fixed: id === topoDropped || id === topoCarried ? false : {{ x: true, y: true }} }});
             }}
         }});
-        // A tap (a click that is not a drag) on a link opens its panel: the host side with the host's own
-        // names, the switch side from LLDP. A tap on blank space closes the panel.
+        // A tap (a click that is not a drag) waits 250 ms, so a double click opens nothing; then a tap on a node
+        // opens the node's panel, on a link the link's (host side, then the switch side from LLDP), on blank space
+        // it closes the panel
+        var TOPO_CLICKWAIT = 250, topoClickTimer = null;
         topoNetwork.on('click', function(p) {{
             if (p.event && p.event.type !== 'tap') return;
-            if (p.nodes.length > 0) return;
-            if (p.edges.length > 0) {{ var e = topoEdges.get(p.edges[0]); if (e && e.panel) topoShowPanel('link', e.panel); }}
-            else topoHidePanel();
+            clearTimeout(topoClickTimer);
+            topoClickTimer = setTimeout(function() {{
+                if (p.nodes.length > 0) topoShowPanel('node', p.nodes[0]);
+                else if (p.edges.length > 0) {{ var e = topoEdges.get(p.edges[0]); if (e && e.panel) topoShowPanel('link', e.panel); }}
+                else topoHidePanel();
+            }}, TOPO_CLICKWAIT);
         }});
+        // A double click on a node puts it back unpinned (Radial: its ring place; the other layouts take it over)
+        topoNetwork.on('doubleClick', function(p) {{
+            clearTimeout(topoClickTimer);
+            if (!p.nodes.length) return;
+            var id = p.nodes[0];
+            topoUnpin([id]); topoToast(topoNameOf(id) + ' back in place');
+        }});
+        // A pinned node does not move under vis's drag, so a press on it turns the view pan off, and once the
+        // pointer leaves the node's box the node is unpinned and carried under the pointer (pointer events in
+        // the capture phase, ahead of vis), dropped unpinned on release
+        var topoPress = null;
+        var topoAt = function(e) {{ var b = topoContainer.getBoundingClientRect(); return {{ x: e.clientX - b.left, y: e.clientY - b.top }}; }};
+        var topoOutside = function(id, e) {{
+            var bb = topoNetwork.getBoundingBox(id), a = topoNetwork.canvasToDOM({{ x: bb.left, y: bb.top }}), z = topoNetwork.canvasToDOM({{ x: bb.right, y: bb.bottom }}), p = topoAt(e);
+            return p.x < a.x || p.x > z.x || p.y < a.y || p.y > z.y;
+        }};
+        topoContainer.addEventListener('pointerdown', function(e) {{
+            if (e.button !== 0) return;
+            var id = topoNetwork.getNodeAt(topoAt(e));
+            topoPress = id !== undefined && topoPinned(topoNodes.get(id)) ? id : null;
+            if (topoPress !== null) topoNetwork.setOptions({{ interaction: {{ dragView: false }} }});
+        }}, true);
+        window.addEventListener('pointermove', function(e) {{
+            if (topoPress === null && topoCarried === null) return;
+            if (topoPress !== null && topoOutside(topoPress, e)) {{
+                topoCarried = topoPress; topoPress = null;
+                topoNodes.update({{ id: topoCarried, fixed: false }});
+                topoToast('Unpinned ' + topoNameOf(topoCarried) + ': release to drop');
+                if (topoPanelNode === topoCarried) topoShowPanel('node', topoCarried);
+            }}
+            if (topoCarried !== null) {{ var c = topoNetwork.DOMtoCanvas(topoAt(e)); topoNodes.update({{ id: topoCarried, x: c.x, y: c.y, fixed: false }}); }}
+        }}, true);
+        var topoDrop = function() {{
+            if (topoPress !== null || topoCarried !== null) topoNetwork.setOptions({{ interaction: {{ dragView: true }} }});
+            topoPress = null;
+            if (topoCarried !== null) {{ topoDropped = topoCarried; topoCarried = null; setTimeout(function() {{ topoDropped = null; }}, 400); }}
+        }};
+        window.addEventListener('pointerup', topoDrop, true);
+        window.addEventListener('pointercancel', topoDrop, true);
     }}
 
-    // The drawer: the uplinks card (the toolbar's button) or one link's panel (a click on the link)
+    var topoPanelNode = null;   // the node whose panel the drawer shows, so a put-back or an unpin refreshes it
+    var topoPinned = function(n) {{ return !!(n && n.fixed && (n.fixed === true || n.fixed.x)); }};
+    var topoNameOf = function(id) {{ var n = topoNodes.get(id); return topoRadialLabels[id] || (n && n.label) || id; }};
+    // Unpinned nodes: Radial puts each back on its ring place, in the other layouts the layout takes it over
+    window.topoUnpin = function(ids) {{
+        topoNodes.update(ids.map(function(id) {{
+            var u = {{ id: id, fixed: false }}, h = topoRadialHome[id];
+            if (topoCurrentLayout === 'radial' && h) {{ u.x = h.x; u.y = h.y; }}
+            return u;
+        }}));
+        if (topoPanelNode !== null && ids.indexOf(topoPanelNode) > -1) topoShowPanel('node', topoPanelNode);
+    }};
+    // the toolbar's buttons reach the map only through window functions: an inline test of topoNetwork saw
+    // the div of that id, not the network (so Fit never worked)
+    window.topoFit = function() {{ if (topoNetwork) topoNetwork.fit(); }};
+    window.topoUnpinAll = function() {{ if (topoNetwork) topoUnpin(topoNodes.getIds()); }};
+
+    // The drawer: the uplinks card (the toolbar's button), one link's panel (a tap on the link) or one node's (a tap on it)
     var esc = function(s) {{ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }};
+    var row = function(k, v) {{ return '<tr><th style="color:#8899aa; font-weight:normal; width:40%;">' + k + '</th><td>' + esc(v) + '</td></tr>'; }};
+    var tbl = function(title, rows) {{ return '<h6 style="color:#4ecca3;">' + title + '</h6><table class="table table-sm table-striped mb-3"><tbody>' + rows.join('') + '</tbody></table>'; }};
+    var grid = function(title, heads, rows) {{   // a table with a header row; rows are arrays of cell text
+        return '<h6 style="color:#4ecca3;">' + title + '</h6><table class="table table-sm table-striped mb-3"><thead><tr>' + heads.map(function(h) {{ return '<th>' + h + '</th>'; }}).join('') +
+            '</tr></thead><tbody>' + rows.map(function(r) {{ return '<tr>' + r.map(function(c) {{ return '<td>' + esc(c) + '</td>'; }}).join('') + '</tr>'; }}).join('') + '</tbody></table>';
+    }};
+    var topoUplinksOf = function(key, id) {{   // the uplink edges' panels at one end: key 'from' for a leaf, 'to' for a spine
+        return topoEdgesData.filter(function(e) {{ return e.uplink && e[key] === id; }}).map(function(e) {{ return e.panel; }});
+    }};
+    var upGrid = function(ups) {{   // uplink panels as rows: leaf, spine, declared, busiest phase, verdict
+        return grid('Uplinks', ['Leaf', 'Spine', 'Declared', 'Busiest', 'Verdict'], ups.map(function(u) {{
+            return [u.leaf, u.spine, u.declared || '-', u.phase ? u.phase + ': out ' + u.out.toFixed(1) + ' G / in ' + u['in'].toFixed(1) + ' G' + (u.pct != null ? ', ' + u.pct.toFixed(0) + '% of declared' : '') : 'no cross-leaf runs',
+                    u.verdict || (u.declared ? 'within the declared capacity' : 'not judged: no spine declaration')];
+        }}));
+    }};
+    function topoNodePanelHtml(id) {{
+        var n = topoNodes.get(id), d = n && n.panel;
+        if (!d) return '';
+        var body;
+        if (d.kind === 'host') {{
+            var t = d.temps, rows = [row('Host', d.host), row('Role', d.role + (d.status ? ' (' + d.status + ')' : '')), row('Worst run', d.worst + ' Gbps'),
+                                     row('Heat', t.max.length ? t.max.join(', ') : 'no temperature data'), row('Heat flags', t.flags.length ? t.flags.join('; ') : 'none')];
+            body = tbl('Host', rows) + grid('NICs', ['NIC', 'IP', 'Leaf', 'Worst run'], d.nics.map(function(x) {{
+                var leaf = x.members.length ? x.members.map(function(m) {{ return m.nic + ' → ' + m.leaf + (m.down ? ' (down)' : ''); }}).join(', ') : x.leaf;
+                return [x.nic + (x.members.length ? ' (bond)' : ''), x.ip, leaf, x.gbps + ' Gbps' + (x.down ? ' (down)' : '') + (x.status ? ' ' + x.status : '')];
+            }}));
+        }} else if (d.kind === 'leaf') {{
+            var hosts = {{}}; d.nics.forEach(function(x) {{ hosts[x.host] = 1; }});
+            body = tbl('Leaf', [row('Switch', d.leaf), row('Host ports', d.ports), row('NICs on it', d.nics.length + ' (from ' + Object.keys(hosts).length + ' hosts)')]) + upGrid(topoUplinksOf('from', d.leaf)) +
+                grid('NICs on this leaf, worst first', ['Host', 'NIC', 'IP', 'Worst run'], d.nics.slice().sort(function(p, q) {{ return p.gbps - q.gbps; }}).map(function(x) {{ return [x.host, x.nic, x.ip, x.gbps + ' Gbps']; }}));
+        }} else if (d.kind === 'spine') {{
+            body = tbl('Spine', [row('Spine', d.spine), row('Name', d.spines ? 'hosts see only their leaves, so spines are numbered from the declaration' : 'not declared: set FF_SPINES, FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks')]) + upGrid(topoUplinksOf('to', id));
+        }} else if (d.kind === 'bond') {{
+            body = tbl('Bond', [row('Host', d.host), row('Role', d.role), row('Bond', d.nic + ' ' + d.ip), row('Members up', d.up + ' of ' + d.total), row('Worst run', d.gbps + ' Gbps' + (d.down ? ' (down)' : ''))]
+                .concat(d.leaves.map(function(m) {{ return row(m.nic, m.leaf + (m.down ? ' (down)' : ' (up)')); }})));
+        }} else body = topoLinkPanelHtml(d);   // a member's marker: the member link's panel, "no switch seen"
+        var pinned = topoPinned(n);
+        return body + '<p style="color:#8899aa;">' + (pinned ? 'Pinned where it was dragged.' : 'Not pinned: a drag pins it where it lands.') +
+            ' <button class="btn btn-sm btn-outline-info" id="topoUnpinOne">' + (pinned ? 'Unpin and put back' : 'Put back') + '</button></p>';
+    }}
+    function topoNodeTitle(d) {{
+        return d.kind === 'host' ? (d.role === 'client' ? 'Client ' : 'Host ') + d.host : d.kind === 'leaf' ? 'Leaf ' + d.leaf : d.kind === 'spine' ? d.spine :
+            d.kind === 'bond' ? 'Bond ' + d.host + ' ' + d.nic : 'Bond member ' + d.host + ' ' + d.nic;
+    }}
     function topoLinkPanelHtml(d) {{
-        var row = function(k, v) {{ return '<tr><th style="color:#8899aa; font-weight:normal; width:40%;">' + k + '</th><td>' + esc(v) + '</td></tr>'; }};
-        var tbl = function(title, rows) {{ return '<h6 style="color:#4ecca3;">' + title + '</h6><table class="table table-sm table-striped mb-3"><tbody>' + rows.join('') + '</tbody></table>'; }};
         if (d.kind === 'uplink') {{
             var rows = [row('Leaf', d.leaf), row('Spine', d.spine)];
             if (d.declared) rows.push(row('Declared', d.declared));
@@ -1496,13 +1642,22 @@ $(document).ready(function() {{
         return tbl('Host side', hostRows) + tbl('Switch side', swRows);
     }}
     window.topoShowPanel = function(what, d) {{
-        var card = document.getElementById('topoUplinksCard'), pane = document.getElementById('topoLinkPanel');
+        var card = document.getElementById('topoUplinksCard'), pane = document.getElementById('topoLinkPanel'), title = document.getElementById('topoPanelTitle');
+        topoPanelNode = null;
+        // the uplinks card needs the full width; a node or link panel takes half, leaving the toolbar and map in reach
+        document.getElementById('topoUplinks').style.width = what === 'link' || what === 'node' ? 'min(90vw, 560px)' : 'min(90vw, 1100px)';
         if (what === 'link') {{ pane.innerHTML = topoLinkPanelHtml(d); pane.style.display = ''; card.style.display = 'none';
-            document.getElementById('topoPanelTitle').textContent = d.kind === 'uplink' ? 'Uplink ' + d.leaf + ' ↔ ' + d.spine : 'Link ' + d.host + ' ' + d.nic; }}
-        else {{ pane.style.display = 'none'; card.style.display = ''; document.getElementById('topoPanelTitle').textContent = 'Leaf uplinks'; }}
+            title.textContent = d.kind === 'uplink' ? 'Uplink ' + d.leaf + ' ↔ ' + d.spine : 'Link ' + d.host + ' ' + d.nic; }}
+        else if (what === 'node') {{
+            var n = topoNodes.get(d); if (!n || !n.panel) return;
+            pane.innerHTML = topoNodePanelHtml(d); pane.style.display = ''; card.style.display = 'none'; title.textContent = topoNodeTitle(n.panel);
+            topoPanelNode = d;
+            document.getElementById('topoUnpinOne').onclick = function() {{ topoUnpin([d]); }};
+        }}
+        else {{ pane.style.display = 'none'; card.style.display = ''; title.textContent = 'Leaf uplinks'; }}
         bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).show();
     }};
-    window.topoHidePanel = function() {{ bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).hide(); }};
+    window.topoHidePanel = function() {{ topoPanelNode = null; bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).hide(); }};
 
     // --- Exclusion sets ---
     var topoExcludedHosts = new Set();
@@ -1827,6 +1982,7 @@ $(document).ready(function() {{
         topoNetwork.unselectAll();
         topoSetLayout('{TOPO_DEFAULT_LAYOUT}');
         topoNetwork.fit();
+        topoNetwork.unselectAll();   // once more after the layout call, which left the dragged node highlighted
         topoUpdateLegend();
         topoToast('Map reset');
     }};
