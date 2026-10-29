@@ -211,30 +211,56 @@ def generate_html(data, output_path):
     # Slow IPs (merged src+dst)
     slow_ips_json = json.dumps(data['slow_ips'])
 
-    # Build vis-network topology from LLDP + performance data
+    # Build vis-network topology from LLDP + performance data; the spines and uplinks from the run's declaration
+    # (_uplinks, once, for the map and the card): n declared spines, each leaf to each, the edge judged as the card's row
+    u = _uplinks(data)
     topo_nodes = {}
     topo_edges = []
-    # Spine (virtual aggregate of all spine switches)
-    spine_id = 'spine'
     real_switches = [sw for sw in switch_counts if sw and sw != 'unknown']
-    topo_nodes[spine_id] = {
-        'id': spine_id, 'label': 'Spine',
-        'group': 'spine', 'level': 0,
-        'title': f'<b>Spine Layer</b><br>{len(real_switches)} leaf switches connected',
-    }
-    # Leaf switches at level 1
+    ns = u['n'] if u else 0
+    spines = [f'spine{i}' for i in range(1, ns + 1)] or ['spine']
+    for i, sid in enumerate(spines, 1):
+        topo_nodes[sid] = {
+            'id': sid, 'label': f'Spine {i}' if ns else 'Spine (not declared)', 'group': 'spine', 'level': 0,
+            'title': (f'<b>Spine {i} of {ns}</b><br>{len(real_switches)} leaf switches connected' if ns else
+                      f'<b>Spine (not declared)</b><br>{len(real_switches)} leaf switches connected; set FF_SPINES, '
+                      'FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks'),
+        }
+    busy = {}   # leaf -> its busiest judged row (the card's): the uplink edges' width, colour and tooltip
+    for r in (u['rows'] if u else []):
+        b = busy.get(r['leaf'])
+        if not b or (r['pct'] or 0) > (b['pct'] or 0) or (r['pct'] is None and max(r['out'], r['in']) > max(b['out'], b['in'])):
+            busy[r['leaf']] = r
+    ucol = {'down': '#e94560', 'cap': '#ffc107', 'unsure': '#ffc107'}
+    tg = lambda g: f'{g / 1000:.2f} T' if g >= 1000 else f'{g:.1f} G'
+    # Leaf switches at level 1, an uplink edge to every spine, flagged uplink: true (the host-link JS skips by that flag)
     for sw in real_switches:
         topo_nodes[sw] = {
             'id': sw, 'label': sw.split('.')[0],
             'group': 'switch', 'level': 1,
             'title': f'<b>{sw}</b><br>{switch_counts[sw]} host ports',
         }
-        topo_edges.append({
-            'from': sw, 'to': spine_id,
-            'color': {'color': '#4ecca3', 'highlight': '#ffffff'},
-            'width': 3, 'dashes': False,
-            'title': f'{sw} ↔ Spine uplink',
-        })
+        r = busy.get(sw)
+        f = r.get('fault', '') if r else ''
+        for sid in spines:
+            if r and r['C']:
+                m_, s_ = (u['cm'], u['cs']) if r['side'] == 'client' and u.get('Cc') and r['C'] == u['Cc'] else (u['m'], u['s'])
+                title = (f"<b>{sw} ↔ {topo_nodes[sid]['label']}</b><br>declared {m_} links x {s_}G; busiest, {r['phase']}: "
+                         f"out {tg(r['out'])} / in {tg(r['in'])}, {r['pct']:.0f}% of declared" + (f"<br>{r['verdict']}" if r['verdict'] else ''))
+                width = max(1, r['pct'] / 10)
+            elif r:
+                title = f"<b>{sw} ↔ Spine (not declared)</b><br>busiest, {r['phase']}: out {tg(r['out'])} / in {tg(r['in'])} measured"
+                width = 3
+            else:
+                title = f"<b>{sw} ↔ {topo_nodes[sid]['label']}</b><br>no cross-leaf runs"
+                width = 3
+            topo_edges.append({
+                'from': sw, 'to': sid, 'uplink': True,
+                'color': {'color': ucol.get(f, '#4ecca3'), 'highlight': '#ffffff'},
+                'width': width, 'dashes': [6, 4] if f == 'unsure' else False,
+                'label': '?' if f == 'unsure' else '', 'font': {'size': 18 if f == 'unsure' else 0, 'color': '#ffc107', 'strokeWidth': 0},
+                'title': title,
+            })
     # Hosts — group by host, each host has 2 NICs
     host_nics = defaultdict(list)  # host -> [{nic, ip, switch, port, avg_gbps}]
     cnic = {n['ip']: n for n in (data.get('clients') or {}).get('nics', [])}
@@ -383,7 +409,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
                     '<p class="text-success mb-0">No packet drops detected during testing.</p>')
 
     # Fail-loud banner: incomplete or empty data must not read as a clean result
-    uplinks_html = _uplinks_html(_uplinks(data))
+    uplinks_html = _uplinks_html(u)   # the same reading as the map's uplink edges
     host_rx_html = _host_rx_html(data.get('host_rx'), data.get('client_rx'))
     problems_html = ''
     if data.get('problems') or data.get('notes'):
@@ -783,6 +809,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <label class="form-check-label" for="topoToggleSmooth" style="color:#8899aa;">Smooth edges</label>
             </div>
             <div class="ms-auto">
+                <button class="btn btn-sm btn-outline-info" data-bs-toggle="offcanvas" data-bs-target="#topoUplinks">Uplinks</button>
                 <button class="btn btn-sm btn-outline-light" onclick="topoNetwork && topoNetwork.fit()">Fit</button>
                 <button class="btn btn-sm btn-outline-success" onclick="resetTopo()">Reset</button>
             </div>
@@ -817,7 +844,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div>
         </div>
         <div class="card-body p-0" style="position:relative;">
-            <div id="topoNetwork" style="height:700px; background:#1a1a2e;"></div>
+            <div id="topoNetwork" style="min-height:420px; background:#1a1a2e;"></div>
             <!-- Legend overlay — top-left of map, hover to expand -->
             <div id="topoLegend" style="position:absolute; top:10px; left:10px; background:rgba(15,52,96,0.95); padding:8px 12px; border-radius:6px; font-size:0.8rem; color:#e0e0e0; line-height:1.7; z-index:10; min-width:160px; cursor:default;">
                 <div style="font-weight:600; margin-bottom:4px; color:#4ecca3;">Displayed</div>
@@ -836,11 +863,12 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 </div>
             </div>
         </div>
-        <div class="card-footer" style="background:#0f3460; color:#8899aa; font-size:0.8rem;">
-            Hover for details &bull; Drag nodes to reposition &bull; Double-click to unpin &bull; Scroll to zoom &bull; Edge width &amp; color = throughput
-        </div>
     </div>
-{uplinks_html}
+    <!-- the uplinks card: a drawer over the map (nothing sits below the map), opened by the toolbar's Uplinks button -->
+    <div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
+        <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
+        <div class="offcanvas-body">{uplinks_html}</div>
+    </div>
 </div>
 {clients_pane}
 {checks_pane}
@@ -1256,14 +1284,28 @@ $(document).ready(function() {{
                 stabilization: {{ enabled: true, iterations: 300 }}
             }},
         }},
-        radial: {{
+        radial: {{   // fixed rings, no physics: the repulsion solver stacked nodes with the same neighbours (twin spines, twin leaves)
             layout: {{ hierarchical: false }},
-            physics: {{ enabled: true, solver: 'repulsion',
-                repulsion: {{ nodeDistance: 200, centralGravity: 0.3, springLength: 200 }},
-                stabilization: {{ enabled: true, iterations: 300 }}
-            }},
+            physics: {{ enabled: false }},
         }},
     }};
+
+    // Radial: spines at the centre, leaves on a ring, hosts and clients on an outer ring beside their leaf; pinned there
+    var topoRingIds = [];
+    function topoRadialPlace() {{
+        var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
+        var leafOf = {{}};
+        topoEdgesData.forEach(function(e) {{ if (!e.uplink && !(e.from in leafOf)) leafOf[e.from] = e.to; }});
+        var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']);
+        var order = {{}}; lf.forEach(function(n, i) {{ order[n.id] = i; }});
+        hs.sort(function(a, b) {{ return (order[leafOf[a.id]] || 0) - (order[leafOf[b.id]] || 0) || (a.id < b.id ? -1 : 1); }});
+        var place = function(list, r) {{ list.forEach(function(n, i) {{
+            var a = -Math.PI / 2 + 2 * Math.PI * i / list.length;
+            topoNodes.update({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: {{ x: true, y: true }} }}); topoRingIds.push(n.id); }}); }};
+        topoRingIds = [];
+        place(sp, sp.length > 1 ? 90 : 0); place(lf, 340); place(hs, 680);
+        topoNetwork.fit();
+    }}
 
     var topoNetwork = null;
     var topoCurrentLayout = 'hierarchical';
@@ -1302,7 +1344,7 @@ $(document).ready(function() {{
             hostSel.appendChild(o);
         }});
         topoEdgesData.forEach(function(e, i) {{
-            if (e.title && e.title.indexOf('Gbps') > -1) {{
+            if (!e.uplink && e.title) {{
                 var o = document.createElement('option');
                 o.value = i;
                 o.textContent = e.from + ' — ' + e.title.split('—')[0].trim();
@@ -1365,8 +1407,8 @@ $(document).ready(function() {{
             if (!eid) return;
             var edge = topoEdges.get(eid);
             if (edge.hidden) return;
-            // Skip spine-to-leaf uplinks
-            if (!e.title || e.title.indexOf('Gbps') === -1) return;
+            // Skip spine-to-leaf uplinks (flagged uplink: true)
+            if (e.uplink || !e.title) return;
             lVis++;
             var ip = e.title.split(' ')[0];
             if (downIps.has(ip)) {{ lDown++; return; }}
@@ -1421,8 +1463,16 @@ $(document).ready(function() {{
         topoUpdateLegend();
     }}
 
+    // The map fills the window below its top edge (420px at least) and follows the window's size (vis autoResize is on)
+    function topoSize() {{
+        var top = topoContainer.getBoundingClientRect().top + window.scrollY;
+        topoContainer.style.height = Math.max(420, window.innerHeight - top - 16) + 'px';
+        if (topoNetwork) topoNetwork.redraw();
+    }}
+    $(window).on('resize', function() {{ if (topoInitialized) topoSize(); }});
     // Lazy init on tab show
     $('a[href="#tab-topology"]').on('shown.bs.tab', function() {{
+        topoSize();
         if (!topoInitialized) {{ topoInit(); topoInitialized = true; topoUpdateLegend(); }}
     }});
 
@@ -1433,8 +1483,10 @@ $(document).ready(function() {{
         var btnId = {{ hierarchical: 'tBtnHier', force: 'tBtnForce', radial: 'tBtnRadial' }}[mode];
         document.getElementById(btnId).classList.add('active');
         if (topoNetwork) {{
+            if (topoRingIds.length) {{ topoNodes.update(topoRingIds.map(function(id) {{ return {{ id: id, fixed: false }}; }})); topoRingIds = []; }}
             topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode] }});
-            if (mode !== 'hierarchical') topoNetwork.stabilize(300);
+            if (mode === 'radial') topoRadialPlace();
+            else if (mode !== 'hierarchical') topoNetwork.stabilize(300);
         }}
     }};
 
@@ -1492,7 +1544,7 @@ $(document).ready(function() {{
             // Link speed: show hosts with ANY link >= threshold
             var matchHosts = new Set();
             topoEdgesData.forEach(function(e) {{
-                if (edgeSpeed(e) >= threshold) matchHosts.add(e.from);
+                if (!e.uplink && edgeSpeed(e) >= threshold) matchHosts.add(e.from);
             }});
             topoNodesData.forEach(function(n) {{
                 if (n.group === 'switch' || n.group === 'spine') nodeVis[n.id] = true;
@@ -1787,6 +1839,7 @@ def _uplinks(data):
         v, k = sorted(v), len(v)
         return None if not k else v[k // 2] if k % 2 else (v[k // 2 - 1] + v[k // 2]) / 2
     ob, ib, xl, same, its = defaultdict(float), defaultdict(float), defaultdict(list), defaultdict(list), defaultdict(set)
+    pm, cpm = defaultdict(list), defaultdict(list)   # (phase, leaf pair) -> the pair's cross-leaf runs (Gbps; clients: % of expected)
     left = 0
     for r in data['iperf_results']:
         a, b = r['src'], r['dst']
@@ -1803,7 +1856,7 @@ def _uplinks(data):
                 same[x].append(r['gbps'])
             continue
         ob[ph, it, x] += r['gbps']; ib[ph, it, y] += r['gbps']
-        xl[ph, x].append(r['gbps']); xl[ph, y].append(r['gbps']); its[ph].add(it)
+        xl[ph, x].append(r['gbps']); xl[ph, y].append(r['gbps']); its[ph].add(it); pm[ph, frozenset((x, y))].append(r['gbps'])
     cleft, cph, cpx = 0, set(), defaultdict(list)
     for r in (data.get('clients') or {}).get('flows', []):   # client<->backend: out of the source leaf, into the destination's
         a, b = r['src'], r['dst']
@@ -1817,7 +1870,7 @@ def _uplinks(data):
             p = 100 * r['gbps'] / r['expected'] if r['expected'] else 0
             ob[ph, it, x] += r['gbps']; ib[ph, it, y] += r['gbps']
             xl[ph, x].append(r['gbps']); xl[ph, y].append(r['gbps']); its[ph].add(it)
-            cpx[ph, x].append(p); cpx[ph, y].append(p); cph.add(ph)
+            cpx[ph, x].append(p); cpx[ph, y].append(p); cph.add(ph); cpm[ph, frozenset((x, y))].append(p)
     if not ob and not ib and not C and not u['Cc']:
         return None
     nm = sum(1 for ip in ips if ip not in leaf)
@@ -1835,6 +1888,14 @@ def _uplinks(data):
             dl[leaf[ip]] += data.get('ip_gbps', {}).get(ip) or data['clients']['line'].get(ip) or 0
     lx = min(rate.values())
     okp, slp = int(meta.get('ok_pct', 75)), int(meta.get('slow_pct', 50))
+    def blame(ph, lf, pairs, cut):
+        """The 2-leaf rule (10-28): lf's uplinks are 'down' only when every slow cross-leaf pair of the phase holds lf
+        and a pair without lf ran fine; otherwise 'unsure' (two leaves: one pair, nothing to compare)."""
+        m = {k[1]: med(v) for k, v in pairs.items() if k[0] == ph}
+        slow = [p for p, v in m.items() if v is not None and v < cut]
+        fine = [p for p, v in m.items() if v is not None and v >= cut]
+        return 'down' if slow and all(lf in p for p in slow) and any(lf not in p for p in fine) else 'unsure'
+    nleaves = lambda ph, pairs: len({l for k in pairs if k[0] == ph for l in k[1]})
     okc = lx * okp / 100
     best = {}
     # in run order, so a tie keeps the earliest wave (set order varied with the hash seed)
@@ -1866,6 +1927,12 @@ def _uplinks(data):
                 row['verdict'] = (f"uplinks carried only {row['pct']:.0f}% of declared capacity while cross-leaf runs were slow "
                                   f'(median {xm:.1f} Gbps, OK >= {okc:g}) and same-leaf runs were OK (median {sm:.1f}); a link or '
                                   'spine may be down, or ECMP is uneven')
+        if row['verdict']:
+            row['fault'] = 'cap' if row['verdict'].startswith('at declared') else blame(ph, lf, cpm if ph in cph else pm, okp if ph in cph else okc)
+            if row['fault'] == 'unsure':
+                row['verdict'] += ('; ' + ('this rail has two leaves' if nleaves(ph, cpm if ph in cph else pm) == 2 else
+                                           'the slow pairs share no single leaf')
+                                   + ': the runs cannot pick the leaf or the spine; read the switches\' uplink port counters')
         u['rows'].append(row)
     if not u['rows']:
         u['notes'].append('No runs crossed between leaves.')
