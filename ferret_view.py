@@ -346,10 +346,12 @@ def run_curses(stream, log):
         x, y = 0.0, 0.0
         tx, ty = x, y
         dir_, sniff, hump, hwait = 1, 0, None, 10
-        # the roll: r starts it; CURL ticks curling up, ROLL ticks rolling (two turns), CURL ticks uncurling
-        CURL, ROLL, FLOP = 3, 24, 16                    # the roll-over takes FLOP ticks
+        # the roll: r starts it; CURL ticks curling up, ROLL ticks rolling (two turns), CURL ticks uncurling; or the
+        # roll-over: FLOP ticks on its back and up again, twice, travelling across the screen as the ball does
+        CURL, ROLL, FLOP = 3, 24, 32
         force = os.environ.get("FF_FERRET", "")         # FF_FERRET=ball|over forces one kind of roll
         phase, cnt, curl, roll_angle, roll_dx, roll_dy, roll_spin = None, 0, 0.0, 0, 0.0, 0.0, 30
+        flop_dx, flop_dy = 0.0, 0.0
         while not stream.eof:
             ch = scr.getch()
             if ch == ord("q"):
@@ -357,6 +359,10 @@ def run_curses(stream, log):
             if ch == ord("r") and phase is None and not hidden:   # ferrets love to roll: curl up and off it goes,
                 over = force == "over" or (force != "ball" and random.random() < 0.5)   # or roll over like a dog
                 phase, cnt, hump = ("flop" if over else "curl"), 0, None
+                if over:                                    # a heading for the roll-over, slower than the ball's
+                    a = random.uniform(0, 2 * math.pi)
+                    flop_dx, flop_dy = 1.2 * math.cos(a), 0.6 * math.sin(a)
+                    dir_ = 1 if flop_dx >= 0 else -1
             rows_total, cols = scr.getmaxyx()
             log.extend(stream.pull())
             # the ferret's step: toward a waypoint anywhere on the screen, a new one when it arrives or at random
@@ -378,11 +384,18 @@ def run_curses(stream, log):
                     phase, cnt = "uncurl", 0
                     if abs(roll_dx) > 0.3:
                         dir_ = 1 if roll_dx > 0 else -1
-            elif phase == "flop":                           # on its back and up again, in place, legs kicking
-                cnt += 1
+            elif phase == "flop":                           # on its back and up again, legs kicking, rolling along;
+                cnt += 1                                    # an edge bounces it back, facing the other way
                 t += 1
+                nx, ny = x + flop_dx, y + flop_dy
+                x, y = min(max(nx, 0), xmax), min(max(ny, 0), ymax)
+                if x != nx:
+                    flop_dx, dir_ = -flop_dx, -dir_
+                if y != ny:
+                    flop_dy = -flop_dy
                 if cnt >= FLOP:
                     phase = None
+                    tx, ty = x, y
             elif phase == "uncurl":
                 cnt += 1
                 curl = 1 - cnt / float(CURL)
@@ -426,7 +439,7 @@ def run_curses(stream, log):
                 ox, oy = int(round(x)), int(round(y))
                 rows = frame(t, dir_, sniff, hump, scale, curl)
                 if phase == "flop":
-                    rows = vscale(rows, math.cos(2 * math.pi * cnt / FLOP))
+                    rows = vscale(rows, math.cos(2 * math.pi * 2 * cnt / FLOP))   # two turns over FLOP ticks
                 elif phase == "roll":                       # the square canvas is centred on the ball
                     S = max(len(rows[0]), len(rows))
                     rows = rotate(rows, roll_angle)
