@@ -516,7 +516,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
     host_rx_html = _host_rx_html(data.get('host_rx'), data.get('client_rx'))
     problems_html = ''
     if data.get('problems') or data.get('notes'):
-        items = ''.join(f'<li>{escape(p)}</li>' for p in data.get('problems', []))
+        items = ''.join(f'<li style="color:#e0e0e0;">{escape(p)}</li>' for p in data.get('problems', []))   # not the card's dark text
         nts = ''.join(f'<li style="color:#ffc107;">{escape(n)}</li>' for n in data.get('notes', []))
         head = ('INCOMPLETE RESULT: do not read this dashboard as a clean bill of health'
                 if data.get('problems') else 'Notes on this run')
