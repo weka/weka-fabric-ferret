@@ -84,8 +84,10 @@ with the reason: no data is never shown as cool.
 
 Output: stdout gets one row per host: the GPU cells from nvidia-smi when it answered, the BMC's (ipmi) otherwise; every other
 type the BMC's, hwmon's only for a type the BMC lacks; Source lists the sources used: "Host Source Sensors Inlet Avg CPU Avg GPU Avg
-Mem Avg NVMe Avg NIC Avg Other Avg Flags", each type's hottest reading and the mean of its sensors' latest readings; stderr gets
-the progress, the flagged sensors, the no-data list and the result. Every sensor, one row each, is in the files (-o).
+Mem Avg NVMe Avg NIC Avg Other Avg Flags", each type's hottest reading and the mean of its sensors' latest readings; Sensors
+counts every sensor of the host, all sources; Flags lists every flagged sensor of the host, one behind no shown cell with its
+source ("cpu:high/hwmon"); stderr gets the progress, the flagged sensors, the no-data list and the result. Every sensor, one
+row each, is in the files (-o).
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"

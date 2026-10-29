@@ -85,8 +85,10 @@ with the reason: no data is never shown as cool.
 
 Output: stdout gets one row per host: the GPU cells from nvidia-smi when it answered, the BMC's (ipmi) otherwise; every other
 type the BMC's, hwmon's only for a type the BMC lacks; Source lists the sources used: "Host Source Sensors Inlet Avg CPU Avg GPU Avg
-Mem Avg NVMe Avg NIC Avg Other Avg Flags", each type's hottest reading and the mean of its sensors' latest readings; stderr gets
-the progress, the flagged sensors, the no-data list and the result. Every sensor, one row each, is in the files (-o).
+Mem Avg NVMe Avg NIC Avg Other Avg Flags", each type's hottest reading and the mean of its sensors' latest readings; Sensors
+counts every sensor of the host, all sources; Flags lists every flagged sensor of the host, one behind no shown cell with its
+source ("cpu:high/hwmon"); stderr gets the progress, the flagged sensors, the no-data list and the result. Every sensor, one
+row each, is in the files (-o).
 When either is above zero, the line before it counts the unreachable targets (no ssh connection) and the
 unavailable ones (connected, no reading at all).
 Result: the last line is "RESULT data=COMPLETE|PARTIAL|NONE hosts=r/t sensors=N flagged=F nodata=X unreachable=U"
@@ -661,23 +663,26 @@ HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[
          for (x in hs) { l = x; for (i = 1; i <= 7; i++) l = l " " (((x, ty[i]) in m) ? m[x, ty[i]] : "-"); print l, (x in fl ? fl[x] : "-") } }'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 
-# stdout: one row per host: gpu cells from nvidia-smi when it answered, else the BMC's; other types the BMC's, hwmon's
-# only for a type the BMC lacks; Source lists the sources used; each cell = hottest reading, mean of the latest readings
-SRC_AWK='NR > 1 && $6 != "none" { h = $1; src = $2; if (!(h in seen)) { seen[h]; ord[++nk] = h }; has[h, src]++
+# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
+# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
+# one behind no shown cell
+SRC_AWK='NR > 1 && $6 != "none" { h = $1; src = $2; if (!(h in seen)) { seen[h]; ord[++nk] = h }; n[h]++
     if (!((h, src, $3) in c) || $8 > m[h, src, $3]) m[h, src, $3] = $8
     s[h, src, $3] += $9; c[h, src, $3]++
     if ($12 != "-" && index("," fl[h, src, $3] ",", "," $3 ":" $12 ",") == 0) fl[h, src, $3] = fl[h, src, $3] (fl[h, src, $3] == "" ? "" : ",") $3 ":" $12 }
     END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet Avg CPU Avg GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags"
-          for (i = 1; i <= nk; i++) { h = ord[i]; l = ""; ns = 0; f = ""; delete used
+          for (i = 1; i <= nk; i++) { h = ord[i]; l = ""; f = ""; delete used; delete shown
               for (j = 1; j <= 7; j++) { t = ty[j]; src = ""
                   if (t == "gpu" && ((h, "gpu", t) in c)) src = "gpu"
                   else if ((h, "ipmi", t) in c) src = "ipmi"; else if ((h, "hwmon", t) in c) src = "hwmon"
                   if (src == "") { l = l " - -"; continue }
-                  used[src]; ns += c[h, src, t]; l = l " " m[h, src, t] " " sprintf("%.1f", s[h, src, t] / c[h, src, t])
+                  used[src]; shown[src, t]; l = l " " m[h, src, t] " " sprintf("%.1f", s[h, src, t] / c[h, src, t])
                   if (fl[h, src, t] != "") f = f (f == "" ? "" : ",") fl[h, src, t] }
+              for (j = 1; j <= 7; j++) for (k = 1; k <= 2; k++) { t = ty[j]; src = (k == 1 ? "ipmi" : "hwmon")
+                  if (fl[h, src, t] != "" && !((src, t) in shown)) { x = fl[h, src, t]; gsub(",", "/" src ",", x); f = f (f == "" ? "" : ",") x "/" src } }
               sc = ("ipmi" in used ? "ipmi" : "") (("gpu" in used) ? (("ipmi" in used) ? "+" : "") "nvidia-smi" : "")
               sc = sc (("hwmon" in used) ? (sc == "" ? "" : "+") "hwmon" : "")
-              print h, sc, ns l, (f == "" ? "-" : f) } }'
+              print h, sc, n[h] l, (f == "" ? "-" : f) } }'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)

@@ -14,8 +14,9 @@ TYPE_AWK='
 HOST_MAX_AWK='#@awk tc_host_max'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 
-# stdout: one row per host: gpu cells from nvidia-smi when it answered, else the BMC's; other types the BMC's, hwmon's
-# only for a type the BMC lacks; Source lists the sources used; each cell = hottest reading, mean of the latest readings
+# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
+# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
+# one behind no shown cell
 SRC_AWK='#@awk tc_src'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
