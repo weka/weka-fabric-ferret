@@ -1296,8 +1296,8 @@ $(document).ready(function() {{
     }};
 
     // Radial: spines at the centre (half a step off the leaves' angles), leaves on a ring, hosts and clients on an
-    // outer ring grouped by the leaves they reach (a dual-homed host between its two), each group spread inside
-    // its leaves' sectors; pinned; leafless hosts last
+    // outer ring grouped by the leaves they reach (a dual-homed host between its two), each group spread on the
+    // arc between its leaves; pinned, leafless last
     var topoRingIds = [];
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
@@ -1317,9 +1317,12 @@ $(document).ready(function() {{
             if (ls.length) (groups[ls.join('|')] = groups[ls.join('|')] || {{ leaves: ls, hosts: [] }}).hosts.push(n); else loose.push(n);
         }});
         Object.keys(groups).sort().forEach(function(k) {{
-            var g = groups[k], sx = 0, sy = 0;
-            g.leaves.forEach(function(l) {{ sx += Math.cos(leafAngle[l]); sy += Math.sin(leafAngle[l]); }});
-            var a = Math.atan2(sy, sx), w = 0.84 * sector * g.leaves.length;   // the group's centre and width
+            // the group's centre = the midpoint of the shorter arc over its leaves' angles (the arc after the widest
+            // gap); its width = 0.84 of that arc, at least 0.84 of one sector; hosts spread inside it
+            var g = groups[k], as = g.leaves.map(function(l) {{ return leafAngle[l]; }}).sort(function(p, q) {{ return p - q; }});
+            var start = as[0], span = as[as.length - 1] - as[0], gap = 2 * Math.PI - span;
+            for (var j = 0; j + 1 < as.length; j++) if (as[j + 1] - as[j] > gap) {{ gap = as[j + 1] - as[j]; start = as[j + 1]; span = 2 * Math.PI - gap; }}
+            var a = start + span / 2, w = Math.max(0.84 * span, 0.84 * sector);
             g.hosts.sort(function(p, q) {{ return p.id < q.id ? -1 : 1; }});
             g.hosts.forEach(function(n, i) {{ pin(n, 680, a + (i - (g.hosts.length - 1) / 2) * w / g.hosts.length); }});
         }});
