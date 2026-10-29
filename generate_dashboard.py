@@ -396,8 +396,10 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
                          f'style="color:{border}; font-weight:700;">{head}</div><div class="card-body"><ul class="mb-0">'
                          f'{items}{nts}</ul></div></div>')
 
-    # Temperatures card, before the fabric cards: per host the hottest reading of each type, flagged sensors, hosts with no data
+    # Temperatures card, its own tab (the label carries the flagged count): per host the hottest reading of each type,
+    # flagged sensors, hosts with no data
     temps_html = ''
+    temps_flagged = temps_bad = 0
     tps = data.get('temps', [])
     if tps or data['metadata'].get('temps') == '1':
         rd = [t for t in tps if t['Sensor'] != 'none']
@@ -423,6 +425,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
                         f"<td class=\"{fcls(t['Flag'])}\">{escape(t['Flag'])}</td></tr>" for t in sorted(flg, key=lambda t: (fr(t['Flag']), -float(t['Max_C']))))
         nlist = ''.join(f"<li class=\"text-warning\">{escape(t['Host'])} {escape(t['Source'])}: no temperature data ({escape(t['Flag'][7:].replace('_', ' '))})</li>" for t in nod)
         bad = sum(1 for t in flg if fr(t['Flag']) <= 1)
+        temps_flagged, temps_bad = len(flg), bad
         m = data['metadata']
         temps_html = f"""<div class="card mb-3"><div class="card-header">Temperatures — heat before fabric |
 {len(rd)} sensors on {len(per)} hosts | <b class="{'stat-bad' if bad else 'stat-warn' if flg else 'stat-good'}">{len(flg)}</b> flagged ({bad} high or crit) |
@@ -499,6 +502,21 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <div class="card-body" style="max-height:320px; overflow-y:auto;"><table class="table table-sm table-striped">
 <thead><tr><th>Kind</th><th>What</th><th>Why</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
+    # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, Clients (client hosts) and
+    # Run checks (how many of compare, preflight, run errors, not tested, UDP have content), each only when there is one
+    clients_html = _clients_html(data)
+    n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
+    checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html) if c]
+    tab = lambda tid, text: f'<li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#{tid}">{text}</a></li>'
+    pane = lambda tid, body: f'<div class="tab-pane fade" id="{tid}">\n{body}\n</div>'
+    tcls = 'stat-bad' if temps_bad else 'stat-warn' if temps_flagged else ''
+    temps_tab = tab('tab-temps', f'Temperatures (<span class="{tcls}">{temps_flagged}</span> flagged)') if temps_html else ''
+    temps_pane = pane('tab-temps', temps_html) if temps_html else ''
+    clients_tab = tab('tab-clients', f'Clients ({n_clients})') if clients_html else ''
+    clients_pane = pane('tab-clients', clients_html) if clients_html else ''
+    checks_tab = tab('tab-checks', f'Run checks ({len(checks)})') if checks else ''
+    checks_pane = pane('tab-checks', ''.join(checks)) if checks else ''
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -570,23 +588,17 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     </span>
 </div>
 {problems_html}
-{temps_html}
-{_clients_html(data)}{uplinks_html}
-{host_rx_html}
-{compare_html}
-{preflight_html}
-{fec_html}
-{run_errors_html}
-{not_tested_html}
-{udp_html}
 
-<!-- Tabs — connection health first -->
+<!-- Tabs — connection health first; every card is in a tab (a tab only when its card is), the banner alone above -->
 <ul class="nav nav-tabs mb-2" role="tablist">
     <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-connections">Connection Health</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-slow">Needs Repair ({needs_repair})</a></li>
+    {temps_tab}
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-nic">NIC / Optics</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-distribution">Test Distribution</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-topology">Topology</a></li>
+    {clients_tab}
+    {checks_tab}
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-all">Raw Data ({count})</a></li>
 </ul>
 
@@ -609,6 +621,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         <div class="card-body"><div id="slowIpContainer"></div></div>
     </div>
 </div>
+{temps_pane}
 
 <!-- Tab: NIC / Optics -->
 <div class="tab-pane fade" id="tab-nic">
@@ -692,6 +705,8 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div></div>
         </div>
     </div>
+{host_rx_html}
+{fec_html}
 </div>
 
 <!-- Tab: Test Distribution -->
@@ -825,7 +840,10 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             Hover for details &bull; Drag nodes to reposition &bull; Double-click to unpin &bull; Scroll to zoom &bull; Edge width &amp; color = throughput
         </div>
     </div>
+{uplinks_html}
 </div>
+{clients_pane}
+{checks_pane}
 
 <!-- Tab: Raw Data -->
 <div class="tab-pane fade" id="tab-all">
@@ -2714,7 +2732,7 @@ def parse_tar_archive(filepath):
     hot = [t for t in data['temps'] if t['Flag'].split('+')[0] in ('crit', 'high')]
     if hot:
         problems.insert(0, f"Heat: {len(hot)} sensors at or above their high or critical threshold on "
-                           f"{', '.join(sorted({t['Host'] for t in hot}))} (Temperatures card). Check heat before the fabric: "
+                           f"{', '.join(sorted({t['Host'] for t in hot}))} (Temperatures tab). Check heat before the fabric: "
                            'a hot host can cap throughput, resend and flap links by itself.')
     nod = sorted({f"{t['Host']} ({t['Source']}: {t['Flag'][7:].replace('_', ' ')})" for t in data['temps'] if t['Flag'].startswith('nodata')})
     if nod:
