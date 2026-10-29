@@ -503,7 +503,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <thead><tr><th>Kind</th><th>What</th><th>Why</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, Clients (client hosts) and
-    # Run checks (how many of compare, preflight, run errors, not tested, UDP have content), each only when there is one
+    # Run checks (compare, preflight, run errors, not tested, UDP; no count: they are not faults), each only when there is one
     clients_html = _clients_html(data)
     n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
     checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html) if c]
@@ -514,7 +514,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
     temps_pane = pane('tab-temps', temps_html) if temps_html else ''
     clients_tab = tab('tab-clients', f'Clients ({n_clients})') if clients_html else ''
     clients_pane = pane('tab-clients', clients_html) if clients_html else ''
-    checks_tab = tab('tab-checks', f'Run checks ({len(checks)})') if checks else ''
+    checks_tab = tab('tab-checks', 'Run checks') if checks else ''
     checks_pane = pane('tab-checks', ''.join(checks)) if checks else ''
 
     html = f"""<!DOCTYPE html>
