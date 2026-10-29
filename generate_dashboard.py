@@ -337,6 +337,7 @@ def generate_html(data, output_path):
     # Paths, rails and hosts the run could not test, with the reason
     # Preflight card: swapped rails, cabling to the other rail's switch, MTU mismatch, gateways
     preflight_html = ''
+    pf_bad = udp_beyond = 0   # the Run checks tab's count: preflight findings, UDP datagrams lost beyond expected
     if data.get('anomalies') or data.get('gateways'):
         gws = data.get('gateways', [])
         gw_ok = sum(1 for g in gws if g[-1] == 'OK')
@@ -355,6 +356,7 @@ def generate_html(data, output_path):
         rows = ''.join(f"<tr><td>{escape(kinds.get(a[1], a[1]) if len(a) > 1 else '')}</td><td>{escape(a[0])}</td>"
                        f"<td>{escape(a[2] if len(a) > 2 else '')}</td></tr>" for a in data.get('anomalies', []))
         bad = len(data.get('anomalies', []))
+        pf_bad = bad
         mp = data['metadata'].get('mesh_pings')
         cmp = data['metadata'].get('mesh_client_pings')
         mesh_txt = (f" | mesh: {data['metadata'].get('mesh_failures', '?')} of {mp} pings failed"
@@ -471,6 +473,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         sock = sum(u['sock'] for u in ok_rows); nic = sum(u['nic'] for u in ok_rows)
         back = sum(u['back'] for u in ok_rows); unacc = sum(u['unacc'] for u in ok_rows)
         expd = sum(u['exp'] for u in ok_rows); beyond = sum(u['beyond'] for u in ok_rows)
+        udp_beyond = beyond
         txs = sum(u['tx'] for u in ok_rows)
         errs = len(data['udp']) - len(ok_rows)
         avg = sum(u['gbps'] for u in ok_rows) / len(ok_rows) if ok_rows else 0
@@ -529,7 +532,8 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <thead><tr><th>Kind</th><th>What</th><th>Why</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, Clients (client hosts) and
-    # Run checks (compare, preflight, run errors, not tested, UDP; no count: they are not faults), each only when there is one
+    # Run checks (compare, preflight, run errors, not tested, UDP), each only when present; Run checks counts
+    # the cards with a flagged result, from their figures; none at zero
     clients_html = _clients_html(data)
     n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
     checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html) if c]
@@ -540,7 +544,8 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
     temps_pane = pane('tab-temps', temps_html) if temps_html else ''
     clients_tab = tab('tab-clients', f'Clients ({n_clients})') if clients_html else ''
     clients_pane = pane('tab-clients', clients_html) if clients_html else ''
-    checks_tab = tab('tab-checks', 'Run checks') if checks else ''
+    n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html)
+    checks_tab = tab('tab-checks', 'Run checks' + (f' (<span class="stat-bad">{n_checks}</span>)' if n_checks else '')) if checks else ''
     checks_pane = pane('tab-checks', ''.join(checks)) if checks else ''
 
     html = f"""<!DOCTYPE html>
