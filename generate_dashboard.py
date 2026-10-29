@@ -1410,6 +1410,11 @@ $(document).ready(function() {{
             physics: {{ enabled: false }},
         }},
     }};
+    // vis writes the physics it restores (Hierarchical's, when hierarchical turns off) into the options object it was
+    // handed, so each layout's own physics is frozen here, before any setOptions, and a fresh copy re-applied on every switch
+    var topoPhysics = {{}};
+    Object.keys(topoLayouts).forEach(function(m) {{ topoPhysics[m] = JSON.stringify(topoLayouts[m].physics); }});
+    function topoPhysicsCopy(mode) {{ return JSON.parse(topoPhysics[mode]); }}
 
     // Radial: spines at the centre (half a step off the leaves' angles), leaves on a ring, hosts and clients on an
     // outer ring grouped by the leaves they reach; each group's arc sized by its host count (a floor of 12 hosts
@@ -1510,7 +1515,7 @@ $(document).ready(function() {{
     var topoInitialized = false;
 
     function topoInit() {{
-        var opts = {{ ...topoBaseOpts, ...topoLayouts[topoCurrentLayout] }};
+        var opts = {{ ...topoBaseOpts, ...topoLayouts[topoCurrentLayout], physics: topoPhysicsCopy(topoCurrentLayout) }};
         topoNetwork = new vis.Network(topoContainer, topoData, opts);
 
         // Drag to pin; a node picked up off its pin (below) is dropped unpinned
@@ -1865,10 +1870,8 @@ $(document).ready(function() {{
             if (topoRingIds.length) {{ topoNodes.update(topoRingIds.map(function(id) {{ return {{ id: id, fixed: false }}; }})); topoRingIds = []; }}
             var back = Object.keys(topoRadialLabels).map(function(id) {{ return {{ id: id, label: topoRadialLabels[id] }}; }});
             if (back.length) {{ topoNodes.update(back); topoRadialLabels = {{}}; }}   // the labels Radial hid come back
-            topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode] }});
-            // vis puts Hierarchical's physics back inside the call that turns hierarchical off, and writes them into
-            // our options object, so Radial switches physics off again in a call of its own, keyed on the mode
-            if (mode === 'radial') topoNetwork.setOptions({{ physics: {{ enabled: false }} }});
+            topoNetwork.setOptions({{ ...topoBaseOpts, ...topoLayouts[mode], physics: topoPhysicsCopy(mode) }});
+            topoNetwork.setOptions({{ physics: topoPhysicsCopy(mode) }});   // the layout's own physics, a fresh copy (topoPhysics)
             if (mode === 'radial') topoRadialPlace();
             else if (mode !== 'hierarchical') topoNetwork.stabilize(300);
             topoApplyLabels();   // after setOptions, which put every font back at its base size
