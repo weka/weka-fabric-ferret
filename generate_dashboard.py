@@ -222,8 +222,8 @@ def generate_html(data, output_path):
     for i, sid in enumerate(spines, 1):
         topo_nodes[sid] = {
             'id': sid, 'label': f'Spine {i}' if ns else 'Spine (not declared)', 'group': 'spine', 'level': 0,
-            'title': (f'<b>Spine {i} of {ns}</b><br>{len(real_switches)} leaf switches connected' if ns else
-                      f'<b>Spine (not declared)</b><br>{len(real_switches)} leaf switches connected; set FF_SPINES, '
+            'title': (f'Spine {i} of {ns}\n{len(real_switches)} leaf switches connected' if ns else
+                      f'Spine (not declared)\n{len(real_switches)} leaf switches connected; set FF_SPINES, '
                       'FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks'),
         }
     busy = {}   # leaf -> its busiest judged row (the card's): the uplink edges' width, colour and tooltip
@@ -238,35 +238,110 @@ def generate_html(data, output_path):
         topo_nodes[sw] = {
             'id': sw, 'label': sw.split('.')[0],
             'group': 'switch', 'level': 1,
-            'title': f'<b>{sw}</b><br>{switch_counts[sw]} host ports',
+            'title': f'{sw}\n{switch_counts[sw]} host ports',
         }
         r = busy.get(sw)
         f = r.get('fault', '') if r else ''
         for sid in spines:
             if r and r['C']:
                 m_, s_ = (u['cm'], u['cs']) if r['side'] == 'client' and u.get('Cc') and r['C'] == u['Cc'] else (u['m'], u['s'])
-                title = (f"<b>{sw} ↔ {topo_nodes[sid]['label']}</b><br>declared {m_} links x {s_}G; busiest, {r['phase']}: "
-                         f"out {tg(r['out'])} / in {tg(r['in'])}, {r['pct']:.0f}% of declared" + (f"<br>{r['verdict']}" if r['verdict'] else ''))
+                title = (f"{sw} ↔ {topo_nodes[sid]['label']}\ndeclared {m_} links x {s_}G; busiest, {r['phase']}: "
+                         f"out {tg(r['out'])} / in {tg(r['in'])}, {r['pct']:.0f}% of declared" + (f"\n{r['verdict']}" if r['verdict'] else ''))
                 width = max(1, r['pct'] / 10)
             elif r:
-                title = f"<b>{sw} ↔ Spine (not declared)</b><br>busiest, {r['phase']}: out {tg(r['out'])} / in {tg(r['in'])} measured"
+                title = f"{sw} ↔ Spine (not declared)\nbusiest, {r['phase']}: out {tg(r['out'])} / in {tg(r['in'])} measured"
                 width = 3
             else:
-                title = f"<b>{sw} ↔ {topo_nodes[sid]['label']}</b><br>no cross-leaf runs"
+                title = f"{sw} ↔ {topo_nodes[sid]['label']}\nno cross-leaf runs"
                 width = 3
             topo_edges.append({
                 'from': sw, 'to': sid, 'uplink': True,
+                'panel': {'kind': 'uplink', 'leaf': sw, 'spine': topo_nodes[sid]['label'], 'verdict': (r or {}).get('verdict', ''),
+                          'phase': (r or {}).get('phase', ''), 'out': (r or {}).get('out'), 'in': (r or {}).get('in'),
+                          'pct': (r or {}).get('pct'), 'declared': f"{m_} links x {s_}G" if r and r['C'] else '', 'fault': f},
                 'color': {'color': ucol.get(f, '#4ecca3'), 'highlight': '#ffffff'},
                 'width': width, 'dashes': [6, 4] if f == 'unsure' else False,
                 'label': '?' if f == 'unsure' else '', 'font': {'size': 18 if f == 'unsure' else 0, 'color': '#ffc107', 'strokeWidth': 0},
                 'title': title,
             })
-    # Hosts — group by host, each host has 2 NICs
-    host_nics = defaultdict(list)  # host -> [{nic, ip, switch, port, avg_gbps}]
+    # Hosts: LLDP rows by host. A bond's members share its IP (the bond row names no neighbour), so one IP's rows
+    # fold into one NIC entry with members. Names are the host's own; the switch side waits in each edge's panel.
     cnic = {n['ip']: n for n in (data.get('clients') or {}).get('nics', [])}
+    by_ip = defaultdict(list)   # (host, ip) -> LLDP rows
+    hosts_order = []
     for l in data['lldp_info']:
-        avg = cnic[l['ip']]['avg'] if l['ip'] in cnic else ip_avgs.get(l['ip'], 0)
-        host_nics[l['host']].append({**l, 'avg_gbps': round(avg, 1)})
+        if (l['host'], l['ip']) not in by_ip:
+            hosts_order.append((l['host'], l['ip']))
+        by_ip[l['host'], l['ip']].append(l)
+    host_nics = defaultdict(list)  # host -> [{nic, ip, switch, port_id, port_desc, sys_desc, avg_gbps, members}]
+    for host, ip in hosts_order:
+        rows = by_ip[host, ip]
+        avg = round(cnic[ip]['avg'] if ip in cnic else ip_avgs.get(ip, 0), 1)
+        named = [r for r in rows if r['switch'] not in ('unknown', '')]
+        bond = next((r for r in rows if (host, r['nic']) in data['bonds']), None) or \
+            (next((r for r in rows if r['switch'] in ('unknown', '')), None) if len(rows) > 1 and named else None)
+        if bond and len(rows) > 1:
+            members = [r for r in rows if r is not bond and r['nic'] != bond['nic']]
+            b = data['bonds'].get((host, bond['nic']), {'up': len(members), 'total': len(members), 'down': []})
+            host_nics[host].append({**bond, 'avg_gbps': avg, 'members': members, 'bond': b,
+                                    'switch': '+'.join(sorted({m['switch'] for m in members if m['switch'] not in ('unknown', '')})) or 'no switch seen'})
+        else:
+            for r in rows:
+                host_nics[host].append({**r, 'avg_gbps': avg, 'members': [], 'bond': None})
+    has_bonds = any(n['members'] for ns in host_nics.values() for n in ns)
+    hlevel = 3 if has_bonds else 2   # bonds sit between the leaves (1) and the hosts
+
+    def nic_line(n, status=''):
+        """A NIC in a node's tooltip (plain text, vis shows tags literally): host names, the leaf from LLDP, members."""
+        leaf = n['switch'] if n['switch'] not in ('unknown', '') else 'no LLDP neighbour'
+        s = f"\n{n['nic']}: {n['ip']} → {leaf} @ {n['avg_gbps']} Gbps{status}"
+        if n['members']:
+            b = n['bond']
+            s += f" (bond, {b['up']} of {b['total']} members up)" + ''.join(
+                f"\n  {m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen'}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members'])
+        return s
+
+    def panel(kind, host, role, n, l, **extra):
+        """What a click on a link shows: the host side (the host's names, the worst run) and the switch side (LLDP)."""
+        return {'kind': kind, 'host': host, 'role': role, 'nic': n['nic'], 'ip': n['ip'], 'gbps': n['avg_gbps'],
+                'leaf': l['switch'], 'port_id': l['port_id'], 'port_desc': l['port_desc'], 'sys_desc': l['sys_desc'],
+                'down': n['ip'] in data['down_ips'], **extra}
+
+    def nic_edges(host, role, n, color, dashes):
+        """The edges of one NIC: host -> leaf, or host -> bond node -> each member's leaf (the member NIC as the label)."""
+        if not n['members']:
+            sw = n['switch']
+            if sw and sw != 'unknown' and sw in topo_nodes:
+                topo_edges.append({'from': host, 'to': sw, 'color': {'color': color, 'highlight': '#ffffff'}, 'dashes': dashes,
+                                   'title': f"{host} {n['nic']} {n['ip']} → {sw} — {n['avg_gbps']} Gbps",
+                                   'width': max(1, n['avg_gbps'] / (L / 4)), 'panel': panel('link', host, role, n, n),
+                                   'name': f"{host} {n['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps']})
+            return
+        b, bid = n['bond'], f"{host}|{n['nic']}"
+        topo_nodes[bid] = {
+            'id': bid, 'label': f"{n['nic']} {n['ip']}", 'group': 'bond', 'level': 2, 'host': host,
+            'title': f"{host} {n['nic']} {n['ip']}: {b['up']} of {b['total']} members up" + ''.join(
+                f"\n{m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen'}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members']),
+        }
+        topo_edges.append({'from': host, 'to': bid, 'color': {'color': color, 'highlight': '#ffffff'}, 'dashes': dashes, 'bondtrunk': True,
+                           'title': f"{host} {n['nic']} {n['ip']} → {n['switch']} — {n['avg_gbps']} Gbps (bond, {b['up']} of {b['total']} members up)",
+                           'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {n['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'],
+                           'panel': {**panel('bond', host, role, n, n), 'members': [m['nic'] for m in n['members']], 'up': b['up'], 'total': b['total']}})
+        for m in n['members']:
+            mdown = m['nic'] in b['down']
+            seen = m['switch'] in topo_nodes and m['switch'] != 'unknown'
+            if not seen:
+                # no switch seen (a down port sends no LLDP): a short stub to a marker that floats beside the bond,
+                # never a link to a leaf nobody saw and no guess at one (a miscabled server lands where it lands)
+                sid = f"{host}|{m['nic']}"
+                topo_nodes[sid] = {'id': sid, 'label': f"✕ {m['nic']}", 'group': 'stub', 'level': 2, 'host': host, 'bond': bid,
+                                   'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']}: {'down' if mdown else 'up'}, no switch seen"}
+            topo_edges.append({'from': bid, 'to': m['switch'] if seen else sid, 'label': m['nic'], 'font': {'size': 10, 'color': '#8899aa', 'strokeWidth': 0},
+                               'color': {'color': '#e94560' if mdown else '#8899aa', 'highlight': '#ffffff'}, 'dashes': [4, 4] if mdown else False,   # by member state; the trunk carries the run's colour
+                               'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']} → {m['switch'] if seen else 'no switch seen'}{' — member down' if mdown else ''}",
+                               'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {m['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'], 'stub': not seen,
+                               'panel': {**panel('member', host, role, {**n, 'nic': m['nic']}, m), 'member_of': n['nic'], 'member_down': mdown,
+                                         'no_switch': not seen}})
 
     # clients: own node type, colored by their judged status (a client line is not the rail line)
     ccol = {'OK': '#4ecca3', 'SLOW': '#ffc107', 'CRITICAL': '#e94560'}
@@ -275,48 +350,30 @@ def generate_html(data, output_path):
         st = max((cnic[n['ip']]['status'] for n in nics), key=lambda s: {'OK': 0, 'SLOW': 1, 'CRITICAL': 2}.get(s, 3))
         avg = sum(n['avg_gbps'] for n in nics) / len(nics)
         topo_nodes[host] = {
-            'id': host, 'label': host, 'group': 'client', 'level': 2,
+            'id': host, 'label': host, 'group': 'client', 'level': hlevel,
             'color': {'background': ccol.get(st, '#666666'), 'border': '#ffffff'},
-            'title': f'<b>{host}</b> (client, {st}, avg {avg:.0f} Gbps)' + ''.join(
-                f"<br>{n['nic']}: {n['ip']} → {n.get('port_desc','')} @ {n['avg_gbps']} Gbps ({cnic[n['ip']]['status']})" for n in nics),
+            'title': f'{host} (client, {st}, avg {avg:.0f} Gbps)' + ''.join(nic_line(n, f" ({cnic[n['ip']]['status']})") for n in nics),
             'hostAvg': round(avg, 1), 'isDown': st not in ccol,
         }
         for n in nics:
-            if n.get('switch', '') in topo_nodes and n['switch'] != 'unknown':
-                topo_edges.append({
-                    'from': host, 'to': n['switch'],
-                    'color': {'color': ccol.get(cnic[n['ip']]['status'], '#666666'), 'highlight': '#ffffff'}, 'dashes': [6, 4],
-                    'title': f"{n['ip']} via {n.get('port_desc','')} — {n['avg_gbps']} Gbps",
-                    'width': max(1, n['avg_gbps'] / (L / 4)),
-                })
+            nic_edges(host, 'client', n, ccol.get(cnic[n['ip']]['status'], '#666666'), [6, 4])
 
     for host, nics in host_nics.items():
         host_avg = sum(n['avg_gbps'] for n in nics) / len(nics) if nics else 0
         is_down = any(n['ip'] in data['down_ips'] for n in nics)
         color = '#666666' if is_down else '#4ecca3' if host_avg >= G else '#0dcaf0' if host_avg >= F else '#ffc107' if host_avg >= S else '#e94560'
-        nic_lines = ''.join(
-            f"<br>{n['nic']}: {n['ip']} → {n.get('port_desc','')} @ {n['avg_gbps']} Gbps"
-            for n in nics
-        )
         topo_nodes[host] = {
-            'id': host, 'label': host, 'group': 'host', 'level': 2,
+            'id': host, 'label': host, 'group': 'host', 'level': hlevel,
             'color': {'background': color, 'border': color},
-            'title': f'<b>{host}</b> (avg {host_avg:.0f} Gbps){nic_lines}',
+            'title': f'{host} (avg {host_avg:.0f} Gbps)' + ''.join(nic_line(n) for n in nics),
             'hostAvg': round(host_avg, 1),
             'isDown': is_down,
         }
         for n in nics:
-            sw = n.get('switch', '')
-            if sw and sw != 'unknown' and sw in topo_nodes:
-                edge_color = '#4ecca3' if n['avg_gbps'] >= G else '#0dcaf0' if n['avg_gbps'] >= F else '#ffc107' if n['avg_gbps'] >= S else '#e94560'
-                if n['ip'] in data['down_ips']:
-                    edge_color = '#666666'
-                topo_edges.append({
-                    'from': host, 'to': sw,
-                    'color': {'color': edge_color, 'highlight': '#ffffff'},
-                    'title': f"{n['ip']} via {n.get('port_desc','')} — {n['avg_gbps']} Gbps",
-                    'width': max(1, n['avg_gbps'] / (L / 4)),
-                })
+            edge_color = '#4ecca3' if n['avg_gbps'] >= G else '#0dcaf0' if n['avg_gbps'] >= F else '#ffc107' if n['avg_gbps'] >= S else '#e94560'
+            if n['ip'] in data['down_ips']:
+                edge_color = '#666666'
+            nic_edges(host, 'backend', n, edge_color, False)
 
     leg_clients = ' &nbsp; Clients: <b id="legClients">0</b>' if cnic else ''
     topo_nodes_json = json.dumps(list(topo_nodes.values()))
@@ -698,9 +755,9 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         <div class="col-md-6">
             <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">LLDP Neighbor Table ({len(data['lldp_info'])} entries)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('lldpTable','lldp_neighbors.csv')">Download CSV</button></div><div class="card-body">
                 <table class="table table-sm table-striped table-hover" id="lldpTable">
-                <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>LLDP Sys</th></tr></thead>
+                <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th></tr></thead>
                 <tbody>
-                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l['switch']}</td><td>{l['port_desc']}</td><td>{l['sys_desc']}</td></tr>" for l in data['lldp_info'])}
+                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l['switch']}</td><td>{l['port_id']}</td><td>{l['port_desc']}</td><td>{l['sys_desc']}</td></tr>" for l in data['lldp_info'])}
                 </tbody></table>
             </div></div>
         </div>
@@ -814,7 +871,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <label class="form-check-label" for="topoToggleSmooth" style="color:#8899aa;">Smooth edges</label>
             </div>
             <div class="ms-auto">
-                <button class="btn btn-sm btn-outline-info" data-bs-toggle="offcanvas" data-bs-target="#topoUplinks">Uplinks</button>
+                <button class="btn btn-sm btn-outline-info" onclick="topoShowPanel('uplinks')">Uplinks</button>
                 <button class="btn btn-sm btn-outline-light" onclick="topoNetwork && topoNetwork.fit()">Fit</button>
                 <button class="btn btn-sm btn-outline-success" onclick="resetTopo()">Reset</button>
             </div>
@@ -871,8 +928,8 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     </div>
     <!-- the uplinks card: a drawer over the map (nothing sits below the map), opened by the toolbar's Uplinks button -->
     <div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
-        <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
-        <div class="offcanvas-body">{uplinks_html}</div>
+        <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" id="topoPanelTitle" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
+        <div class="offcanvas-body"><div id="topoUplinksCard">{uplinks_html}</div><div id="topoLinkPanel" style="display:none;"></div></div>
     </div>
 </div>
 {clients_pane}
@@ -1273,6 +1330,8 @@ $(document).ready(function() {{
             }},
             host: {{ shape: 'dot', size: 10 }},
             client: {{ shape: 'square', size: 10 }},
+            bond: {{ shape: 'hexagon', size: 9, color: {{ background: '#8899aa', border: '#e0e0e0' }}, font: {{ size: 9, color: '#8899aa' }} }},
+            stub: {{ shape: 'dot', size: 5, color: {{ background: '#e94560', border: '#e94560' }}, font: {{ size: 9, color: '#e94560' }} }},   // a member with no switch seen
         }},
         interaction: {{ hover: true, tooltipDelay: 100, navigationButtons: true, keyboard: true, dragNodes: true }},
     }};
@@ -1301,12 +1360,13 @@ $(document).ready(function() {{
     var topoRingIds = [];
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
-        var leavesOf = {{}};
-        topoEdgesData.forEach(function(e) {{ if (!e.uplink) (leavesOf[e.from] = leavesOf[e.from] || {{}})[e.to] = 1; }});
-        var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']);
-        var last = -Math.PI / 2;
+        var leavesOf = {{}};   // a host's leaves: its links' leaves, and through a bond node its members' leaves
+        topoEdgesData.forEach(function(e) {{ if (!e.uplink && !e.bondtrunk) (leavesOf[e.from] = leavesOf[e.from] || {{}})[e.to] = 1; }});
+        topoEdgesData.forEach(function(e) {{ if (e.bondtrunk) Object.keys(leavesOf[e.to] || {{}}).forEach(function(l) {{ (leavesOf[e.from] = leavesOf[e.from] || {{}})[l] = 1; }}); }});
+        var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']), bonds = byGroup(['bond']);
+        var last = -Math.PI / 2, angleOf = {{}};
         var pin = function(n, r, a) {{ topoNodes.update({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: {{ x: true, y: true }} }});
-                                      topoRingIds.push(n.id); if (a > last) last = a; }};
+                                      topoRingIds.push(n.id); angleOf[n.id] = a; if (a > last) last = a; }};
         topoRingIds = [];
         sp.forEach(function(n, i) {{ pin(n, sp.length > 1 ? 90 : 0, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length); }});
         var leafAngle = {{}};
@@ -1328,11 +1388,17 @@ $(document).ready(function() {{
         }});
         var tail = last, step = 2 * Math.PI / Math.max(1, hs.length);
         loose.forEach(function(n, i) {{ pin(n, 680, tail + (i + 1) * step); }});
+        bonds.forEach(function(n) {{ if (n.host in angleOf) pin(n, 560, angleOf[n.host]); }});   // a bond just inside its host
+        // a member's no-switch marker beside its bond, a little outward, each one a step aside
+        var stubs = byGroup(['stub']), aside = {{}};
+        stubs.forEach(function(n) {{ if (n.host in angleOf) {{ aside[n.host] = (aside[n.host] || 0) + 1; pin(n, 600, angleOf[n.host] + 0.03 * aside[n.host]); }} }});
         topoNetwork.fit();
     }}
 
     var topoNetwork = null;
     var topoCurrentLayout = 'hierarchical';
+    var topoBondHost = {{}};   // bond node id -> its host
+    topoNodesData.forEach(function(n) {{ if (n.group === 'bond') topoBondHost[n.id] = n.host; }});
     var topoInitialized = false;
 
     function topoInit() {{
@@ -1346,11 +1412,46 @@ $(document).ready(function() {{
                 topoNodes.update({{ id: p.nodes[0], x: pos[p.nodes[0]].x, y: pos[p.nodes[0]].y, fixed: {{ x: true, y: true }} }});
             }}
         }});
-        // Double-click to unpin
-        topoNetwork.on('doubleClick', function(p) {{
-            if (p.nodes.length > 0) topoNodes.update({{ id: p.nodes[0], fixed: {{ x: false, y: false }} }});
+        // A tap (a click that is not a drag) on a link opens its panel: the host side with the host's own
+        // names, the switch side from LLDP. A tap on blank space closes the panel.
+        topoNetwork.on('click', function(p) {{
+            if (p.event && p.event.type !== 'tap') return;
+            if (p.nodes.length > 0) return;
+            if (p.edges.length > 0) {{ var e = topoEdges.get(p.edges[0]); if (e && e.panel) topoShowPanel('link', e.panel); }}
+            else topoHidePanel();
         }});
     }}
+
+    // The drawer: the uplinks card (the toolbar's button) or one link's panel (a click on the link)
+    var esc = function(s) {{ return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }};
+    function topoLinkPanelHtml(d) {{
+        var row = function(k, v) {{ return '<tr><th style="color:#8899aa; font-weight:normal; width:40%;">' + k + '</th><td>' + esc(v) + '</td></tr>'; }};
+        var tbl = function(title, rows) {{ return '<h6 style="color:#4ecca3;">' + title + '</h6><table class="table table-sm table-striped mb-3"><tbody>' + rows.join('') + '</tbody></table>'; }};
+        if (d.kind === 'uplink') {{
+            var rows = [row('Leaf', d.leaf), row('Spine', d.spine)];
+            if (d.declared) rows.push(row('Declared', d.declared));
+            if (d.phase) rows.push(row('Busiest phase', d.phase), row('Out / in', (d.out == null ? '-' : d.out.toFixed(1) + ' G') + ' / ' + (d['in'] == null ? '-' : d['in'].toFixed(1) + ' G')));
+            if (d.pct != null) rows.push(row('Of declared', d.pct.toFixed(0) + '%'));
+            rows.push(row('Verdict', d.verdict || (d.declared ? 'within the declared capacity' : 'not judged: no spine declaration')));
+            return tbl('Uplink', rows);
+        }}
+        var hostRows = [row('Host', d.host), row('Role', d.role), row(d.kind === 'member' ? 'Member NIC' : 'NIC', d.nic), row('IP', d.ip)];
+        if (d.kind === 'member') hostRows.push(row('Member of', d.member_of), row('Member link', d.member_down ? 'down' : 'up'));
+        if (d.kind === 'bond') hostRows.push(row('Members', d.members.join(', ')), row('Members up', d.up + ' of ' + d.total));
+        hostRows.push(row('Worst run', d.gbps + ' Gbps' + (d.down ? ' (down)' : '')));
+        var swRows = d.kind === 'bond' ? [row('Switch side', 'see the member links')] :
+            d.no_switch ? [row('Switch', 'no switch seen')] :
+            [row('Switch', d.leaf), row('Switch port', d.port_id), row('Port description', d.port_desc), row('System', d.sys_desc)];
+        return tbl('Host side', hostRows) + tbl('Switch side', swRows);
+    }}
+    window.topoShowPanel = function(what, d) {{
+        var card = document.getElementById('topoUplinksCard'), pane = document.getElementById('topoLinkPanel');
+        if (what === 'link') {{ pane.innerHTML = topoLinkPanelHtml(d); pane.style.display = ''; card.style.display = 'none';
+            document.getElementById('topoPanelTitle').textContent = d.kind === 'uplink' ? 'Uplink ' + d.leaf + ' ↔ ' + d.spine : 'Link ' + d.host + ' ' + d.nic; }}
+        else {{ pane.style.display = 'none'; card.style.display = ''; document.getElementById('topoPanelTitle').textContent = 'Leaf uplinks'; }}
+        bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).show();
+    }};
+    window.topoHidePanel = function() {{ bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).hide(); }};
 
     // --- Exclusion sets ---
     var topoExcludedHosts = new Set();
@@ -1368,10 +1469,10 @@ $(document).ready(function() {{
             hostSel.appendChild(o);
         }});
         topoEdgesData.forEach(function(e, i) {{
-            if (!e.uplink && e.title) {{
+            if (!e.uplink && !e.bondtrunk && e.title) {{
                 var o = document.createElement('option');
                 o.value = i;
-                o.textContent = e.from + ' — ' + e.title.split('—')[0].trim();
+                o.textContent = e.name + ' — ' + e.ip + ' → ' + (e.stub ? 'no switch seen' : e.to);
                 linkSel.appendChild(o);
             }}
         }});
@@ -1432,10 +1533,9 @@ $(document).ready(function() {{
             var edge = topoEdges.get(eid);
             if (edge.hidden) return;
             // Skip spine-to-leaf uplinks (flagged uplink: true)
-            if (e.uplink || !e.title) return;
+            if (e.uplink || e.bondtrunk || !e.title) return;   // a host -> bond trunk is counted by its member links
             lVis++;
-            var ip = e.title.split(' ')[0];
-            if (downIps.has(ip)) {{ lDown++; return; }}
+            if (downIps.has(e.ip) || (e.panel && e.panel.member_down)) {{ lDown++; return; }}   // a down bond member is a down link
             var spd = edgeSpeed(e);
             if (spd >= {G}) l350++;
             else if (spd >= {F}) l300++;
@@ -1524,10 +1624,8 @@ $(document).ready(function() {{
         if (topoLastThreshold !== 0) topoApplyFilter();
     }});
 
-    function edgeSpeed(e) {{
-        if (!e.title) return 999;
-        var m = e.title.match(/([\\d.]+)\\s*Gbps/);
-        return m ? parseFloat(m[1]) : 999;
+    function edgeSpeed(e) {{   // a host-side edge carries its worst run; an uplink has none
+        return typeof e.gbps === 'number' ? e.gbps : 999;
     }}
 
     // Unified filter — batched updates to avoid per-node redraws
@@ -1568,7 +1666,7 @@ $(document).ready(function() {{
             // Link speed: show hosts with ANY link >= threshold
             var matchHosts = new Set();
             topoEdgesData.forEach(function(e) {{
-                if (!e.uplink && edgeSpeed(e) >= threshold) matchHosts.add(e.from);
+                if (!e.uplink && edgeSpeed(e) >= threshold) matchHosts.add(topoBondHost[e.from] || e.from);
             }});
             topoNodesData.forEach(function(n) {{
                 if (n.group === 'switch' || n.group === 'spine') nodeVis[n.id] = true;
@@ -1582,6 +1680,8 @@ $(document).ready(function() {{
             }});
         }}
 
+        // a bond node, and a member's no-switch marker, go with their host
+        topoNodesData.forEach(function(n) {{ if (n.group === 'bond' || n.group === 'stub') nodeVis[n.id] = !!nodeVis[n.host]; }});
         // Edges: visible only if both endpoints visible
         var edgeIds = topoEdges.getIds();
         edgeIds.forEach(function(id) {{
@@ -2284,6 +2384,7 @@ def parse_tar_archive(filepath):
         'slow_ips': [],
         'driver_info': [],
         'lldp_info': [],
+        'bonds': {},
         'driver_summary': {},
         'switch_summary': {},
         'packet_drops': [],
@@ -2539,6 +2640,13 @@ def parse_tar_archive(filepath):
                 'driver': parts[3], 'version': parts[4], 'firmware': parts[5],
                 'part': parts[6].strip('()') if len(parts) > 6 else '',
             })
+
+    # bonds.txt: "host nic slaves_up slaves_total down_slaves" per bond NIC (down_slaves "none" or a comma list)
+    for line in read_file('bonds.txt').splitlines():
+        parts = line.split()
+        if len(parts) >= 5 and parts[2].isdigit() and parts[3].isdigit():
+            data['bonds'][(parts[0], parts[1])] = {'up': int(parts[2]), 'total': int(parts[3]),
+                                                   'down': [] if parts[4] == 'none' else parts[4].split(',')}
 
     # LLDP
     for line in read_file('lldp_neighbors.txt').splitlines():

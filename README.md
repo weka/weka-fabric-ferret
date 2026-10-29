@@ -8,7 +8,7 @@ WEKA pre-install/offline (stopped I/O) data plane investigation and performance 
 - **Clients (optional):** every client data NIC to every backend rail and back, in waves that keep each backend NIC to a set number of client flows at once, and optionally all clients at once. Each client's route to each rail is checked to leave by a declared data NIC.
 - **Path checks:** route, ping and a full-MTU no-fragment ping on every planned path before any load.
 - **Temperatures, before the fabric:** every hwmon sensor (CPU, NVMe, NIC) on every host and client around every phase, and the BMC's (inlet, exhaust) via ipmitool, flagged against each sensor's own thresholds and for a rise over the run. A hot host can cap throughput, cause resends and flap links on its own, so the dashboard shows heat first.
-- **Fabric evidence:** LLDP neighbours (which leaf each NIC lands on), link speed, optics, FEC rate, priority and pause counters, NIC and kernel drops, link flaps, rail gateways, and NICs that are swapped between rails.
+- **Fabric evidence:** LLDP neighbours (which leaf each NIC, or each member of a bond, lands on), link speed, optics, FEC rate, priority and pause counters, NIC and kernel drops, link flaps, rail gateways, and NICs that are swapped between rails.
 - **Host side:** system info per host (OS, CPU, PCIe, NIC rings, IRQs and QoS, routes, sysctls, the kernel log over the run) and a receive-side table (drops, softnet, iperf3 CPU) with flags.
 - **UDP pass:** after the TCP phases, the same backend and client runs over UDP at no rate cap, with loss split by where it happened (`FF_UDP=0` turns it off).
 - **Ping mesh:** before load, every backend rail IP from every other backend's and from every client data NIC (`FF_MESH=0` turns it off).
