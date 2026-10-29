@@ -2,8 +2,7 @@
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
-tmo_s() { local s=$1; shift; if [[ -n $TO ]]; then "$TO" "$s" "$@"; else "$@"; fi; }   # under timeout s, where timeout exists
-tmo() { tmo_s "$HOST_LIMIT" "$@"; }
+tmo() { tmo_s "$HOST_LIMIT" "$@"; }   # tmo_s: tc_bmc.sh
 clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 
 # sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
@@ -23,17 +22,7 @@ rssh() {
     exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
 }
 
-# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus); a password through -f from a one-use fifo, an
-# empty one as -E with IPMI_PASSWORD empty (no secret in it)
-rbmc() {
-    local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
-    if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
-    tmo_s "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; rc=$?
-    [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
-}
-
-# ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
-BMC_AWK='#@awk tc_bmc'
+# rbmc and BMC_AWK (the BMC out of band): tc_bmc.sh, shared with fabric_ferret.sh
 
 # read_target n i: the reader on target i for sample n, in the background (o/e/rc.n.i)
 read_target() {

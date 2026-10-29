@@ -79,6 +79,12 @@ bash -n "$tmp" || {
     echo "build: the $name assembly does not parse (kept as $out.rejected); both targets left alone" >&2
     exit 1
 }
+# A function defined twice in one assembly (a shared module beside a copy, two modules with one name) runs as
+# whichever came last: refused by name. Function lines inside a quoted heredoc (a remote script) are that
+# script's, skipped; only column-0 definitions count.
+dup=$(awk '/<<.?EOF.?$/ { h = 1; next } h && /^EOF$/ { h = 0; next }
+           !h && /^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { f = $0; sub(/\(\).*/, "", f); if (f in seen) print f; seen[f] = 1 }' "$tmp")
+[ -z "$dup" ] || { echo "build: a function defined twice in the $name assembly: $(echo $dup)" >&2; exit 1; }
 done
 # both assembled and parsed: only now is either target replaced
 for i in "${!names[@]}"; do chmod 755 "${tmps[$i]}"; mv -f "${tmps[$i]}" "$dir/${names[$i]}"; done

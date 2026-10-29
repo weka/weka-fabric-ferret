@@ -160,12 +160,16 @@ backend,*,svc-fabric
 #   Status; throughput still decides OK/SLOW/CRITICAL (0.1)
 # FF_RETR_PCT=0.1
 #
-#   read every hwmon temperature (/sys/class/hwmon: CPU, NVMe, NIC…) on every host and client
-#   before the run and after every phase, read only; temps.txt, temps_summary.txt. 0 = off
+#   read every temperature on every host and client before the run and after every phase, read
+#   only, as thermals_capture.sh reads them: hwmon (/sys/class/hwmon: CPU, NVMe, NIC…) and
+#   nvidia-smi (NVIDIA GPUs); each sensor typed inlet, cpu, gpu, mem, nvme, nic or other;
+#   temps.txt, temps_summary.txt. 0 = off
 # FF_TEMPS=1
 #
-#   with FF_TEMPS, also the BMC's temperatures (inlet, exhaust…) via ipmitool sensor, once per
-#   iteration and at the end, where ipmitool is installed (needs root or sudo). 0 = off
+#   with FF_TEMPS, also the BMC's temperatures (inlet, exhaust, GPU board, drives…) via
+#   ipmitool sensor on the host, once per iteration and at the end, where ipmitool is installed
+#   (root, the escalator the sweep found, or sudo -S with the row's password, for ipmitool alone;
+#   hwmon and nvidia-smi as the login), and a -t file's bmc lines out of band from here. 0 = off
 # FF_IPMI=1
 #
 #   seconds per ipmitool read (60)

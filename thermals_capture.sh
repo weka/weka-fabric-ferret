@@ -328,12 +328,106 @@ pw_transport() {
     fi
 }
 
+# ---------- a BMC read out of band, from here (both tools) ----------
+
+tmo_s() { local s=$1; shift; if [[ -n $TO ]]; then "$TO" "$s" "$@"; else "$@"; fi; }   # under timeout s, where timeout exists (TO)
+
+# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus); a password through -f from a one-use fifo, an
+# empty one as -E with IPMI_PASSWORD empty (no secret in it)
+rbmc() {
+    local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
+    if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
+    tmo_s "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; rc=$?
+    [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
+}
+
+# ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
+BMC_AWK='BEGIN { FS = "|" }
+{ for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i) }
+NR == 1 { first = $0 }
+$3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ { nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm); n++
+    print t, h, "ipmi", "bmc", "lanplus", nm, sprintf("%.1f", $2), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-"), ($4 == "" ? "-" : $4) }
+END { if (!n) { w = (rc == 124 ? "ipmitool_timed_out_after_" to "s" : "rc=" rc "_" first); gsub(/[^A-Za-z0-9_.:=-]/, "_", w)
+          print t, h, "ipmi", "bmc", "lanplus", "none", "-", "-", "-", substr(w, 1, 120) } }'
+
+# ---------- the temperature summary, one for both tools ----------
+
+# temps_summary.txt, one row per sensor over the samples: "Host Source Type Chip Dev Sensor First_C Max_C Last_C
+# High_C Crit_C Flag" (TYPE_AWK adds Min_C). Flag, worst first: crit, high (or the BMC's status), near (within
+# FF_TEMP_MARGIN of high), +rise (over FF_TEMP_RISE); nodata:<why> when a host/source gave nothing
+TEMP_SUM_AWK='
+NR == 1 { next }
+$6 == "none" { nd[$2 SUBSEP $3] = $10; next }
+{ k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; got[$2 SUBSEP $3] = 1
+  if (!(k in mx)) { fi[k] = v; mx[k] = v; ord[++n] = k } else if (v > mx[k]) mx[k] = v
+  la[k] = v; if ($8 != "-" && $8 + 0 > 0) hi[k] = $8 + 0; if ($9 != "-" && $9 + 0 > 0) cr[k] = $9 + 0; if ($3 == "ipmi") { if ($10 ~ /^(cr|nr)/) bc[k] = 2; else if ($10 ~ /^nc/ && bc[k] < 1) bc[k] = 1 } }
+function ty(src, chip, dev) { if (src == "ipmi") return "bmc"; if (chip ~ /^(coretemp|k10temp|zenpower|cpu_thermal)$/) return "cpu"
+    if (chip ~ /^nvme/) return "nvme"; if (chip ~ /^(mlx5|ice|bnxt|i40e|ixgbe|igb|tg3|qede|nfp)/ || dev ~ /^(en|eth|ib|bond)/) return "nic"; return "other" }
+END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C Flag"
+    for (i = 1; i <= n; i++) { k = ord[i]; split(k, p, SUBSEP); f = "-"
+        if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
+        else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
+        else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
+        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
+        printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
+               ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
+    for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
+
+# Type by what a sensor measures: nvidia-smi and amdgpu rows gpu; a BMC sensor by its name (the awk lists the
+# words); hwmon drivetemp nvme, jc42/spd5118 mem. Appends Min_C. A gpu nodata row on a host whose BMC gave
+# GPU rows becomes note:, not a no-data
+TYPE_AWK='
+FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
+FNR == 1 { print $0, "Min_C"; next }
+$2 == "gpu" && $12 ~ /^nodata:/ && ($1 in bg) { $12 = "note:" substr($12, 8) }
+$6 == "none" { print $0, "-"; next }
+{ s = tolower($6)
+  if ($2 == "gpu") $3 = "gpu"
+  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /vrm|vr_|psu|board|fpga|hmc|hsc|plx|pex|pch|sas/ ? "other" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /gpu|hbm|nvlink|nvsw/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
+  else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
+  else if ($4 ~ /^drivetemp/) $3 = "nvme"
+  else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
+  if ($2 == "ipmi" && $3 == "gpu") bg[$1] = 1
+  print $0, sprintf("%.1f", mn[$1 SUBSEP $2 SUBSEP $4 SUBSEP $5 SUBSEP $6]) }'
+
+# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
+# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
+# one behind no shown cell
+SRC_AWK='NR > 1 && $6 != "none" { h = $1; src = $2; if (!(h in seen)) { seen[h]; ord[++nk] = h }; n[h]++
+    if (!((h, src, $3) in c) || $8 > m[h, src, $3]) m[h, src, $3] = $8
+    s[h, src, $3] += $9; c[h, src, $3]++
+    if ($12 != "-" && index("," fl[h, src, $3] ",", "," $3 ":" $12 ",") == 0) fl[h, src, $3] = fl[h, src, $3] (fl[h, src, $3] == "" ? "" : ",") $3 ":" $12 }
+    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet Avg CPU Avg GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags"
+          for (i = 1; i <= nk; i++) { h = ord[i]; l = ""; f = ""; delete used; delete shown
+              for (j = 1; j <= 7; j++) { t = ty[j]; src = ""
+                  if (t == "gpu" && ((h, "gpu", t) in c)) src = "gpu"
+                  else if ((h, "ipmi", t) in c) src = "ipmi"; else if ((h, "hwmon", t) in c) src = "hwmon"
+                  if (src == "") { l = l " - -"; continue }
+                  used[src]; shown[src, t]; l = l " " m[h, src, t] " " sprintf("%.1f", s[h, src, t] / c[h, src, t])
+                  if (fl[h, src, t] != "") f = f (f == "" ? "" : ",") fl[h, src, t] }
+              for (j = 1; j <= 7; j++) for (k = 1; k <= 2; k++) { t = ty[j]; src = (k == 1 ? "ipmi" : "hwmon")
+                  if (fl[h, src, t] != "" && !((src, t) in shown)) { x = fl[h, src, t]; gsub(",", "/" src ",", x); f = f (f == "" ? "" : ",") x "/" src } }
+              sc = ("ipmi" in used ? "ipmi" : "") (("gpu" in used) ? (("ipmi" in used) ? "+" : "") "nvidia-smi" : "")
+              sc = sc (("hwmon" in used) ? (sc == "" ? "" : "+") "hwmon" : "")
+              print h, sc, n[h] l, (f == "" ? "-" : f) } }'
+
+# summarize_temps temps.txt adjusted summary: high = 95% of crit where high is missing (to <adjusted>, the caller's
+# to keep or move over temps.txt), the summary, its nodata rows sorted after the data rows (awk hash order differs),
+# then the types and Min_C
+summarize_temps() {
+    local in=$1 hi=$2 out=$3
+    awk 'NR > 1 && $6 != "none" && ($8 == "-" || $8 + 0 <= 0) && $9 != "-" && $9 + 0 > 0 { $8 = sprintf("%.1f", $9 * 0.95) } { print }' "$in" > "$hi"
+    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$hi" > "$out.raw"
+    { awk '$12 !~ /^nodata/' "$out.raw"; awk '$12 ~ /^nodata/' "$out.raw" | sort -k1,1 -k2,2; } > "$out.sorted"
+    awk "$TYPE_AWK" "$hi" "$out.sorted" > "$out"
+    rm -f "$out.raw" "$out.sorted"
+}
+
 # ---------- collection ----------
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
-tmo_s() { local s=$1; shift; if [[ -n $TO ]]; then "$TO" "$s" "$@"; else "$@"; fi; }   # under timeout s, where timeout exists
-tmo() { tmo_s "$HOST_LIMIT" "$@"; }
+tmo() { tmo_s "$HOST_LIMIT" "$@"; }   # tmo_s: tc_bmc.sh
 clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 
 # sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
@@ -353,23 +447,7 @@ rssh() {
     exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
 }
 
-# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus); a password through -f from a one-use fifo, an
-# empty one as -E with IPMI_PASSWORD empty (no secret in it)
-rbmc() {
-    local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
-    if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
-    tmo_s "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; rc=$?
-    [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
-}
-
-# ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
-BMC_AWK='BEGIN { FS = "|" }
-{ for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i) }
-NR == 1 { first = $0 }
-$3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ { nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm); n++
-    print t, h, "ipmi", "bmc", "lanplus", nm, sprintf("%.1f", $2), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-"), ($4 == "" ? "-" : $4) }
-END { if (!n) { w = (rc == 124 ? "ipmitool_timed_out_after_" to "s" : "rc=" rc "_" first); gsub(/[^A-Za-z0-9_.:=-]/, "_", w)
-          print t, h, "ipmi", "bmc", "lanplus", "none", "-", "-", "-", substr(w, 1, 120) } }'
+# rbmc and BMC_AWK (the BMC out of band): tc_bmc.sh, shared with fabric_ferret.sh
 
 # read_target n i: the reader on target i for sample n, in the background (o/e/rc.n.i)
 read_target() {
@@ -611,78 +689,14 @@ unreachable_targets() {
     done
 }
 
-# temps_summary.txt, one row per sensor over the samples: "Host Source Type Chip Dev Sensor First_C Max_C
-# Last_C High_C Crit_C Flag". Type cpu|nvme|nic|bmc|other. Flag (worst first): crit (at or above crit, or the BMC says
-# cr/nr), high (at or above high, or BMC nc), near (within FF_TEMP_MARGIN of high), then +rise (max - first over
-# FF_TEMP_RISE); "-" when none. A threshold of 0 counts as unset. A host/source with no reading at all gets one row,
-# Sensor none, Flag nodata:<why>. (fabric_ferret.sh's TEMP_SUM_AWK, unchanged; a harness check keeps them equal.)
-TEMP_SUM_AWK='
-NR == 1 { next }
-$6 == "none" { nd[$2 SUBSEP $3] = $10; next }
-{ k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; got[$2 SUBSEP $3] = 1
-  if (!(k in mx)) { fi[k] = v; mx[k] = v; ord[++n] = k } else if (v > mx[k]) mx[k] = v
-  la[k] = v; if ($8 != "-" && $8 + 0 > 0) hi[k] = $8 + 0; if ($9 != "-" && $9 + 0 > 0) cr[k] = $9 + 0; if ($3 == "ipmi") { if ($10 ~ /^(cr|nr)/) bc[k] = 2; else if ($10 ~ /^nc/ && bc[k] < 1) bc[k] = 1 } }
-function ty(src, chip, dev) { if (src == "ipmi") return "bmc"; if (chip ~ /^(coretemp|k10temp|zenpower|cpu_thermal)$/) return "cpu"
-    if (chip ~ /^nvme/) return "nvme"; if (chip ~ /^(mlx5|ice|bnxt|i40e|ixgbe|igb|tg3|qede|nfp)/ || dev ~ /^(en|eth|ib|bond)/) return "nic"; return "other" }
-END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C Flag"
-    for (i = 1; i <= n; i++) { k = ord[i]; split(k, p, SUBSEP); f = "-"
-        if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
-        else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
-        else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
-        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
-        printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
-               ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
-    for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
-
 # ---------- output ----------
-
-# Type by what a sensor measures, whatever read it: GPUs (nvidia-smi, amdgpu) are gpu; a BMC sensor is typed by its
-# name, first match wins: inlet/ambient; VRM/PSU/board/FPGA/HMC/HSC/PLX/PEX/PCH/SAS other; nic/aoc/ocp/cx<n>/port
-# (so an HGX ConnectX is a NIC); gpu/hbm/nvlink/nvsw; nvme/ssd/m.2/drive; dimm/mem; cpu/proc/soc; else other.
-# hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
-# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged). The data rows come before the nodata rows
-# (the spine sorts them so): a gpu nodata row on a host whose BMC rows were typed gpu (HGX GPU, HBM, NVLink) becomes
-# note: instead, since the BMC has that host's GPU temperatures; a note is not a no-data (counts, verdict, Not read).
-TYPE_AWK='
-FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
-FNR == 1 { print $0, "Min_C"; next }
-$2 == "gpu" && $12 ~ /^nodata:/ && ($1 in bg) { $12 = "note:" substr($12, 8) }
-$6 == "none" { print $0, "-"; next }
-{ s = tolower($6)
-  if ($2 == "gpu") $3 = "gpu"
-  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /vrm|vr_|psu|board|fpga|hmc|hsc|plx|pex|pch|sas/ ? "other" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /gpu|hbm|nvlink|nvsw/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
-  else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
-  else if ($4 ~ /^drivetemp/) $3 = "nvme"
-  else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
-  if ($2 == "ipmi" && $3 == "gpu") bg[$1] = 1
-  print $0, sprintf("%.1f", mn[$1 SUBSEP $2 SUBSEP $4 SUBSEP $5 SUBSEP $6]) }'
+# (TEMP_SUM_AWK, TYPE_AWK, SRC_AWK and summarize_temps: tc_summary.sh, shared with fabric_ferret.sh)
 
 # per host the hottest reading of each type and its flags: "Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-" && index("," fl[$1] ",", "," $3 ":" $12 ",") == 0) fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
     END {split("inlet cpu gpu mem nvme nic other", ty, " ")
          for (x in hs) { l = x; for (i = 1; i <= 7; i++) l = l " " (((x, ty[i]) in m) ? m[x, ty[i]] : "-"); print l, (x in fl ? fl[x] : "-") } }'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
-
-# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
-# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
-# one behind no shown cell
-SRC_AWK='NR > 1 && $6 != "none" { h = $1; src = $2; if (!(h in seen)) { seen[h]; ord[++nk] = h }; n[h]++
-    if (!((h, src, $3) in c) || $8 > m[h, src, $3]) m[h, src, $3] = $8
-    s[h, src, $3] += $9; c[h, src, $3]++
-    if ($12 != "-" && index("," fl[h, src, $3] ",", "," $3 ":" $12 ",") == 0) fl[h, src, $3] = fl[h, src, $3] (fl[h, src, $3] == "" ? "" : ",") $3 ":" $12 }
-    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet Avg CPU Avg GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags"
-          for (i = 1; i <= nk; i++) { h = ord[i]; l = ""; f = ""; delete used; delete shown
-              for (j = 1; j <= 7; j++) { t = ty[j]; src = ""
-                  if (t == "gpu" && ((h, "gpu", t) in c)) src = "gpu"
-                  else if ((h, "ipmi", t) in c) src = "ipmi"; else if ((h, "hwmon", t) in c) src = "hwmon"
-                  if (src == "") { l = l " - -"; continue }
-                  used[src]; shown[src, t]; l = l " " m[h, src, t] " " sprintf("%.1f", s[h, src, t] / c[h, src, t])
-                  if (fl[h, src, t] != "") f = f (f == "" ? "" : ",") fl[h, src, t] }
-              for (j = 1; j <= 7; j++) for (k = 1; k <= 2; k++) { t = ty[j]; src = (k == 1 ? "ipmi" : "hwmon")
-                  if (fl[h, src, t] != "" && !((src, t) in shown)) { x = fl[h, src, t]; gsub(",", "/" src ",", x); f = f (f == "" ? "" : ",") x "/" src } }
-              sc = ("ipmi" in used ? "ipmi" : "") (("gpu" in used) ? (("ipmi" in used) ? "+" : "") "nvidia-smi" : "")
-              sc = sc (("hwmon" in used) ? (sc == "" ? "" : "+") "hwmon" : "")
-              print h, sc, n[h] l, (f == "" ? "-" : f) } }'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)
@@ -1139,13 +1153,9 @@ main() {
     for i in "${UNREACH[@]}"; do echo "${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V > "$WORK/unreachlist"
     local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
 
-    # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
-    # a sensor with a crit but no high (or 0) gets high = 95% of crit, so high and near flag it too (10-26)
-    awk 'NR > 1 && $6 != "none" && ($8 == "-" || $8 + 0 <= 0) && $9 != "-" && $9 + 0 > 0 { $8 = sprintf("%.1f", $9 * 0.95) } { print }' \
-        "$WORK/temps.txt" > "$WORK/temps.hi" && mv "$WORK/temps.hi" "$WORK/temps.txt"
-    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
-    { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
-    awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
+    # the summary (tc_summary.sh, shared with fabric_ferret.sh); the high = 95% of crit copy replaces temps.txt here,
+    # so the jsonl carries the thresholds the flags used (10-26)
+    summarize_temps "$WORK/temps.txt" "$WORK/temps.hi" "$WORK/temps_summary.txt" && mv "$WORK/temps.hi" "$WORK/temps.txt"
     awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
     awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
     # the html's per-type tables: "group type chip dev sensor host value high crit flag", BMC first, then by type,

@@ -19,15 +19,17 @@ From a jump host (settings ride in the remote command; nothing to edit or copy f
 
   -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
              format thermals_capture.sh reads (# comments; a line with no comma is a backend). Types: backend (or
-             host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines are skipped (counted in
-             one log line). Each target takes its row's login and password, credential rows (a host of * or a
+             host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines (one address each) are
+             read out of band from here with ipmitool -I lanplus, as thermals_capture.sh reads them, when the
+             BMC is read (FF_IPMI). Each target takes its row's login and password, credential rows (a host of * or a
              glob) included, as thermals_capture.sh resolves them; no login: FF_SSH_USER; no password: key ssh.
              A password is read once, where the target's ssh session opens, through SSH_ASKPASS from a one-use
              fifo (OpenSSH 8.4+, or setsid, here): never an environment variable, a command line or a file.
              Remote steps run as root: a root login directly; any other login through the first passwordless
              escalator (FF_SSH_USER below); where none works, a row password runs them with sudo -S -k (the
              password first on the ssh input stream, behind a guard that never lets it run as a command). A host
-             with neither is left out, listed in unusable.txt with the reason, and counted as missing.
+             with neither is left out of the tests, listed in unusable.txt with the reason, and counted as
+             missing; it is still read for temperatures, as its login (FF_TEMPS).
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
 
@@ -120,10 +122,14 @@ Optional (default)
   FF_SLOW_PCT      SLOW at or above this %, CRITICAL below (50)
   FF_RETR_PCT      a data NIC whose TCP retransmits exceed this % of the segments it sent gets (retr) on its
                    Status; throughput still decides OK/SLOW/CRITICAL (0.1)
-  FF_TEMPS (1)     read every hwmon temperature (/sys/class/hwmon: CPU, NVMe, NIC…) on every host and client
-                   before the run and after every phase, read only; temps.txt, temps_summary.txt. 0 = off
-  FF_IPMI (1)      with FF_TEMPS, also the BMC's temperatures (inlet, exhaust…) via ipmitool sensor, once per
-                   iteration and at the end, where ipmitool is installed (needs root or sudo). 0 = off
+  FF_TEMPS (1)     read every temperature on every host and client before the run and after every phase, read
+                   only, as thermals_capture.sh reads them: hwmon (/sys/class/hwmon: CPU, NVMe, NIC…) and
+                   nvidia-smi (NVIDIA GPUs); each sensor typed inlet, cpu, gpu, mem, nvme, nic or other;
+                   temps.txt, temps_summary.txt. 0 = off
+  FF_IPMI (1)      with FF_TEMPS, also the BMC's temperatures (inlet, exhaust, GPU board, drives…) via
+                   ipmitool sensor on the host, once per iteration and at the end, where ipmitool is installed
+                   (root, the escalator the sweep found, or sudo -S with the row's password, for ipmitool alone;
+                   hwmon and nvidia-smi as the login), and a -t file's bmc lines out of band from here. 0 = off
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
@@ -573,6 +579,13 @@ rbash() {
             "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo -- "$@"
     else "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
 }
+# rlogin_bash [-T secs] target args...: stdin as a bash script on the target as its login, no escalation (the
+# temperature reader escalates ipmitool alone), over the sweep's master; -T: cut off after secs where timeout exists
+rlogin_bash() {
+    local -a to=(); [[ $1 == -T ]] && { [[ -n $TO ]] && to=("$TO" "$2"); shift 2; }
+    local t=$1; shift
+    "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" bash -s -- "$@"
+}
 # rroot target cmd...: one command as root (TESC). Returns 3, running nothing, for a sudo -S host whose password isn't
 # in memory: the cleanup after a crash works from the state file, which never holds a password
 rroot() {
@@ -848,38 +861,7 @@ for nic in "$@"; do
 done
 EOF
 
-# Temperatures, read only: every hwmon sensor (kernel sysfs; the data lm-sensors reads, no package needed) as
-# "@@HWMON host chip dev sensor milli_c high crit" (dev: the NIC's netdev, else the device; thresholds in milli-C
-# or -), "@@HWMON host - - none - - -" when there is none. $1 = ipmi adds the BMC's readings (ipmitool sensor,
-# timeout $2) as "@@IPMI host sensor c status high crit", or "@@IPMI host none <why>". FF_SYSFS is a test hook.
-read -r -d '' TEMP_SCRIPT <<'EOF'
-h=$(hostname -s); sys=${FF_SYSFS:-/sys}; n=0
-num() { case $1 in ''|*[!0-9-]*) echo -; ;; *) echo "$1" ;; esac; }
-for d in "$sys"/class/hwmon/hwmon*; do
-    [ -d "$d" ] || continue
-    chip=-; [ -r "$d/name" ] && chip=$(cat "$d/name" 2>&1); chip=$(printf '%s' "${chip:--}" | tr -c 'A-Za-z0-9_.:-' '_')
-    dev=-; l=$(readlink "$d/device" 2>&1) && dev=${l##*/}
-    for x in "$d"/device/net/*; do [ -e "$x" ] && dev=${x##*/}; break; done
-    for t in "$d"/temp*_input; do
-        [ -r "$t" ] || continue
-        b=${t%_input}; v=$(num "$(cat "$t" 2>&1)"); [ "$v" = - ] && continue
-        lb=${b##*/}; [ -r "${b}_label" ] && lb=$(cat "${b}_label" 2>&1)
-        hi=-; [ -r "${b}_max" ] && hi=$(num "$(cat "${b}_max" 2>&1)")
-        cr=-; [ -r "${b}_crit" ] && cr=$(num "$(cat "${b}_crit" 2>&1)")
-        echo "@@HWMON $h $chip $dev $(printf '%s' "$lb" | tr -c 'A-Za-z0-9_.:-' '_') $v $hi $cr"; n=$(( n + 1 ))
-    done
-done
-[ "$n" -gt 0 ] || echo "@@HWMON $h - - none - - -"
-[ "$1" = ipmi ] || exit 0
-if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
-if [ -n "$(command -v timeout)" ]; then out=$(timeout "${2:-60}" ipmitool sensor 2>&1); else out=$(ipmitool sensor 2>&1); fi; rc=$?
-# ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
-r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
-    $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ {nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm)
-        print "@@IPMI", h, nm, $2, ($4 == "" ? "-" : $4), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-")}')
-if [ -n "$r" ]; then echo "$r"
-else echo "@@IPMI $h none rc=${rc}_$(printf '%s' "$out" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
-EOF
+# Temperatures: TEMP_SCRIPT is thermals_capture.sh's reader (tc_reader.sh: hwmon, nvidia-smi, the BMC in band)
 
 # Host-side UDP loss counters: "host InErrors RcvbufErrors SndbufErrors softnet_dropped".
 # InErrors includes RcvbufErrors; softnet_stat column 2 (hex) is the per-CPU backlog drop count.
@@ -975,6 +957,199 @@ read -r -d '' KLOG_SCRIPT <<'EOF'
 if [ -n "$(command -v journalctl)" ] && out=$(timeout 60 journalctl -k --no-pager -o short-iso --since "@$1" 2>&1); then echo "$out" | tail -n 3000
 else echo "n/a: journalctl -k failed or missing (${out%%$'\n'*}); dmesg instead, last 500 lines of the boot"; dmesg -T 2>&1 | tail -n 500; fi
 EOF
+
+# ---------- the reader each host runs ----------
+
+# Temperatures, read only: every hwmon sensor (kernel sysfs; the data lm-sensors reads, no package needed) as
+# "@@HWMON host chip dev sensor milli_c high crit" (dev: the NIC's netdev, else the device; thresholds in milli-C
+# or -), "@@HWMON host - - none - - -" when there is none. $1 = ipmi adds the BMC's readings (ipmitool sensor,
+# timeout $2) as "@@IPMI host sensor c status high crit", or "@@IPMI host none <why>". FF_SYSFS is a test hook.
+# The hwmon part is fabric_ferret.sh's, line for line (a harness check keeps them equal); here ipmitool alone
+# gets sudo -n, so a host that refuses sudo still gives its hwmon readings.
+read -r -d '' TEMP_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}; n=0
+num() { case $1 in ''|*[!0-9-]*) echo -; ;; *) echo "$1" ;; esac; }
+for d in "$sys"/class/hwmon/hwmon*; do
+    [ -d "$d" ] || continue
+    chip=-; [ -r "$d/name" ] && chip=$(cat "$d/name" 2>&1); chip=$(printf '%s' "${chip:--}" | tr -c 'A-Za-z0-9_.:-' '_')
+    dev=-; l=$(readlink "$d/device" 2>&1) && dev=${l##*/}
+    for x in "$d"/device/net/*; do [ -e "$x" ] && dev=${x##*/}; break; done
+    for t in "$d"/temp*_input; do
+        [ -r "$t" ] || continue
+        b=${t%_input}; v=$(num "$(cat "$t" 2>&1)"); [ "$v" = - ] && continue
+        lb=${b##*/}; [ -r "${b}_label" ] && lb=$(cat "${b}_label" 2>&1)
+        hi=-; [ -r "${b}_max" ] && hi=$(num "$(cat "${b}_max" 2>&1)")
+        cr=-; [ -r "${b}_crit" ] && cr=$(num "$(cat "${b}_crit" 2>&1)")
+        echo "@@HWMON $h $chip $dev $(printf '%s' "$lb" | tr -c 'A-Za-z0-9_.:-' '_') $v $hi $cr"; n=$(( n + 1 ))
+    done
+done
+[ "$n" -gt 0 ] || echo "@@HWMON $h - - none - - -"
+# NVIDIA GPUs (not in hwmon), read only: nvidia-smi -q -d TEMPERATURE as "@@GPU host gpu<i> core|memory c high crit"
+# (high = Max Operating, crit = Shutdown; newer drivers give these as T.Limit margins instead, turned absolute:
+# margin = degrees left to T.Limit, so high = current + margin - max-op offset, crit = current + margin - shutdown
+# offset), "@@GPU host none <why>" if it fails
+# nvidia-smi: PATH, the usual install dirs, then the GPU operator's driver root (with its own libraries). A loaded
+# driver (/proc/driver/nvidia/gpus) with no nvidia-smi anywhere is a no-data row, never silence.
+nv=$(command -v nvidia-smi); nvl=
+for p in /usr/bin/nvidia-smi /usr/local/bin/nvidia-smi /usr/local/nvidia/bin/nvidia-smi /run/nvidia/driver/usr/bin/nvidia-smi; do
+    [ -n "$nv" ] && break; [ -x "$p" ] && nv=$p
+done
+case $nv in /run/nvidia/driver/*) nvl=/run/nvidia/driver/usr/lib64:/run/nvidia/driver/usr/lib/x86_64-linux-gnu:/run/nvidia/driver/usr/lib/aarch64-linux-gnu ;; esac
+gp=${FF_PROCFS:-/proc}/driver/nvidia/gpus   # FF_PROCFS: test hook, as FF_SYSFS
+if [ -z "$nv" ] && [ -d "$gp" ] && [ -n "$(ls "$gp" 2>&1)" ]; then echo "@@GPU $h none nvidia_driver_loaded_but_no_nvidia-smi_found"
+elif [ -z "$nv" ]; then   # no driver either: NVIDIA (vendor 0x10de) display or 3D controllers (class 0x03xxxx) on the PCI bus
+    ng=0; for p in "$sys"/bus/pci/devices/*; do
+        [ -r "$p/vendor" ] && [ "$(cat "$p/vendor" 2>&1)" = 0x10de ] || continue
+        case $(cat "$p/class" 2>&1) in 0x0300*|0x0302*) ng=$(( ng + 1 )) ;; esac
+    done
+    [ "$ng" -gt 0 ] && echo "@@GPU $h none ${ng}_nvidia_gpus_on_pci_but_no_nvidia-smi_or_driver_here"
+fi
+if [ -n "$nv" ]; then
+    if [ -n "$(command -v timeout)" ]; then g=$(LD_LIBRARY_PATH=$nvl timeout "${2:-60}" "$nv" -q -d TEMPERATURE 2>&1); else g=$(LD_LIBRARY_PATH=$nvl "$nv" -q -d TEMPERATURE 2>&1); fi; grc=$?
+    r=$(printf '%s\n' "$g" | awk -v h="$h" 'function v(s) { sub(/^[^:]*: */, "", s); sub(/ *C *$/, "", s); return s ~ /^-?[0-9.]+$/ ? s : "-" }
+        function out() { if (g < 0) return
+            if (gh == "-" && gc != "-" && tm != "-" && to != "-") gh = gc + tm - to
+            if (gx == "-" && gc != "-" && tm != "-" && ts != "-") gx = gc + tm - ts
+            if (gc != "-") print "@@GPU", h, "gpu" g, "core", gc, gh, gx; if (mc != "-") print "@@GPU", h, "gpu" g, "memory", mc, mh, "-" }
+        /^GPU [0-9A-Fa-f]+:/ { out(); g++; gc = gh = gx = mc = mh = tm = to = ts = "-"; next }
+        /GPU T\.Limit Temp/ { tm = v($0); next } /GPU Max Operating T\.Limit Temp/ { to = v($0); next } /GPU Shutdown T\.Limit Temp/ { ts = v($0); next }
+        /T\.Limit/ { next }
+        /GPU Current Temp/ { gc = v($0) } /GPU Max Operating Temp/ { gh = v($0) } /GPU Shutdown Temp/ { gx = v($0) }
+        /Memory Current Temp/ { mc = v($0) } /Memory Max Operating Temp/ { mh = v($0) }
+        BEGIN { g = -1 } END { out() }')
+    if [ -n "$r" ]; then echo "$r"
+    else echo "@@GPU $h none rc=${grc}_$(printf '%s' "$g" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
+fi
+[ "$1" = ipmi ] || exit 0
+if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
+# not root: sudo -S with the login's password when the -t file gave one (TC_PW, read from stdin ahead of this
+# script: a shell variable, never exported, never argv); else the first passwordless escalator that runs `true`
+# within 5 s, tried in this order: dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n. $3, when given, is the
+# escalator an earlier sample found ("_" for spaces, or none): no probe then. Reported as "@@ESC host escalator".
+# Every probe and ipmitool reads an empty stdin, never the rest of this script.
+s=; [ "$(id -u)" = 0 ] || { s=n; [ -n "${TC_PW+x}" ] && s=S; }
+ito=${2:-60}; esc=$(printf '%s' "${3:-}" | tr _ ' ')
+tmo() { t=$1; shift; if [ -n "$(command -v timeout)" ]; then timeout "$t" "$@"; else "$@"; fi; }
+if [ "$s" = n ]; then
+    if [ -z "$esc" ]; then
+        esc=none
+        for e in "dzdo -n" pbrun sesu pmrun "doas -n" "ksu -e" "sudo -n"; do
+            [ -n "$(command -v "${e%% *}")" ] || continue
+            if pr=$(tmo 5 $e true 2>&1 <<<""); then esc=$e; break; fi
+        done
+    fi
+    echo "@@ESC $h $(printf '%s' "$esc" | tr ' ' _)"
+fi
+case $s in
+    S) out=$(printf '%s\n' "$TC_PW" | tmo "$ito" sudo -S -p "" ipmitool sensor 2>&1); rc=$? ;;
+    n) if [ "$esc" = none ]; then echo "@@IPMI $h none no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo"; exit 0; fi
+       out=$(tmo "$ito" $esc ipmitool sensor 2>&1 <<<""); rc=$? ;;
+    *) out=$(tmo "$ito" ipmitool sensor 2>&1 <<<""); rc=$? ;;
+esac
+# ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
+r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
+    $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ {nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm)
+        print "@@IPMI", h, nm, $2, ($4 == "" ? "-" : $4), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-")}')
+if [ -n "$r" ]; then echo "$r"
+elif [ "$rc" = 124 ]; then echo "@@IPMI $h none ipmitool_timed_out_after_${2:-60}s"
+elif [ -n "$s" ] && printf '%s' "$out" | grep -q '^sudo:'; then echo "@@IPMI $h none sudo_refused_$(printf '%s' "$out" | grep '^sudo:' | head -n 1 | tr -d '\n' | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"
+else echo "@@IPMI $h none rc=${rc}_$(printf '%s' "$out" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
+EOF
+
+# ---------- a BMC read out of band, from here (both tools) ----------
+
+tmo_s() { local s=$1; shift; if [[ -n $TO ]]; then "$TO" "$s" "$@"; else "$@"; fi; }   # under timeout s, where timeout exists (TO)
+
+# rbmc j: the BMC's sensors out of band from here (ipmitool lanplus); a password through -f from a one-use fifo, an
+# empty one as -E with IPMI_PASSWORD empty (no secret in it)
+rbmc() {
+    local j=$1 rc; local -a a=(-I lanplus -H "${BMCS[$j]}" -U "${B_LOGIN[$j]}")
+    if [[ -n ${B_PW[$j]} ]]; then pwfifo "b$j.$BASHPID" "${B_PW[$j]}" || return 1; a+=(-f "$PWFIFO"); else a+=(-E); export IPMI_PASSWORD=; fi
+    tmo_s "$FF_IPMI_TIMEOUT" ipmitool "${a[@]}" sensor <<<""; rc=$?
+    [[ -n ${B_PW[$j]} ]] && { exec 4>&-; rm -f "$PWFIFO"; }; return $rc
+}
+
+# ipmitool sensor output -> temps rows for one BMC (as the reader's @@IPMI lines), or one none row with the reason
+BMC_AWK='BEGIN { FS = "|" }
+{ for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i) }
+NR == 1 { first = $0 }
+$3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ { nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm); n++
+    print t, h, "ipmi", "bmc", "lanplus", nm, sprintf("%.1f", $2), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-"), ($4 == "" ? "-" : $4) }
+END { if (!n) { w = (rc == 124 ? "ipmitool_timed_out_after_" to "s" : "rc=" rc "_" first); gsub(/[^A-Za-z0-9_.:=-]/, "_", w)
+          print t, h, "ipmi", "bmc", "lanplus", "none", "-", "-", "-", substr(w, 1, 120) } }'
+
+# ---------- the temperature summary, one for both tools ----------
+
+# temps_summary.txt, one row per sensor over the samples: "Host Source Type Chip Dev Sensor First_C Max_C Last_C
+# High_C Crit_C Flag" (TYPE_AWK adds Min_C). Flag, worst first: crit, high (or the BMC's status), near (within
+# FF_TEMP_MARGIN of high), +rise (over FF_TEMP_RISE); nodata:<why> when a host/source gave nothing
+TEMP_SUM_AWK='
+NR == 1 { next }
+$6 == "none" { nd[$2 SUBSEP $3] = $10; next }
+{ k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; got[$2 SUBSEP $3] = 1
+  if (!(k in mx)) { fi[k] = v; mx[k] = v; ord[++n] = k } else if (v > mx[k]) mx[k] = v
+  la[k] = v; if ($8 != "-" && $8 + 0 > 0) hi[k] = $8 + 0; if ($9 != "-" && $9 + 0 > 0) cr[k] = $9 + 0; if ($3 == "ipmi") { if ($10 ~ /^(cr|nr)/) bc[k] = 2; else if ($10 ~ /^nc/ && bc[k] < 1) bc[k] = 1 } }
+function ty(src, chip, dev) { if (src == "ipmi") return "bmc"; if (chip ~ /^(coretemp|k10temp|zenpower|cpu_thermal)$/) return "cpu"
+    if (chip ~ /^nvme/) return "nvme"; if (chip ~ /^(mlx5|ice|bnxt|i40e|ixgbe|igb|tg3|qede|nfp)/ || dev ~ /^(en|eth|ib|bond)/) return "nic"; return "other" }
+END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C Flag"
+    for (i = 1; i <= n; i++) { k = ord[i]; split(k, p, SUBSEP); f = "-"
+        if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
+        else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
+        else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
+        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
+        printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
+               ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
+    for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
+
+# Type by what a sensor measures: nvidia-smi and amdgpu rows gpu; a BMC sensor by its name (the awk lists the
+# words); hwmon drivetemp nvme, jc42/spd5118 mem. Appends Min_C. A gpu nodata row on a host whose BMC gave
+# GPU rows becomes note:, not a no-data
+TYPE_AWK='
+FILENAME == ARGV[1] { if (FNR > 1 && $6 != "none") { k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; if (!(k in mn) || v < mn[k]) mn[k] = v } next }
+FNR == 1 { print $0, "Min_C"; next }
+$2 == "gpu" && $12 ~ /^nodata:/ && ($1 in bg) { $12 = "note:" substr($12, 8) }
+$6 == "none" { print $0, "-"; next }
+{ s = tolower($6)
+  if ($2 == "gpu") $3 = "gpu"
+  else if ($2 == "ipmi") $3 = s ~ /inlet|ambient/ ? "inlet" : s ~ /vrm|vr_|psu|board|fpga|hmc|hsc|plx|pex|pch|sas/ ? "other" : s ~ /nic|aoc|ocp|cx[0-9]|lom|port/ ? "nic" : s ~ /gpu|hbm|nvlink|nvsw/ ? "gpu" : s ~ /nvme|ssd|m\.?2|drive|disk/ ? "nvme" : s ~ /dimm|mem/ ? "mem" : s ~ /cpu|proc|soc/ ? "cpu" : "other"
+  else if ($4 ~ /^(amdgpu|nouveau)/) $3 = "gpu"
+  else if ($4 ~ /^drivetemp/) $3 = "nvme"
+  else if ($4 ~ /^(jc42|spd5118)/) $3 = "mem"
+  if ($2 == "ipmi" && $3 == "gpu") bg[$1] = 1
+  print $0, sprintf("%.1f", mn[$1 SUBSEP $2 SUBSEP $4 SUBSEP $5 SUBSEP $6]) }'
+
+# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
+# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
+# one behind no shown cell
+SRC_AWK='NR > 1 && $6 != "none" { h = $1; src = $2; if (!(h in seen)) { seen[h]; ord[++nk] = h }; n[h]++
+    if (!((h, src, $3) in c) || $8 > m[h, src, $3]) m[h, src, $3] = $8
+    s[h, src, $3] += $9; c[h, src, $3]++
+    if ($12 != "-" && index("," fl[h, src, $3] ",", "," $3 ":" $12 ",") == 0) fl[h, src, $3] = fl[h, src, $3] (fl[h, src, $3] == "" ? "" : ",") $3 ":" $12 }
+    END { split("inlet cpu gpu mem nvme nic other", ty, " "); print "Host Source Sensors Inlet Avg CPU Avg GPU Avg Mem Avg NVMe Avg NIC Avg Other Avg Flags"
+          for (i = 1; i <= nk; i++) { h = ord[i]; l = ""; f = ""; delete used; delete shown
+              for (j = 1; j <= 7; j++) { t = ty[j]; src = ""
+                  if (t == "gpu" && ((h, "gpu", t) in c)) src = "gpu"
+                  else if ((h, "ipmi", t) in c) src = "ipmi"; else if ((h, "hwmon", t) in c) src = "hwmon"
+                  if (src == "") { l = l " - -"; continue }
+                  used[src]; shown[src, t]; l = l " " m[h, src, t] " " sprintf("%.1f", s[h, src, t] / c[h, src, t])
+                  if (fl[h, src, t] != "") f = f (f == "" ? "" : ",") fl[h, src, t] }
+              for (j = 1; j <= 7; j++) for (k = 1; k <= 2; k++) { t = ty[j]; src = (k == 1 ? "ipmi" : "hwmon")
+                  if (fl[h, src, t] != "" && !((src, t) in shown)) { x = fl[h, src, t]; gsub(",", "/" src ",", x); f = f (f == "" ? "" : ",") x "/" src } }
+              sc = ("ipmi" in used ? "ipmi" : "") (("gpu" in used) ? (("ipmi" in used) ? "+" : "") "nvidia-smi" : "")
+              sc = sc (("hwmon" in used) ? (sc == "" ? "" : "+") "hwmon" : "")
+              print h, sc, n[h] l, (f == "" ? "-" : f) } }'
+
+# summarize_temps temps.txt adjusted summary: high = 95% of crit where high is missing (to <adjusted>, the caller's
+# to keep or move over temps.txt), the summary, its nodata rows sorted after the data rows (awk hash order differs),
+# then the types and Min_C
+summarize_temps() {
+    local in=$1 hi=$2 out=$3
+    awk 'NR > 1 && $6 != "none" && ($8 == "-" || $8 + 0 <= 0) && $9 != "-" && $9 + 0 > 0 { $8 = sprintf("%.1f", $9 * 0.95) } { print }' "$in" > "$hi"
+    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$hi" > "$out.raw"
+    { awk '$12 !~ /^nodata/' "$out.raw"; awk '$12 ~ /^nodata/' "$out.raw" | sort -k1,1 -k2,2; } > "$out.sorted"
+    awk "$TYPE_AWK" "$hi" "$out.sorted" > "$out"
+    rm -f "$out.raw" "$out.sorted"
+}
 
 # ---------- helpers on discovery files ----------
 
@@ -1604,48 +1779,71 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
     wait
 }
 
-# collect_temps label [ipmi]: TEMP_SCRIPT on every tested host and client, appended to temps.txt as
-# "label host source chip dev sensor temp_c high_c crit_c status" (source hwmon|ipmi; sensor none = no data, why in status)
+# collect_temps label [ipmi]: thermals_capture.sh's reader on every tested host and client, and hosts with no root
+# for the tests, as the login; ipmitool alone escalated inside the reader: root directly, the sweep's escalator, or
+# sudo -S with the row's password. Nothing back: a none row per source
 collect_temps() {
     (( FF_TEMPS )) || return 0
-    local label=$1 mode=-; [[ $2 == ipmi ]] && (( FF_IPMI )) && mode=ipmi
-    local out=$WORK/temps.$label k
-    : > "$out"
-    for k in "${ELIG[@]}" "${CLI[@]}"; do
-        rbash "${T_TARGET[$k]}" "$mode" "$FF_IPMI_TIMEOUT" <<<"$TEMP_SCRIPT" >> "$out" 2>> "$RUNLOG_SSH" &
+    local label=$1 mode=- ipmi=0 k i j n t o rc why last lim=$(( FF_IPMI_TIMEOUT + 30 )); local -a tgt=() hn=() e=()
+    [[ $2 == ipmi ]] && (( FF_IPMI )) && { mode=ipmi; ipmi=1; }
+    local out=$WORK/temps.$label
+    for k in "${ELIG[@]}" "${CLI[@]}"; do tgt+=("${T_TARGET[$k]}"); hn+=("${T_HOST[$k]}"); done
+    for i in "${UNUSE_I[@]}"; do tgt+=("${TARGETS[$i]}"); hn+=(-); done   # temperatures only: the reader names the host
+    for n in "${!tgt[@]}"; do
+        t=${tgt[n]}; o=$out.$n
+        if [[ ${TESC[$t]-} == S && -z ${TPW[$t]+x} ]]; then : > "$o"; : > "$o.err"; echo nopw > "$o.rc"; continue; fi
+        {   if [[ ${TESC[$t]-} == S ]]; then   # the password ahead of the reader on stdin (printf: a builtin, no argv)
+                { printf 'IFS= read -r TC_PW\n%s\n' "${TPW[$t]}"; printf '%s\n' "$TEMP_SCRIPT"; } | rlogin_bash -T "$lim" "$t" "$mode" "$FF_IPMI_TIMEOUT"
+                rc=${PIPESTATUS[1]}
+            else e=(); [[ -n ${TESC[$t]-} ]] && e=("${TESC[$t]// /_}"); [[ ${hn[n]} == - ]] && e=(none)   # none: the sweep found no escalator
+                rlogin_bash -T "$lim" "$t" "$mode" "$FF_IPMI_TIMEOUT" "${e[@]}" <<<"$TEMP_SCRIPT"; rc=$?; fi
+            echo "$rc" > "$o.rc"; } > "$o" 2> "$o.err" &
+    done
+    for j in "${!BMCS[@]}"; do
+        (( ipmi )) && [[ -n $LOCAL_IPMITOOL ]] || break
+        { rbmc "$j" > "$out.bmc$j" 2>&1; echo $? > "$out.bmc$j.rc"; } &
     done
     wait
-    awk -v t="$label" 'function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
-        $1 == "@@HWMON" { print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
-        $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
-        $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }' "$out" >> "$COLLECT_DIR/temps.txt"
+    for n in "${!tgt[@]}"; do
+        o=$out.$n; rc=$(cat "$o.rc" 2>&1); cat "$o.err" >> "$RUNLOG_SSH"
+        last=$(awk 'NF && !/^Warning: Permanently added/ {l = $0} END {printf "%s", l}' "$o.err" | tr -d '\r' | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)
+        case $rc in
+            0) why=no_output ;;
+            nopw) why=no_password_in_memory ;;
+            124) why=ssh_cut_off_after_${lim}s ;;
+            255) why=ssh_failed_${last:-rc255_no_message} ;;
+            *) why=remote_rc=${rc}_$last ;;
+        esac
+        if [[ ${hn[n]} == - ]]; then   # a temperatures-only host: its name from the reader, else the target
+            hn[n]=$(awk '$1 ~ /^@@(HWMON|IPMI|GPU)$/ {print $2; exit}' "$o"); hn[n]=${hn[n]:-${tgt[n]}}
+            echo "${hn[n]}" >> "$WORK/temps_only"
+        fi
+        awk -v t="$label" -v host="${hn[n]}" -v why="$why" -v ipmi="$ipmi" '
+            function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
+            $1 == "@@HWMON" { hw = 1; print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
+            $1 == "@@GPU" && $3 == "none" { print t, $2, "gpu", "nvidia", "-", "none", "-", "-", "-", $4 }
+            $1 == "@@GPU" && $3 != "none" { print t, $2, "gpu", "nvidia", $3, $4, sprintf("%.1f", $5), $6, $7, "-" }
+            $1 == "@@IPMI" { im = 1 }
+            $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
+            $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }
+            END { if (!hw) print t, host, "hwmon", "-", "-", "none", "-", "-", "-", why
+                  if (ipmi && !im) print t, host, "ipmi", "bmc", "-", "none", "-", "-", "-", why }' "$o"
+    done >> "$COLLECT_DIR/temps.txt"
+    (( ipmi )) || return 0
+    for j in "${!BMCS[@]}"; do
+        if [[ -z $LOCAL_IPMITOOL ]]; then echo "$label ${BMCS[$j]} ipmi bmc lanplus none - - - ipmitool_not_installed_here"; continue; fi
+        awk -v t="$label" -v h="${BMCS[$j]}" -v rc="$(cat "$out.bmc$j.rc" 2>&1)" -v to="$FF_IPMI_TIMEOUT" "$BMC_AWK" "$out.bmc$j"
+    done >> "$COLLECT_DIR/temps.txt"
 }
 
-# temp_summary: temps_summary.txt, one row per sensor over the run: "Host Source Type Chip Dev Sensor First_C Max_C
-# Last_C High_C Crit_C Flag". Type cpu|nvme|nic|bmc|other. Flag (worst first): crit (at or above crit, or the BMC says
-# cr/nr), high (at or above high, or BMC nc), near (within FF_TEMP_MARGIN of high), then +rise (max - first over
-# FF_TEMP_RISE); "-" when none. A threshold of 0 counts as unset. A host/source with no reading at all gets one row,
-# Sensor none, Flag nodata:<why>.
-TEMP_SUM_AWK='
-NR == 1 { next }
-$6 == "none" { nd[$2 SUBSEP $3] = $10; next }
-{ k = $2 SUBSEP $3 SUBSEP $4 SUBSEP $5 SUBSEP $6; v = $7 + 0; got[$2 SUBSEP $3] = 1
-  if (!(k in mx)) { fi[k] = v; mx[k] = v; ord[++n] = k } else if (v > mx[k]) mx[k] = v
-  la[k] = v; if ($8 != "-" && $8 + 0 > 0) hi[k] = $8 + 0; if ($9 != "-" && $9 + 0 > 0) cr[k] = $9 + 0; if ($3 == "ipmi") { if ($10 ~ /^(cr|nr)/) bc[k] = 2; else if ($10 ~ /^nc/ && bc[k] < 1) bc[k] = 1 } }
-function ty(src, chip, dev) { if (src == "ipmi") return "bmc"; if (chip ~ /^(coretemp|k10temp|zenpower|cpu_thermal)$/) return "cpu"
-    if (chip ~ /^nvme/) return "nvme"; if (chip ~ /^(mlx5|ice|bnxt|i40e|ixgbe|igb|tg3|qede|nfp)/ || dev ~ /^(en|eth|ib|bond)/) return "nic"; return "other" }
-END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C Flag"
-    for (i = 1; i <= n; i++) { k = ord[i]; split(k, p, SUBSEP); f = "-"
-        if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
-        else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
-        else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
-        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
-        printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
-               ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
-    for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
+# temp_summary: temps_summary.txt from temps.txt (summarize_temps, tc_summary.sh: seven types, flags, Min_C); the
+# bundle's temps.txt stays as read, the high = 95% of crit copy is work only
 temp_summary() {
     (( FF_TEMPS )) || return 0
-    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$COLLECT_DIR/temps.txt" > "$COLLECT_DIR/temps_summary.txt"
+    summarize_temps "$COLLECT_DIR/temps.txt" "$WORK/temps.hi" "$COLLECT_DIR/temps_summary.txt"
+    # the hosts read for temperatures only (no root for the tests), one name a line
+    [[ -s $WORK/temps_only ]] && sort -u "$WORK/temps_only" > "$COLLECT_DIR/temps_only.txt"
+    return 0
 }
 
 # System info per tested host, split into $SI/<host>/<item> (SYSINFO_SCRIPT)
@@ -2573,7 +2771,7 @@ main() {
             TL[${TARGETS[$k]}]=${T_LOGIN[$k]}; [[ -n ${T_PW[$k]+x} ]] && TPW[${TARGETS[$k]}]=${T_PW[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
-        (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
+        (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) read out of band (ipmitool -I lanplus)"
         (( ${#TF_BE[@]} )) || die "-t $tfile has no backend targets"
     fi
     # settings are checked here, after a -t file's settings lines have had their say
@@ -2654,6 +2852,10 @@ main() {
     # a password login (a -t row's pw): read once, where its ssh master opens (the sweep), through the askpass helper from a
     # one-use fifo; never in an environment variable, argv or the state file. pw_transport (auth.sh): OpenSSH 8.4+, else setsid.
     SETSID=; (( ${#TPW[@]} )) && pw_transport
+    # the -t bmc lines are read from here (tc_bmc.sh): ipmitool and a timeout command on this machine
+    TO=$(command -v timeout || command -v gtimeout)
+    [[ -n $TO ]] || (( ! FF_TEMPS )) || log "no timeout command here: a hung host would stall the temperature reads"
+    LOCAL_IPMITOOL=; if (( ${#BMCS[@]} )); then LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; fi
 
     WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
     AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; (( ${#TPW[@]} )) && write_askpass "$AUTH/askpass"
@@ -2713,7 +2915,7 @@ main() {
         local rec=0; for i in "${retry[@]}"; do [[ -f $WORK/sweep/$i.ok ]] && rec=$(( rec + 1 )); done
         log "Retry recovered $rec of ${#retry[@]}"
     fi
-    local -a REACH=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0
+    local -a REACH=() UNUSE_I=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0   # UNUSE_I: no root, still read for temperatures
     for i in "${!TARGETS[@]}"; do
         if [[ -f $WORK/sweep/$i.ok ]]; then
             # root: none needed; else the escalator the probe found; else a -t password: sudo -S; else unusable for the
@@ -2724,7 +2926,7 @@ main() {
             elif [[ -n ${TPW[$t]+x} ]]; then TESC[$t]=S
             else
                 echo "$t no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo (login ${TL[$t]}, uid ${pu:-unknown})" >> "$WORK/unusable.txt"
-                (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); continue
+                (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); UNUSE_I+=("$i"); continue
             fi
             REACH+=("$i")
         else
@@ -3337,20 +3539,18 @@ main() {
         # heat before fabric: a hot host can cap throughput, resend and flap links on its own
         if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
             local ts=$COLLECT_DIR/temps_summary.txt
-            echo "Temperatures (temps_summary.txt; hwmon$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
+            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
             awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
                  END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
-            # per host the hottest reading of each type
-            awk 'NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-") fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
-                 END {print "Host CPU_max NVMe_max NIC_max Other_max BMC_max Flags"
-                      for (x in hs) printf "%s %s %s %s %s %s %s\n", x, (((x, "cpu") in m) ? m[x, "cpu"] : "-"), (((x, "nvme") in m) ? m[x, "nvme"] : "-"),
-                          (((x, "nic") in m) ? m[x, "nic"] : "-"), (((x, "other") in m) ? m[x, "other"] : "-"), (((x, "bmc") in m) ? m[x, "bmc"] : "-"), (x in fl ? fl[x] : "-")}' "$ts" \
-                | { read -r hdr; echo "$hdr"; sort -k7,7r -k1,1V; } | column -t | sed 's/^/  /'
-            if awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/ {f = 1} END {exit !f}' "$ts"; then
-                echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag):"
-                awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
+            # per host the hottest reading of each type, the row thermals_capture.sh prints (SRC_AWK, tc_summary.sh)
+            awk "$SRC_AWK" "$ts" | { read -r hdr; echo "$hdr"; sort -k1,1 -k2,2; } | column -t | sed 's/^/  /'
+            if awk 'NR > 1 && $12 != "-" && $12 !~ /^(nodata|note)/ {f = 1} END {exit !f}' "$ts"; then
+                echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag Min):"
+                awk 'NR > 1 && $12 != "-" && $12 !~ /^(nodata|note)/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
             fi
             awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts"
+            awk 'NR > 1 && $12 ~ /^note/ {printf "  NOTE: %s gave no nvidia-smi reading (%s); its GPU temperatures come from the BMC\n", $1, substr($12, 6)}' "$ts"
+            [[ -s $COLLECT_DIR/temps_only.txt ]] && echo "  Temperatures only (no root for the tests): $(tr '\n' ' ' < "$COLLECT_DIR/temps_only.txt" | sed 's/ $//')"
             echo ""
         elif (( FF_TEMPS )); then
             local tn; tn=$(( $(wc -l < "$COLLECT_DIR/temps.txt") - 1 ))

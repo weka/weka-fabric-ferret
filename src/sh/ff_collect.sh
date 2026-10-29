@@ -15,30 +15,62 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
     wait
 }
 
-# collect_temps label [ipmi]: TEMP_SCRIPT on every tested host and client, appended to temps.txt as
-# "label host source chip dev sensor temp_c high_c crit_c status" (source hwmon|ipmi; sensor none = no data, why in status)
+# collect_temps label [ipmi]: thermals_capture.sh's reader on every tested host and client, and hosts with no root
+# for the tests, as the login; ipmitool alone escalated inside the reader: root directly, the sweep's escalator, or
+# sudo -S with the row's password. Nothing back: a none row per source
 collect_temps() {
     (( FF_TEMPS )) || return 0
-    local label=$1 mode=-; [[ $2 == ipmi ]] && (( FF_IPMI )) && mode=ipmi
-    local out=$WORK/temps.$label k
-    : > "$out"
-    for k in "${ELIG[@]}" "${CLI[@]}"; do
-        rbash "${T_TARGET[$k]}" "$mode" "$FF_IPMI_TIMEOUT" <<<"$TEMP_SCRIPT" >> "$out" 2>> "$RUNLOG_SSH" &
+    local label=$1 mode=- ipmi=0 k i j n t o rc why last lim=$(( FF_IPMI_TIMEOUT + 30 )); local -a tgt=() hn=() e=()
+    [[ $2 == ipmi ]] && (( FF_IPMI )) && { mode=ipmi; ipmi=1; }
+    local out=$WORK/temps.$label
+    for k in "${ELIG[@]}" "${CLI[@]}"; do tgt+=("${T_TARGET[$k]}"); hn+=("${T_HOST[$k]}"); done
+    for i in "${UNUSE_I[@]}"; do tgt+=("${TARGETS[$i]}"); hn+=(-); done   # temperatures only: the reader names the host
+    for n in "${!tgt[@]}"; do
+        t=${tgt[n]}; o=$out.$n
+        if [[ ${TESC[$t]-} == S && -z ${TPW[$t]+x} ]]; then : > "$o"; : > "$o.err"; echo nopw > "$o.rc"; continue; fi
+        {   if [[ ${TESC[$t]-} == S ]]; then   # the password ahead of the reader on stdin (printf: a builtin, no argv)
+                { printf 'IFS= read -r TC_PW\n%s\n' "${TPW[$t]}"; printf '%s\n' "$TEMP_SCRIPT"; } | rlogin_bash -T "$lim" "$t" "$mode" "$FF_IPMI_TIMEOUT"
+                rc=${PIPESTATUS[1]}
+            else e=(); [[ -n ${TESC[$t]-} ]] && e=("${TESC[$t]// /_}"); [[ ${hn[n]} == - ]] && e=(none)   # none: the sweep found no escalator
+                rlogin_bash -T "$lim" "$t" "$mode" "$FF_IPMI_TIMEOUT" "${e[@]}" <<<"$TEMP_SCRIPT"; rc=$?; fi
+            echo "$rc" > "$o.rc"; } > "$o" 2> "$o.err" &
+    done
+    for j in "${!BMCS[@]}"; do
+        (( ipmi )) && [[ -n $LOCAL_IPMITOOL ]] || break
+        { rbmc "$j" > "$out.bmc$j" 2>&1; echo $? > "$out.bmc$j.rc"; } &
     done
     wait
-    awk -v t="$label" '#@awk ff_collect_temps' "$out" >> "$COLLECT_DIR/temps.txt"
+    for n in "${!tgt[@]}"; do
+        o=$out.$n; rc=$(cat "$o.rc" 2>&1); cat "$o.err" >> "$RUNLOG_SSH"
+        last=$(awk 'NF && !/^Warning: Permanently added/ {l = $0} END {printf "%s", l}' "$o.err" | tr -d '\r' | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)
+        case $rc in
+            0) why=no_output ;;
+            nopw) why=no_password_in_memory ;;
+            124) why=ssh_cut_off_after_${lim}s ;;
+            255) why=ssh_failed_${last:-rc255_no_message} ;;
+            *) why=remote_rc=${rc}_$last ;;
+        esac
+        if [[ ${hn[n]} == - ]]; then   # a temperatures-only host: its name from the reader, else the target
+            hn[n]=$(awk '$1 ~ /^@@(HWMON|IPMI|GPU)$/ {print $2; exit}' "$o"); hn[n]=${hn[n]:-${tgt[n]}}
+            echo "${hn[n]}" >> "$WORK/temps_only"
+        fi
+        awk -v t="$label" -v host="${hn[n]}" -v why="$why" -v ipmi="$ipmi" '#@awk tc_sample' "$o"
+    done >> "$COLLECT_DIR/temps.txt"
+    (( ipmi )) || return 0
+    for j in "${!BMCS[@]}"; do
+        if [[ -z $LOCAL_IPMITOOL ]]; then echo "$label ${BMCS[$j]} ipmi bmc lanplus none - - - ipmitool_not_installed_here"; continue; fi
+        awk -v t="$label" -v h="${BMCS[$j]}" -v rc="$(cat "$out.bmc$j.rc" 2>&1)" -v to="$FF_IPMI_TIMEOUT" "$BMC_AWK" "$out.bmc$j"
+    done >> "$COLLECT_DIR/temps.txt"
 }
 
-# temp_summary: temps_summary.txt, one row per sensor over the run: "Host Source Type Chip Dev Sensor First_C Max_C
-# Last_C High_C Crit_C Flag". Type cpu|nvme|nic|bmc|other. Flag (worst first): crit (at or above crit, or the BMC says
-# cr/nr), high (at or above high, or BMC nc), near (within FF_TEMP_MARGIN of high), then +rise (max - first over
-# FF_TEMP_RISE); "-" when none. A threshold of 0 counts as unset. A host/source with no reading at all gets one row,
-# Sensor none, Flag nodata:<why>.
-TEMP_SUM_AWK='
-#@awk temp_summary'
+# temp_summary: temps_summary.txt from temps.txt (summarize_temps, tc_summary.sh: seven types, flags, Min_C); the
+# bundle's temps.txt stays as read, the high = 95% of crit copy is work only
 temp_summary() {
     (( FF_TEMPS )) || return 0
-    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$COLLECT_DIR/temps.txt" > "$COLLECT_DIR/temps_summary.txt"
+    summarize_temps "$COLLECT_DIR/temps.txt" "$WORK/temps.hi" "$COLLECT_DIR/temps_summary.txt"
+    # the hosts read for temperatures only (no root for the tests), one name a line
+    [[ -s $WORK/temps_only ]] && sort -u "$WORK/temps_only" > "$COLLECT_DIR/temps_only.txt"
+    return 0
 }
 
 # System info per tested host, split into $SI/<host>/<item> (SYSINFO_SCRIPT)

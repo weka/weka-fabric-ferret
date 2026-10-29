@@ -18,15 +18,17 @@ From a jump host (settings ride in the remote command; nothing to edit or copy f
 
   -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
              format thermals_capture.sh reads (# comments; a line with no comma is a backend). Types: backend (or
-             host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines are skipped (counted in
-             one log line). Each target takes its row's login and password, credential rows (a host of * or a
+             host) and client, each an IP, hostname, CIDR or range as in FF_HOSTS; bmc lines (one address each) are
+             read out of band from here with ipmitool -I lanplus, as thermals_capture.sh reads them, when the
+             BMC is read (FF_IPMI). Each target takes its row's login and password, credential rows (a host of * or a
              glob) included, as thermals_capture.sh resolves them; no login: FF_SSH_USER; no password: key ssh.
              A password is read once, where the target's ssh session opens, through SSH_ASKPASS from a one-use
              fifo (OpenSSH 8.4+, or setsid, here): never an environment variable, a command line or a file.
              Remote steps run as root: a root login directly; any other login through the first passwordless
              escalator (FF_SSH_USER below); where none works, a row password runs them with sudo -S -k (the
              password first on the ssh input stream, behind a guard that never lets it run as a command). A host
-             with neither is left out, listed in unusable.txt with the reason, and counted as missing.
+             with neither is left out of the tests, listed in unusable.txt with the reason, and counted as
+             missing; it is still read for temperatures, as its login (FF_TEMPS).
 The bundle also carries each host's system info (sysinfo/<host>/<item>: OS, CPU, PCIe, NIC rings/IRQs/QoS, routes,
 sysctls, kernel log over the run) and host_rx.txt, the per-host receive side (rings, PCIe, drops, iperf3 CPU, flags).
 
@@ -119,10 +121,14 @@ Optional (default)
   FF_SLOW_PCT      SLOW at or above this %, CRITICAL below (50)
   FF_RETR_PCT      a data NIC whose TCP retransmits exceed this % of the segments it sent gets (retr) on its
                    Status; throughput still decides OK/SLOW/CRITICAL (0.1)
-  FF_TEMPS (1)     read every hwmon temperature (/sys/class/hwmon: CPU, NVMe, NIC…) on every host and client
-                   before the run and after every phase, read only; temps.txt, temps_summary.txt. 0 = off
-  FF_IPMI (1)      with FF_TEMPS, also the BMC's temperatures (inlet, exhaust…) via ipmitool sensor, once per
-                   iteration and at the end, where ipmitool is installed (needs root or sudo). 0 = off
+  FF_TEMPS (1)     read every temperature on every host and client before the run and after every phase, read
+                   only, as thermals_capture.sh reads them: hwmon (/sys/class/hwmon: CPU, NVMe, NIC…) and
+                   nvidia-smi (NVIDIA GPUs); each sensor typed inlet, cpu, gpu, mem, nvme, nic or other;
+                   temps.txt, temps_summary.txt. 0 = off
+  FF_IPMI (1)      with FF_TEMPS, also the BMC's temperatures (inlet, exhaust, GPU board, drives…) via
+                   ipmitool sensor on the host, once per iteration and at the end, where ipmitool is installed
+                   (root, the escalator the sweep found, or sudo -S with the row's password, for ipmitool alone;
+                   hwmon and nvidia-smi as the login), and a -t file's bmc lines out of band from here. 0 = off
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
@@ -192,6 +198,12 @@ log_hist() { err_hist "$@" | sed 's/^/#   /' >&2; }
 #@include sh/ff_rails.sh
 
 #@include sh/ff_remote.sh
+
+#@include sh/tc_reader.sh
+
+#@include sh/tc_bmc.sh
+
+#@include sh/tc_summary.sh
 
 #@include sh/ff_discovery.sh
 
@@ -285,7 +297,7 @@ main() {
             TL[${TARGETS[$k]}]=${T_LOGIN[$k]}; [[ -n ${T_PW[$k]+x} ]] && TPW[${TARGETS[$k]}]=${T_PW[$k]}
             if [[ ${T_TYPE[$k]} == client ]]; then TF_CL+=("${TARGETS[$k]}"); else TF_BE+=("${TARGETS[$k]}"); fi
         done
-        (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) skipped (fabric_ferret.sh reads no BMC)"
+        (( ${#BMCS[@]} )) && log "-t: ${#BMCS[@]} bmc line(s) read out of band (ipmitool -I lanplus)"
         (( ${#TF_BE[@]} )) || die "-t $tfile has no backend targets"
     fi
     # settings are checked here, after a -t file's settings lines have had their say
@@ -366,6 +378,10 @@ main() {
     # a password login (a -t row's pw): read once, where its ssh master opens (the sweep), through the askpass helper from a
     # one-use fifo; never in an environment variable, argv or the state file. pw_transport (auth.sh): OpenSSH 8.4+, else setsid.
     SETSID=; (( ${#TPW[@]} )) && pw_transport
+    # the -t bmc lines are read from here (tc_bmc.sh): ipmitool and a timeout command on this machine
+    TO=$(command -v timeout || command -v gtimeout)
+    [[ -n $TO ]] || (( ! FF_TEMPS )) || log "no timeout command here: a hung host would stall the temperature reads"
+    LOCAL_IPMITOOL=; if (( ${#BMCS[@]} )); then LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; fi
 
     WORK=$(mktemp -d /tmp/ff_work.XXXXXX)
     AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; (( ${#TPW[@]} )) && write_askpass "$AUTH/askpass"
@@ -425,7 +441,7 @@ main() {
         local rec=0; for i in "${retry[@]}"; do [[ -f $WORK/sweep/$i.ok ]] && rec=$(( rec + 1 )); done
         log "Retry recovered $rec of ${#retry[@]}"
     fi
-    local -a REACH=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0
+    local -a REACH=() UNUSE_I=(); local pu pe; NUNUSE_B=0; NUNUSE_C=0   # UNUSE_I: no root, still read for temperatures
     for i in "${!TARGETS[@]}"; do
         if [[ -f $WORK/sweep/$i.ok ]]; then
             # root: none needed; else the escalator the probe found; else a -t password: sudo -S; else unusable for the
@@ -436,7 +452,7 @@ main() {
             elif [[ -n ${TPW[$t]+x} ]]; then TESC[$t]=S
             else
                 echo "$t no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo (login ${TL[$t]}, uid ${pu:-unknown})" >> "$WORK/unusable.txt"
-                (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); continue
+                (( i < NHT )) && NUNUSE_B=$(( NUNUSE_B + 1 )) || NUNUSE_C=$(( NUNUSE_C + 1 )); UNUSE_I+=("$i"); continue
             fi
             REACH+=("$i")
         else
@@ -1024,16 +1040,17 @@ main() {
         # heat before fabric: a hot host can cap throughput, resend and flap links on its own
         if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
             local ts=$COLLECT_DIR/temps_summary.txt
-            echo "Temperatures (temps_summary.txt; hwmon$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
+            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
             awk '#@awk ff_main.temp_counts' "$ts"
-            # per host the hottest reading of each type
-            awk '#@awk ff_main.temp_hosts' "$ts" \
-                | { read -r hdr; echo "$hdr"; sort -k7,7r -k1,1V; } | column -t | sed 's/^/  /'
-            if awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/ {f = 1} END {exit !f}' "$ts"; then
-                echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag):"
-                awk 'NR > 1 && $12 != "-" && $12 !~ /^nodata/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
+            # per host the hottest reading of each type, the row thermals_capture.sh prints (SRC_AWK, tc_summary.sh)
+            awk "$SRC_AWK" "$ts" | { read -r hdr; echo "$hdr"; sort -k1,1 -k2,2; } | column -t | sed 's/^/  /'
+            if awk 'NR > 1 && $12 != "-" && $12 !~ /^(nodata|note)/ {f = 1} END {exit !f}' "$ts"; then
+                echo "  Flagged sensors (Host Source Type Chip Dev Sensor First Max Last High Crit Flag Min):"
+                awk 'NR > 1 && $12 != "-" && $12 !~ /^(nodata|note)/' "$ts" | sort -k12,12 -k8,8nr | column -t | sed 's/^/    /'
             fi
             awk 'NR > 1 && $12 ~ /^nodata/ {printf "  NO TEMPERATURE DATA: %s %s (%s)\n", $1, $2, substr($12, 8)}' "$ts"
+            awk 'NR > 1 && $12 ~ /^note/ {printf "  NOTE: %s gave no nvidia-smi reading (%s); its GPU temperatures come from the BMC\n", $1, substr($12, 6)}' "$ts"
+            [[ -s $COLLECT_DIR/temps_only.txt ]] && echo "  Temperatures only (no root for the tests): $(tr '\n' ' ' < "$COLLECT_DIR/temps_only.txt" | sed 's/ $//')"
             echo ""
         elif (( FF_TEMPS )); then
             local tn; tn=$(( $(wc -l < "$COLLECT_DIR/temps.txt") - 1 ))

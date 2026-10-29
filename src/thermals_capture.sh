@@ -110,6 +110,10 @@ log() { echo "# $*" >&2; }
 
 #@include sh/auth.sh
 
+#@include sh/tc_bmc.sh
+
+#@include sh/tc_summary.sh
+
 #@include sh/tc_collect.sh
 
 #@include sh/hostfile.sh
@@ -232,13 +236,9 @@ main() {
     for i in "${UNREACH[@]}"; do echo "${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V > "$WORK/unreachlist"
     local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
 
-    # nodata rows come out in awk's hash order (differs between awks): sort them so the output is the same
-    # a sensor with a crit but no high (or 0) gets high = 95% of crit, so high and near flag it too (10-26)
-    awk '#@awk tc_main.crit_high' \
-        "$WORK/temps.txt" > "$WORK/temps.hi" && mv "$WORK/temps.hi" "$WORK/temps.txt"
-    awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK" "$WORK/temps.txt" > "$WORK/temps_summary.raw"
-    { awk '$12 !~ /^nodata/' "$WORK/temps_summary.raw"; awk '$12 ~ /^nodata/' "$WORK/temps_summary.raw" | sort -k1,1 -k2,2; } > "$WORK/temps_summary.sorted"
-    awk "$TYPE_AWK" "$WORK/temps.txt" "$WORK/temps_summary.sorted" > "$WORK/temps_summary.txt"
+    # the summary (tc_summary.sh, shared with fabric_ferret.sh); the high = 95% of crit copy replaces temps.txt here,
+    # so the jsonl carries the thresholds the flags used (10-26)
+    summarize_temps "$WORK/temps.txt" "$WORK/temps.hi" "$WORK/temps_summary.txt" && mv "$WORK/temps.hi" "$WORK/temps.txt"
     awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
     awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
     # the html's per-type tables: "group type chip dev sensor host value high crit flag", BMC first, then by type,

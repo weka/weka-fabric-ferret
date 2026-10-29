@@ -1,23 +1,9 @@
 # ---------- output ----------
-
-# Type by what a sensor measures, whatever read it: GPUs (nvidia-smi, amdgpu) are gpu; a BMC sensor is typed by its
-# name, first match wins: inlet/ambient; VRM/PSU/board/FPGA/HMC/HSC/PLX/PEX/PCH/SAS other; nic/aoc/ocp/cx<n>/port
-# (so an HGX ConnectX is a NIC); gpu/hbm/nvlink/nvsw; nvme/ssd/m.2/drive; dimm/mem; cpu/proc/soc; else other.
-# hwmon drivetemp is nvme, jc42/spd5118 mem. Appends Min_C (the lowest sample) as column 13. Reads temps.txt
-# then temps_summary.txt (fabric_ferret's TEMP_SUM_AWK stays unchanged). The data rows come before the nodata rows
-# (the spine sorts them so): a gpu nodata row on a host whose BMC rows were typed gpu (HGX GPU, HBM, NVLink) becomes
-# note: instead, since the BMC has that host's GPU temperatures; a note is not a no-data (counts, verdict, Not read).
-TYPE_AWK='
-#@awk tc_type'
+# (TEMP_SUM_AWK, TYPE_AWK, SRC_AWK and summarize_temps: tc_summary.sh, shared with fabric_ferret.sh)
 
 # per host the hottest reading of each type and its flags: "Host Inlet CPU GPU Mem NVMe NIC Other Flags"
 HOST_MAX_AWK='#@awk tc_host_max'
 HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
-
-# stdout, one row per host: gpu cells nvidia-smi's, else the BMC's; other types the BMC's, hwmon's where the BMC lacks one;
-# Source = sources used; cell = hottest, mean of latest; Sensors = all; Flags = every flagged sensor, "/source" on
-# one behind no shown cell
-SRC_AWK='#@awk tc_src'
 
 # the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
 # Crit Flag" (no-data rows left out; the flag is always the last column)

@@ -39,6 +39,13 @@ rbash() {
             "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo -- "$@"
     else "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
 }
+# rlogin_bash [-T secs] target args...: stdin as a bash script on the target as its login, no escalation (the
+# temperature reader escalates ipmitool alone), over the sweep's master; -T: cut off after secs where timeout exists
+rlogin_bash() {
+    local -a to=(); [[ $1 == -T ]] && { [[ -n $TO ]] && to=("$TO" "$2"); shift 2; }
+    local t=$1; shift
+    "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" bash -s -- "$@"
+}
 # rroot target cmd...: one command as root (TESC). Returns 3, running nothing, for a sudo -S host whose password isn't
 # in memory: the cleanup after a crash works from the state file, which never holds a password
 rroot() {
@@ -314,38 +321,7 @@ for nic in "$@"; do
 done
 EOF
 
-# Temperatures, read only: every hwmon sensor (kernel sysfs; the data lm-sensors reads, no package needed) as
-# "@@HWMON host chip dev sensor milli_c high crit" (dev: the NIC's netdev, else the device; thresholds in milli-C
-# or -), "@@HWMON host - - none - - -" when there is none. $1 = ipmi adds the BMC's readings (ipmitool sensor,
-# timeout $2) as "@@IPMI host sensor c status high crit", or "@@IPMI host none <why>". FF_SYSFS is a test hook.
-read -r -d '' TEMP_SCRIPT <<'EOF'
-h=$(hostname -s); sys=${FF_SYSFS:-/sys}; n=0
-num() { case $1 in ''|*[!0-9-]*) echo -; ;; *) echo "$1" ;; esac; }
-for d in "$sys"/class/hwmon/hwmon*; do
-    [ -d "$d" ] || continue
-    chip=-; [ -r "$d/name" ] && chip=$(cat "$d/name" 2>&1); chip=$(printf '%s' "${chip:--}" | tr -c 'A-Za-z0-9_.:-' '_')
-    dev=-; l=$(readlink "$d/device" 2>&1) && dev=${l##*/}
-    for x in "$d"/device/net/*; do [ -e "$x" ] && dev=${x##*/}; break; done
-    for t in "$d"/temp*_input; do
-        [ -r "$t" ] || continue
-        b=${t%_input}; v=$(num "$(cat "$t" 2>&1)"); [ "$v" = - ] && continue
-        lb=${b##*/}; [ -r "${b}_label" ] && lb=$(cat "${b}_label" 2>&1)
-        hi=-; [ -r "${b}_max" ] && hi=$(num "$(cat "${b}_max" 2>&1)")
-        cr=-; [ -r "${b}_crit" ] && cr=$(num "$(cat "${b}_crit" 2>&1)")
-        echo "@@HWMON $h $chip $dev $(printf '%s' "$lb" | tr -c 'A-Za-z0-9_.:-' '_') $v $hi $cr"; n=$(( n + 1 ))
-    done
-done
-[ "$n" -gt 0 ] || echo "@@HWMON $h - - none - - -"
-[ "$1" = ipmi ] || exit 0
-if [ -z "$(command -v ipmitool)" ]; then echo "@@IPMI $h none ipmitool_not_installed"; exit 0; fi
-if [ -n "$(command -v timeout)" ]; then out=$(timeout "${2:-60}" ipmitool sensor 2>&1); else out=$(ipmitool sensor 2>&1); fi; rc=$?
-# ipmitool sensor: name | value | units | status | lnr | lc | lnc | unc | uc | unr (unc = high, uc = crit)
-r=$(printf '%s\n' "$out" | awk -F'|' -v h="$h" '{for (i = 1; i <= NF; i++) gsub(/^ +| +$/, "", $i)}
-    $3 == "degrees C" && $2 ~ /^-?[0-9.]+$/ {nm = $1; gsub(/[^A-Za-z0-9_.:-]/, "_", nm)
-        print "@@IPMI", h, nm, $2, ($4 == "" ? "-" : $4), ($8 ~ /^-?[0-9.]+$/ ? $8 : "-"), ($9 ~ /^-?[0-9.]+$/ ? $9 : "-")}')
-if [ -n "$r" ]; then echo "$r"
-else echo "@@IPMI $h none rc=${rc}_$(printf '%s' "$out" | head -n 1 | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80)"; fi
-EOF
+# Temperatures: TEMP_SCRIPT is thermals_capture.sh's reader (tc_reader.sh: hwmon, nvidia-smi, the BMC in band)
 
 # Host-side UDP loss counters: "host InErrors RcvbufErrors SndbufErrors softnet_dropped".
 # InErrors includes RcvbufErrors; softnet_stat column 2 (hex) is the per-CPU backlog drop count.

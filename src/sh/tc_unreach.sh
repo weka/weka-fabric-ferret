@@ -18,11 +18,3 @@ unreachable_targets() {
         else UNREACH+=("$i"); fi
     done
 }
-
-# temps_summary.txt, one row per sensor over the samples: "Host Source Type Chip Dev Sensor First_C Max_C
-# Last_C High_C Crit_C Flag". Type cpu|nvme|nic|bmc|other. Flag (worst first): crit (at or above crit, or the BMC says
-# cr/nr), high (at or above high, or BMC nc), near (within FF_TEMP_MARGIN of high), then +rise (max - first over
-# FF_TEMP_RISE); "-" when none. A threshold of 0 counts as unset. A host/source with no reading at all gets one row,
-# Sensor none, Flag nodata:<why>. (fabric_ferret.sh's TEMP_SUM_AWK, unchanged; a harness check keeps them equal.)
-TEMP_SUM_AWK='
-#@awk temp_summary'

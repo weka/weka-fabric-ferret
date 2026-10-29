@@ -352,7 +352,11 @@ def generate_html(data, output_path):
         """A host's heat for its panel: the hottest reading per sensor type, and every flagged sensor."""
         per, flags = {}, []
         for t in data.get('temps', []):
-            if t['Host'] != host or t['Sensor'] == 'none':
+            if t['Host'] != host:
+                continue
+            if t['Flag'].startswith('note'):
+                flags.append('gpu: no nvidia-smi reading, GPU temperatures from the BMC')
+            if t['Sensor'] == 'none':
                 continue
             per[t['Type']] = max(per.get(t['Type'], -999.0), float(t['Max_C']))
             if t['Flag'] != '-':
@@ -529,6 +533,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
     if tps or data['metadata'].get('temps') == '1':
         rd = [t for t in tps if t['Sensor'] != 'none']
         nod = [t for t in tps if t['Flag'].startswith('nodata')]
+        nts = [t for t in tps if t['Flag'].startswith('note')]   # no nvidia-smi reading, the BMC gave the GPU temperatures
         flg = [t for t in rd if t['Flag'] != '-']
         rank = {'crit': 0, 'high': 1, 'near': 2, 'rise': 3}
         def fr(f):
@@ -541,25 +546,29 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
             hflags[t['Host']].append(f"{t['Type']}:{t['Flag']}")
         def fcls(f):
             return 'text-danger' if fr(f) <= 1 else 'text-warning' if f != '-' else ''
-        types = ('cpu', 'nvme', 'nic', 'other', 'bmc')
+        types = ('inlet', 'cpu', 'gpu', 'mem', 'nvme', 'nic', 'other')   # thermals_capture.sh's order
         hosts = sorted(per, key=lambda h: (min([fr(f.split(':', 1)[1]) for f in hflags[h]] or [9]), h))
         hrows = ''.join(f"<tr><td>{escape(h)}</td>" + ''.join(f"<td>{per[h][x]:g}</td>" if x in per[h] else '<td>-</td>' for x in types)
                         + f"<td class=\"{fcls(hflags[h][0].split(':', 1)[1]) if hflags[h] else ''}\">{escape(', '.join(hflags[h]) or '-')}</td></tr>" for h in hosts)
         frows = ''.join(f"<tr><td>{escape(t['Host'])}</td><td>{escape(t['Type'])}</td><td>{escape(t['Chip'])} {escape(t['Dev'])}</td><td>{escape(t['Sensor'])}</td>"
-                        f"<td>{t['First_C']}</td><td>{t['Max_C']}</td><td>{t['Last_C']}</td><td>{t['High_C']}</td><td>{t['Crit_C']}</td>"
+                        f"<td>{t['First_C']}</td><td>{t.get('Min_C', '-')}</td><td>{t['Max_C']}</td><td>{t['Last_C']}</td><td>{t['High_C']}</td><td>{t['Crit_C']}</td>"
                         f"<td class=\"{fcls(t['Flag'])}\">{escape(t['Flag'])}</td></tr>" for t in sorted(flg, key=lambda t: (fr(t['Flag']), -float(t['Max_C']))))
         nlist = ''.join(f"<li class=\"text-warning\">{escape(t['Host'])} {escape(t['Source'])}: no temperature data ({escape(t['Flag'][7:].replace('_', ' '))})</li>" for t in nod)
+        nlist += ''.join(f"<li class=\"text-info\">{escape(t['Host'])} gpu: no nvidia-smi reading ({escape(t['Flag'][5:].replace('_', ' '))}); its GPU temperatures come from the BMC</li>" for t in nts)
+        tonly = data.get('temps_only', [])   # hosts with no root for the tests, read for temperatures only
+        if tonly:
+            nlist += f"<li class=\"text-info\">Temperatures only (no root for the tests): {escape(', '.join(tonly))}</li>"
         bad = sum(1 for t in flg if fr(t['Flag']) <= 1)
         temps_flagged, temps_bad = len(flg), bad
         m = data['metadata']
         temps_html = f"""<div class="card mb-3"><div class="card-header">Temperatures — heat before fabric |
 {len(rd)} sensors on {len(per)} hosts | <b class="{'stat-bad' if bad else 'stat-warn' if flg else 'stat-good'}">{len(flg)}</b> flagged ({bad} high or crit) |
-<b class="{'stat-warn' if nod else 'stat-good'}">{len(nod)}</b> host sources with no temperature data</div>
+<b class="{'stat-warn' if nod else 'stat-good'}">{len(nod)}</b> host sources with no temperature data{f' | {len(nts)} notes' if nts else ''}</div>
 <div class="card-body" style="max-height:420px; overflow-y:auto;">
-<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">hwmon (CPU, NVMe, NIC…) read before the run and after every phase; BMC (ipmitool sensor: inlet, exhaust…) once per iteration and at the end. Flags: crit / high at or above the sensor's threshold (BMC: its own status), near = within {escape(m.get('temp_margin', '5'))}C of high, rise = up more than {escape(m.get('temp_rise', '10'))}C over the run. Module (optic) temperatures are in the NIC tables.</p>
+<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Read as thermals_capture.sh reads them: hwmon (CPU, NVMe, NIC…) and nvidia-smi (GPUs) before the run and after every phase; the BMC (ipmitool sensor: inlet, exhaust, GPU board, drives…) on the host once per iteration and at the end, and a -t file's bmc lines out of band. Each sensor is typed by what it measures: inlet, cpu, gpu, mem, nvme, nic or other. Flags: crit / high at or above the sensor's threshold (BMC: its own status), near = within {escape(m.get('temp_margin', '5'))}C of high, rise = up more than {escape(m.get('temp_rise', '10'))}C over the run. Module (optic) temperatures are in the NIC tables.</p>
 {'<ul class="mb-2">' + nlist + '</ul>' if nlist else ''}
-<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>CPU max</th><th>NVMe max</th><th>NIC max</th><th>Other max</th><th>BMC max</th><th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
-{('<p class="mb-1"><b>Flagged sensors</b></p><table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Type</th><th>Chip / device</th><th>Sensor</th><th>First</th><th>Max</th><th>Last</th><th>High</th><th>Crit</th><th>Flag</th></tr></thead><tbody>' + frows + '</tbody></table>') if frows else ''}
+<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Inlet max</th><th>CPU max</th><th>GPU max</th><th>Mem max</th><th>NVMe max</th><th>NIC max</th><th>Other max</th><th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
+{('<p class="mb-1"><b>Flagged sensors</b></p><table class="table table-sm table-striped"><thead><tr><th>Host</th><th>Type</th><th>Chip / device</th><th>Sensor</th><th>First</th><th>Min</th><th>Max</th><th>Last</th><th>High</th><th>Crit</th><th>Flag</th></tr></thead><tbody>' + frows + '</tbody></table>') if frows else ''}
 </div></div>"""
 
     # UDP pass: loss placed per receiving host and phase; unaccounted = likely fabric
@@ -3183,6 +3192,7 @@ def parse_tar_archive(filepath):
     # temperatures (temps_summary.txt): heat first, it can cap throughput, cause resends and flap links on its own
     th = read_file('temps_summary.txt').splitlines()
     data['temps'] = [dict(zip(th[0].split(), l.split())) for l in th[1:] if len(l.split()) >= 12] if th else []
+    data['temps_only'] = read_file('temps_only.txt').split()
     hot = [t for t in data['temps'] if t['Flag'].split('+')[0] in ('crit', 'high')]
     if hot:
         problems.insert(0, f"Heat: {len(hot)} sensors at or above their high or critical threshold on "
@@ -3191,6 +3201,9 @@ def parse_tar_archive(filepath):
     nod = sorted({f"{t['Host']} ({t['Source']}: {t['Flag'][7:].replace('_', ' ')})" for t in data['temps'] if t['Flag'].startswith('nodata')})
     if nod:
         notes.append(f"No temperature data from {len(nod)} host sources, so heat can't be ruled out there: {', '.join(nod)}")
+    gnote = sorted({t['Host'] for t in data['temps'] if t['Flag'].startswith('note')})
+    if gnote:
+        notes.append(f"No nvidia-smi reading on {len(gnote)} hosts; their GPU temperatures come from the BMC: {', '.join(gnote)}")
     if meta.get('temps') == '1' and not data['temps']:
         notes.append('Temperatures were on (FF_TEMPS=1) but the archive has no temps_summary.txt rows: heat is not ruled out anywhere.')
     data['problems'], data['notes'] = problems, notes
