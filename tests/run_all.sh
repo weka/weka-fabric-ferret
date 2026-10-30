@@ -7,7 +7,7 @@
 # test_thermals.sh runs its sections through this too: RA_TESTS=<its tests dir> RA_RESULTS=<its results dir>, with
 # thermals_capture.sh and fabric_ferret.sh as the two files each section gets
 # One suite at a time on this Mac (suite_lock.sh, shared with test_thermals.sh). The work dir is removed when every
-# check passed, kept otherwise.
+# check passed, kept otherwise; FFT_KEEP=1 keeps it always.
 # bash 4.3+ (wait -n, declare -A): checked first, in bash 3 syntax
 [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
     echo "run_all.sh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; exit 2; }
@@ -97,6 +97,6 @@ wall=$(awk -v a=$t0 -v b=$EPOCHREALTIME 'BEGIN {printf "%.1f", b - a}')
   echo "# ${#files[@]} groups ($tier), -j $j, wall ${wall}s$( (( ${#badg[@]} )) && echo "; failed groups: ${badg[*]}")"
   echo "---- $pass passed, $fail failed$( (( ${#skipped[@]} )) && echo ", ${#skipped[@]} skipped (${skipped[*]})")$( (( written + unchanged )) && echo ", $written FIXTURES WRITTEN, $unchanged unchanged: a regeneration run, not a passing one")  (results $RUN_DIR: <group>.out, <group>.rc = rc secs start end)"; } | tee -a "$RUN_DIR/result.txt"
 # every check passed: the groups' work dirs go (bundles, fake state), the .out/.rc results stay
-if (( fail == 0 )); then for w in "$RUN_DIR"/*/; do rm -rf "${w:?}"; done; fi
+if (( fail == 0 )) && [[ $FFT_KEEP != 1 ]]; then for w in "$RUN_DIR"/*/; do rm -rf "${w:?}"; done; fi   # FFT_KEEP=1 keeps them
 (( written + unchanged )) && exit 3   # a regeneration run skips the freshness checks, so it never passes
 [ $fail = 0 ]

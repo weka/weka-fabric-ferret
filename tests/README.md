@@ -28,6 +28,7 @@ runner: `/opt/homebrew/bin/bash tests/ff/14_uplinks.sh fabric_ferret.sh generate
   a second suite is refused naming the holder; a lock whose pid is gone is taken over, with a note.
 - Results: `tests/regress.XXXX` (ff) and `tests/thermals/regress.XXXX` (tc): `result.txt`, `<group>.out`, `<group>.rc`
   (rc, seconds, start, end). Work dirs are removed when every check passed; the results stay.
+  `FFT_KEEP=1` keeps the work dirs too, with each collector run's `<dir>.log`.
 - Fixtures (tests/fixtures): stored bundles (`bundles/`, made by tests/tools/mkbundles.sh at the commit named in
   `bundles/README`; an archive kept in an old format on purpose is a `.tar.gz`), the golden runs (`golden-B`, `golden-C`,
   regenerated with `FIXTURE_UPDATE=1 tests/run_all.sh <ff> <gd> 50 52`, which exits 3 and writes only a member whose
