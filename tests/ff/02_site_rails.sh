@@ -4,7 +4,7 @@
 # site's sample under FFT_SITE_DATA)
 # tier: fast
 # checks: 3
-# secs: 66
+# secs: 87
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 $B $S/tools/mksite.sh $W/site > $W/mksite.out 2>&1 || { cat $W/mksite.out; exit 2; }
 RA='198.19.1.0/24,198.19.3.0/24,198.19.5.0/24,198.19.7.0/24;198.19.2.0/24,198.19.4.0/24,198.19.6.0/24,198.19.8.0/24'

@@ -17,8 +17,8 @@ python3 $P $S/fixtures/bundles/12_old_v2_allAtoB.tar.gz $W/old.html > $W/po.out 
 chk "parser: a bundle without system info says 'Not captured'" "[ -s $W/old.html ] && grep -q 'Not captured: this bundle is from a fabric_ferret without system info capture' $W/old.html" "rc=$rc $(tail -n 2 $W/po.out)"
 
 # bounded capture: a stalled host is cut at FF_SYSINFO_TIMEOUT and kept; a timed-out item is named; a silent counter read is "-", not 0
-# (cut-off 2x the run's 24 s under -j 8, 10-29 21:25)
-xrun slow FF_HOSTS=198.18.0.1-5 FF_ITER=1 FF_SYSINFO_TIMEOUT=3 FAKE_SYSINFO_SLOW=h2 FAKE_ITEM_TIMEOUT=h3 FAKE_HOSTCTR_EMPTY=h4 FAKE_RCVCPU=1500.0 timeout 50 $B $C 1 > $W/slow.out
+# (cut-off 2x the run's 26 s in a full `tests/run --full all`, rounded up to a ten)
+xrun slow FF_HOSTS=198.18.0.1-5 FF_ITER=1 FF_SYSINFO_TIMEOUT=3 FAKE_SYSINFO_SLOW=h2 FAKE_ITEM_TIMEOUT=h3 FAKE_HOSTCTR_EMPTY=h4 FAKE_RCVCPU=1500.0 timeout 60 $B $C 1 > $W/slow.out
 chk "slow: run goes on past a stalled host" "grep -q '^RESULT coverage=' $W/slow.out" "$(tail -n 2 $W/slow.out)"
 chk "slow: stalled host cut with a WARNING" "grep -q 'WARNING: h2: system info cut off after 3s (FF_SYSINFO_TIMEOUT); the partial capture is kept' $W/slow.out"
 chk "slow: partial capture kept" "member slow sysinfo/h2/epoch | grep -q -E '^[0-9]+\$' && ! tar -tzf \$(tgz slow) | grep -q sysinfo/h2/lspci"

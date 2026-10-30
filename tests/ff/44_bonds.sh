@@ -5,7 +5,7 @@
 # down but still reports its switch: the red dashed edge to leaf1. The map draws a bond node per bond, a trunk from
 # the host, one edge per member (the member NIC as the label); every title starts with the host's own names, the
 # switch side sits in each edge's panel; the LLDP table shows the port id and the description
-# secs: 10
+# secs: 63
 # checks: 19
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 NETS=198.19.10.0/24,198.19.11.0/24

@@ -4,7 +4,7 @@
 # rail and state in the log, no per-NIC row for it (table and dashboard); rails.txt keeps every host's row; any
 # other bad rail (h4's B is link DOWN in the fake) keeps its full line and its row
 # checks: 34
-# secs: 95
+# secs: 215
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tbl() { grep -E '^ +(Role|backend|client) ' <<<"$1"; }
 
@@ -35,7 +35,7 @@ skip1=$(grep -c '^#   skip ' <<<"$out")
 # group, planned on A only), h31 holds A,C (no B NIC: no group has both, no partner); h21's rail A NIC is a bond whose
 # two members see leaf1 (the bond itself reports no neighbour) ---
 out=$(xrun rg env FF_RAILS= FAKE_RAILS=3 FF_NICS=enp5s0np0,enp196s0np0,enp65s0np0 FAKE_NO_C=h21,h22,h23,h24,h32 FAKE_NONIC_B=h31 FAKE_NOIP_B=h32 \
-      FAKE_ONLY_C=h25,h26,h27,h28,h29,h30 FAKE_BOND_LLDP=h21 FF_HOSTS=198.18.0.21-32 FF_ITER=2 timeout 120 $B $C 1); rc=$?
+      FAKE_ONLY_C=h25,h26,h27,h28,h29,h30 FAKE_BOND_LLDP=h21 FF_HOSTS=198.18.0.21-32 FF_ITER=2 timeout 150 $B $C 1); rc=$?   # 2x the run's 73 s in a full `tests/run --full all`, rounded up to a ten
 chk "rail groups: PARTIAL rc=3 (h31 untested), hosts 11/12, every planned path ran (60/60: 16 in the groups, 44 across them), nothing skipped" \
     "[ $rc = 3 ] && grep -q '^RESULT coverage=PARTIAL hosts=11/12 paths=60/60 skipped=0 no_result=0 cross_rail=on' <<<\"\$out\"" "rc=$rc $(grep -E '^RESULT|ERROR' <<<"$out" | head -n 2)"
 chk "rail groups: the planning lines name each group, its hosts and pairs per iteration, the joined host and its untested rail, and the lone host" \
