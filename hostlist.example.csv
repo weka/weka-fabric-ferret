@@ -57,7 +57,7 @@ backend,*,svc-fabric
 #   clients that should be tested; fewer makes the coverage PARTIAL
 # FF_EXPECT_CLIENTS=
 #
-#   iperf3 seconds per run (120; $1 also sets it)
+#   iperf3 seconds per run (120; 1 with FF_SKIP_IPERF=1; $1 also sets it)
 # FF_DURATION=120
 #
 #   passes of the full test set (every host and client NIC, every phase), to flush out
@@ -77,7 +77,7 @@ backend,*,svc-fabric
 #   no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
 #   runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
 #   and drop counters, system info, host-side receive), the counters over one FF_DURATION
-#   window of the cluster's own traffic. The busy check reports but doesn't stop the run.
+#   window (1 s unless set) of the cluster's own traffic. The busy check reports but doesn't stop the run.
 # FF_SKIP_IPERF=0
 #
 #   after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off

@@ -68,7 +68,7 @@ Clients (optional): tested against every backend rail, both ways
   that leaves by another NIC (management, say) is flagged.
 
 Optional (default)
-  FF_DURATION      iperf3 seconds per run (120; $1 also sets it)
+  FF_DURATION      iperf3 seconds per run (120; 1 with FF_SKIP_IPERF=1; $1 also sets it)
   FF_ITER          passes of the full test set (every host and client NIC, every phase), to flush out
                    noise and outliers; each pass gets new partners, round robin: no pair repeats, every
                    host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
@@ -80,7 +80,7 @@ Optional (default)
   FF_SKIP_IPERF=1  no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
-                   window of the cluster's own traffic. The busy check reports but doesn't stop the run.
+                   window (1 s unless set) of the cluster's own traffic. The busy check reports but doesn't stop the run.
   FF_UDP (1)       after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
                    (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into sender
                    TX (never left the sender's NIC: kernel and port tx packet counts, udp_tx.txt),
@@ -339,7 +339,8 @@ main() {
     [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
     (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
-    : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
+    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
+    [[ -n $FF_DURATION ]] || { [[ $FF_SKIP_IPERF == 1 ]] && FF_DURATION=1 || FF_DURATION=120; }   # no load: a 1 s counter window
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
     local -a TF_BE=() TF_CL=(); declare -gA TL=() TPW=()
