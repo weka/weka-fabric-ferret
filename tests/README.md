@@ -17,7 +17,8 @@ runner: `/opt/homebrew/bin/bash tests/ff/14_uplinks.sh fabric_ferret.sh generate
 - A run cut off by its `timeout` makes every later check report `TIMEOUT after N s`, never a wrong count. A cut-off is
   2x the run's time in a full `tests/run --full all` (xrun prints `# run <name>: N s` into each group's output; read them
   from that run, not from the group alone), rounded up to a ten, floor 30 s: a hang is reported at twice the expected,
-  not at an arbitrary multiple.
+  not at an arbitrary multiple. Those figures are taken with the 1-minute load average under 4 (result.txt's first
+  line); a loaded machine times out by design.
 - A shell or awk error in a group's output is a FAIL even when its checks passed.
 - `# needs: <command> ...` names a command a group cannot run without. Unmet, the group is SKIPPED by name, counted
   apart in result.txt (`X passed, Y failed, Z skipped (names)`), never as passed. Every fixture is synthetic: the fakes,

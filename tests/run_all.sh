@@ -47,6 +47,7 @@ export RUN_DIR; RUN_DIR=$(mktemp -d "${RA_RESULTS:-$S}/regress.XXXX") || die "mk
 set -m
 trap 'for p in $(jobs -p); do kill -TERM -- -$p; done; exit 130' INT TERM HUP
 export TIER=$tier   # a fast group may do less under --fast (02: a subset of the site sample); run alone it does the full work
+echo "# $(uptime)" | tee "$RUN_DIR/result.txt"   # the load at the start: the cut-offs are 2x figures taken under a 1-minute load below 4
 t0=$EPOCHREALTIME
 # longest first (10-26): each group's `# secs: N` is its time alone (5 when absent), so the long ones don't start
 # late and set the tail; results are still reported in name order
@@ -94,7 +95,7 @@ wall=$(awk -v a=$t0 -v b=$EPOCHREALTIME 'BEGIN {printf "%.1f", b - a}')
 { (( ${#hfail[@]} )) && printf '%s\n' "${hfail[@]}"
   for g in "${skipped[@]}"; do grep "^SKIPPED " "$RUN_DIR/$g.out"; done
   echo "# ${#files[@]} groups ($tier), -j $j, wall ${wall}s$( (( ${#badg[@]} )) && echo "; failed groups: ${badg[*]}")"
-  echo "---- $pass passed, $fail failed$( (( ${#skipped[@]} )) && echo ", ${#skipped[@]} skipped (${skipped[*]})")$( (( written + unchanged )) && echo ", $written FIXTURES WRITTEN, $unchanged unchanged: a regeneration run, not a passing one")  (results $RUN_DIR: <group>.out, <group>.rc = rc secs start end)"; } | tee "$RUN_DIR/result.txt"
+  echo "---- $pass passed, $fail failed$( (( ${#skipped[@]} )) && echo ", ${#skipped[@]} skipped (${skipped[*]})")$( (( written + unchanged )) && echo ", $written FIXTURES WRITTEN, $unchanged unchanged: a regeneration run, not a passing one")  (results $RUN_DIR: <group>.out, <group>.rc = rc secs start end)"; } | tee -a "$RUN_DIR/result.txt"
 # every check passed: the groups' work dirs go (bundles, fake state), the .out/.rc results stay
 if (( fail == 0 )); then for w in "$RUN_DIR"/*/; do rm -rf "${w:?}"; done; fi
 (( written + unchanged )) && exit 3   # a regeneration run skips the freshness checks, so it never passes
