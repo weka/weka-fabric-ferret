@@ -31,7 +31,7 @@ cleanup() {
     done
     wait
     if [[ -z $DONE ]]; then
-        if [[ -n $LOADED ]]; then { [[ -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"; log "Run did not finish; partial data left in $COLLECT_DIR"; }
+        if [[ -n $LOADED ]]; then { [[ -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"; log "Run did not finish; partial data left in $COLLECT_DIR: tar czf $(basename "$COLLECT_DIR").tgz -C $(dirname "$COLLECT_DIR") $(basename "$COLLECT_DIR") && python3 generate_dashboard.py $(basename "$COLLECT_DIR").tgz"; }
         else rm -rf "${COLLECT_DIR:?}"; fi
     fi
     rm -rf "${SOCKET_DIR:?}" "${WORK:?}"

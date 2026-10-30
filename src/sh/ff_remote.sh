@@ -1,6 +1,6 @@
 # ---------- ssh ----------
 
-throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
+# throttle: jobs.sh, shared with thermals_capture.sh
 # TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
 rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
 # sweep_ssh target cmd...: the call that opens the target's ssh master. A password login (TPW) reads its password here,

@@ -12,9 +12,11 @@ usage() {
 Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
        FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh -t FILE [duration_s]   (targets from a file instead)
        FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh; -t FILE works too)
+       FF_HOSTS=<targets> [FF_CLIENTS=<targets>] ./fabric_ferret.sh --thermals-only [-o jsonl,html,md] [-d s [-i s]] [-v]
+       ./fabric_ferret.sh --thermals-only -t FILE [options]   (temperatures only, as thermals_capture.sh)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
        ssh jump "FF_HOSTS=10.1.0.0/24 FF_RAILS='10.20.1.0/24;10.20.2.0/24' bash -s -- 120" < fabric_ferret.sh
-       The run ends by printing the scp + render line for the tarball it left on the jump host.
+       The run ends by printing the scp lines for the bundle and the dashboard it left on the jump host.
        With -t: bash -s -- -t FILE 120, and FILE must be on the jump host (copy it there first).
 
   -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
@@ -112,7 +114,7 @@ Optional (default)
   FF_SSH_RETRY_PARALLEL  retry targets that refused ssh under load (reset, kex) this many at a time (8)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
-  FF_OUT_DIR       where the .tgz bundle goes (.)
+  FF_OUT_DIR       where the .tgz bundle and its .html dashboard go (.)
   FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
                    for a font without braille; default 0
   FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
@@ -133,6 +135,13 @@ Optional (default)
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
+  FF_THERMALS_ONLY (0)  1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture
+                   instead, the same files (thermcap_<UTC>.jsonl, and .html/.md with -o) in FF_OUT_DIR and the same
+                   RESULT line. Targets: FF_HOSTS as backends and FF_CLIENTS as clients (as -t backend and client
+                   lines would give them), or -t FILE with its backend, client and bmc lines. Its options, refused
+                   in a fabric run: -o jsonl,html,md; -d seconds (sample for that long; 0 = one reading); -i
+                   seconds (every so often within -d); -v (list the targets that took no ssh connection);
+                   --list prints the targets as thermals_capture.sh does
 
                    Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
                    way per pair between two rails (with more than two rails, the rail pair rotates each
@@ -162,7 +171,7 @@ exit 0 = COMPLETE, 3 = PARTIAL, 4 = NONE (no throughput result at all), 2 = stop
 EOF
 }
 
-die() { echo "ERROR: $*" >&2; echo "RESULT coverage=STOPPED ($*)" >&2; exit 2; }
+die() { echo "ERROR: $*" >&2; echo "RESULT ${RES_KEY:-coverage}=STOPPED ($*)" >&2; exit 2; }   # RES_KEY=data: --thermals-only
 log() { echo "# $*" >&2; }
 # phase_start / phase_end name / phase_skip name: phase_times.txt rows "iter phase start end" (UTC), to line
 # the tool's counters up with switch and monitoring data
@@ -304,7 +313,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -538,9 +547,14 @@ parse_clients() {
 # exit 1 = WEKA not installed or no container running, 0 = one is Running, 2 = CLI failed
 WEKA_BUSY_CHECK='[ -n "$(command -v weka)" ] || exit 1; s=$(weka local ps --no-header -o name,state) || exit 2; echo "$s" | grep -qw Running'
 
-# ---------- ssh ----------
+# ---------- background jobs (both tools) ----------
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
+wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
+
+# ---------- ssh ----------
+
+# throttle: jobs.sh, shared with thermals_capture.sh
 # TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
 rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
 # sweep_ssh target cmd...: the call that opens the target's ssh master. A password login (TPW) reads its password here,
@@ -1149,6 +1163,640 @@ summarize_temps() {
     { awk '$12 !~ /^nodata/' "$out.raw"; awk '$12 ~ /^nodata/' "$out.raw" | sort -k1,1 -k2,2; } > "$out.sorted"
     awk "$TYPE_AWK" "$hi" "$out.sorted" > "$out"
     rm -f "$out.raw" "$out.sorted"
+}
+
+# ---------- collection ----------
+
+# throttle and wait_all: jobs.sh, shared with fabric_ferret.sh
+tmo() { tmo_s "$HOST_LIMIT" "$@"; }   # tmo_s: tc_bmc.sh
+clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
+
+# sample n: TEMP_SCRIPT on every target at once, appended to temps.txt as
+# "label host source chip dev sensor temp_c high_c crit_c status" (sensor none = no data, why in status).
+# A target with no answer at all gets a none row per source, the reason from ssh's exit code and last error line.
+# (write_askpass and pwfifo: src/sh/auth.sh, shared with fabric_ferret.sh)
+# rssh i: ssh to target i as its login; a password login reads its password through the askpass helper from a fifo,
+# never from an environment variable or a command line. Runs in its own background subshell.
+rssh() {
+    local i=$1 rc; shift
+    local -a o=("${SSH_OPTS[@]}" -l "${T_LOGIN[$i]}")
+    if [[ -z ${T_PW[$i]+x} ]]; then tmo ssh "${o[@]}" -o BatchMode=yes "${TARGETS[$i]}" "$@"; return; fi
+    o+=(-o BatchMode=no -o NumberOfPasswordPrompts=1)
+    pwfifo "t$i.$BASHPID" "${T_PW[$i]}" || return 255
+    THERMCAP_PW_FIFO=$PWFIFO SSH_ASKPASS=$AUTH/askpass SSH_ASKPASS_REQUIRE=force DISPLAY=${DISPLAY:-none} \
+        tmo $SETSID ssh "${o[@]}" "${TARGETS[$i]}" "$@"; rc=$?
+    exec 4>&-; rm -f "$PWFIFO" "$PWFIFO.used"; return $rc
+}
+
+# rbmc and BMC_AWK (the BMC out of band): tc_bmc.sh, shared with fabric_ferret.sh
+
+# read_target n i: the reader on target i for sample n, in the background (o/e/rc.n.i)
+read_target() {
+    local n=$1 i=$2 esc=
+    # a password login's password rides ahead of the reader on stdin (printf is a builtin: no argv, no temp file);
+    # bash -s reads the script a line at a time, so the first line's read takes the second line
+    # the escalator an earlier sample found on this host (esc.<i>) skips the probe: one probe per host per run
+    [[ -r $WORK/esc.$i ]] && esc=$(<"$WORK/esc.$i")
+    { { [[ -n ${T_PW[$i]+x} ]] && printf 'IFS= read -r TC_PW\n%s\n' "${T_PW[$i]}"; printf '%s\n' "$TEMP_SCRIPT"; } \
+          | rssh "$i" bash -s -- "$MODE" "$FF_IPMI_TIMEOUT" "$esc" > "$WORK/o.$n.$i" 2> "$WORK/e.$n.$i"
+      echo "${PIPESTATUS[1]}" > "$WORK/rc.$n.$i"; } &
+}
+# refusals under fan-out look like dead hosts (sshd MaxStartups, kex resets, a control master that died as it opened):
+# those targets get one more try, 8 at a time (as fabric_ferret.sh's sweep does)
+RETRY_RE='Failed to connect to new control master|Connection reset|kex_exchange_identification|ssh_exchange_identification|Connection closed by|too many'
+sample() {
+    local n=$1 lab=s$1 i o rc why host j
+    echo "$lab $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$WORK/samples"
+    for i in "${!TARGETS[@]}"; do throttle; read_target "$n" "$i"; done
+    wait_all
+    local -a retry=()
+    for i in "${!TARGETS[@]}"; do
+        [[ $(<"$WORK/rc.$n.$i") == 255 ]] && grep -qiE "$RETRY_RE" "$WORK/e.$n.$i" && retry+=("$i")
+    done
+    if (( ${#retry[@]} )); then
+        local keep=$FF_SSH_PARALLEL rec=0; FF_SSH_PARALLEL=8
+        for i in "${retry[@]}"; do throttle; mv -f "$WORK/e.$n.$i" "$WORK/e1.$n.$i"; read_target "$n" "$i"; done
+        wait_all; FF_SSH_PARALLEL=$keep
+        for i in "${retry[@]}"; do [[ $(<"$WORK/rc.$n.$i") == 255 ]] || rec=$(( rec + 1 )); done
+        log "sample $n: ${#retry[@]} target(s) refused ssh under load (control master, reset, kex); retried 8 at a time, recovered $rec"
+    fi
+    for j in "${!BMCS[@]}"; do
+        [[ -n $LOCAL_IPMITOOL ]] || break
+        throttle
+        { rbmc "$j" > "$WORK/b.$n.$j" 2>&1; echo $? > "$WORK/brc.$n.$j"; } &
+    done
+    wait_all
+    for j in "${!BMCS[@]}"; do
+        echo "$n ${BMCS[$j]} ${BMCS[$j]} bmc ${B_LOGIN[$j]} $( [[ -n ${B_PW[$j]} ]] && echo password || echo none)" >> "$WORK/hosts"
+        if [[ -z $LOCAL_IPMITOOL ]]; then
+            echo "$lab ${BMCS[$j]} ipmi bmc lanplus none - - - ipmitool_not_installed_here"; continue
+        fi
+        awk -v t="$lab" -v h="${BMCS[$j]}" -v rc="$(cat "$WORK/brc.$n.$j" 2>&1)" -v to="$FF_IPMI_TIMEOUT" "$BMC_AWK" "$WORK/b.$n.$j"
+    done >> "$WORK/temps.txt"
+    for i in "${!TARGETS[@]}"; do
+        o=$WORK/o.$n.$i; rc=$(cat "$WORK/rc.$n.$i" 2>&1)
+        host=$(awk '$1 ~ /^@@(HWMON|IPMI)$/ {print $2; exit}' "$o")
+        if [[ -n $host ]]; then : > "$WORK/answered.$i"; else host=${TARGETS[$i]}; fi
+        [[ -e $WORK/esc.$i ]] || awk '$1 == "@@ESC" {print $3; exit}' "$o" > "$WORK/esc.$i.new"
+        [[ -s $WORK/esc.$i.new ]] && mv -f "$WORK/esc.$i.new" "$WORK/esc.$i"; rm -f "$WORK/esc.$i.new"
+        # a target that took no connection: set aside, silent unless -v (see unreachable_targets)
+        if [[ $rc == 255 ]] && grep -qE "$NO_CONNECT_RE" "$WORK/e.$n.$i"; then
+            echo "$n ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")")" >> "$WORK/unreach.$i"; continue
+        fi
+        echo "$n ${TARGETS[$i]} $host ${T_TYPE[$i]:-backend} ${T_LOGIN[$i]} $( [[ -n ${T_PW[$i]+x} ]] && echo password || echo key)" >> "$WORK/hosts"
+        case $rc in
+            0) why=no_output ;;
+            124) why=ssh_cut_off_after_${HOST_LIMIT}s ;;
+            255) why=ssh_failed_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")"); [[ $why == ssh_failed_ ]] && why=ssh_failed_rc255_no_message ;;
+            *) why=remote_rc=${rc}_$(clean "$(awk 'NF {l = $0} END {print l}' "$WORK/e.$n.$i")") ;;
+        esac
+        awk -v t="$lab" -v host="$host" -v why="$why" -v ipmi="$([[ $MODE == ipmi ]] && echo 1 || echo 0)" '
+            function c(m) { return m == "-" ? "-" : sprintf("%.1f", m / 1000) }
+            $1 == "@@HWMON" { hw = 1; print t, $2, "hwmon", $3, $4, $5, ($5 == "none" ? "-" : c($6)), c($7), c($8), ($5 == "none" ? "no_hwmon_temperature_sensors" : "-") }
+            $1 == "@@GPU" && $3 == "none" { print t, $2, "gpu", "nvidia", "-", "none", "-", "-", "-", $4 }
+            $1 == "@@GPU" && $3 != "none" { print t, $2, "gpu", "nvidia", $3, $4, sprintf("%.1f", $5), $6, $7, "-" }
+            $1 == "@@IPMI" { im = 1 }
+            $1 == "@@IPMI" && $3 == "none" { print t, $2, "ipmi", "bmc", "-", "none", "-", "-", "-", $4 }
+            $1 == "@@IPMI" && $3 != "none" { print t, $2, "ipmi", "bmc", "-", $3, $4, $6, $7, $5 }
+            END { if (!hw) print t, host, "hwmon", "-", "-", "none", "-", "-", "-", why
+                  if (ipmi && !im) print t, host, "ipmi", "bmc", "-", "none", "-", "-", "-", why }' "$o" >> "$WORK/temps.txt"
+    done
+}
+
+# ssh's last error line when nothing took the connection (no host, no sshd, no route, name not found); auth and
+# host key failures don't match: a host is there
+NO_CONNECT_RE='Connection timed out|Connection refused|No route to host|Host is unreachable|Network is unreachable|Operation timed out|Could not resolve hostname|Name or service not known'
+
+# unreachable_targets: a target that took no ssh connection in any sample goes to UNREACH (left out of every count
+# and file; -v lists them). One that answered in another sample gets its none rows back for the samples it missed.
+unreachable_targets() {
+    local i n why h
+    UNREACH=()
+    for i in "${!TARGETS[@]}"; do
+        [[ -s $WORK/unreach.$i ]] || continue
+        if [[ -e $WORK/answered.$i ]]; then
+            h=$(awk -v t="${TARGETS[$i]}" '$2 == t && $3 != t {print $3; exit}' "$WORK/hosts"); h=${h:-${TARGETS[$i]}}
+            while read -r n why; do
+                echo "s$n $h hwmon - - none - - - $why" >> "$WORK/temps.txt"
+                [[ $MODE == ipmi ]] && echo "s$n $h ipmi bmc - none - - - $why" >> "$WORK/temps.txt"
+            done < "$WORK/unreach.$i"
+        else UNREACH+=("$i"); fi
+    done
+}
+
+# ---------- output ----------
+# (TEMP_SUM_AWK, TYPE_AWK, SRC_AWK and summarize_temps: tc_summary.sh, shared with fabric_ferret.sh)
+
+# per host the hottest reading of each type and its flags: "Host Inlet CPU GPU Mem NVMe NIC Other Flags"
+HOST_MAX_AWK='NR > 1 && $6 != "none" {if (!(($1, $3) in m) || $8 > m[$1, $3]) m[$1, $3] = $8; hs[$1] = 1; if ($12 != "-" && index("," fl[$1] ",", "," $3 ":" $12 ",") == 0) fl[$1] = fl[$1] (fl[$1] == "" ? "" : ",") $3 ":" $12}
+    END {split("inlet cpu gpu mem nvme nic other", ty, " ")
+         for (x in hs) { l = x; for (i = 1; i <= 7; i++) l = l " " (((x, ty[i]) in m) ? m[x, ty[i]] : "-"); print l, (x in fl ? fl[x] : "-") } }'
+HOST_MAX_HDR="Host Inlet CPU GPU Mem NVMe NIC Other Flags"
+
+# the sensor rows as shown: one sample "... Sensor Temp High Crit Flag", several "... Sensor First Min Max Last High
+# Crit Flag" (no-data rows left out; the flag is always the last column)
+VIEW_AWK='function f(x) { return x == "-" ? x : sprintf("%.1f", x) }
+NR == 1 { print "Host Source Type Chip Dev Sensor", (ns > 1 ? "First Min Max Last" : "Temp"), "High Crit Flag"; next }
+$12 ~ /^(nodata|note):/ { next }
+ns > 1 { print $1, $2, $3, $4, $5, $6, f($7), f($13), f($8), f($9), f($10), f($11), $12; next }
+{ print $1, $2, $3, $4, $5, $6, f($8), f($10), f($11), $12 }'
+
+# the 2 a.m. view, on stderr: counts, the per-host table, flagged sensors, every no-data source and reason (hosts
+# with the same source and reason share one counted line, up to 8 named; each host's own row is in the jsonl, md and
+# html), then the notes (gpu nodata covered by the BMC)
+print_summary() {
+    local ts=$WORK/temps_summary.txt
+    echo ""
+    local fk=10 mk=7; (( NSAMP > 1 )) && { fk=13; mk=9; }   # flag and max columns of the view
+    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples")):"
+    awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
+         END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
+    if awk 'NR > 1 && $NF != "-" {f = 1} END {exit !f}' "$WORK/view"; then
+        echo "  Flagged sensors:"
+        { head -n 1 "$WORK/view"; awk 'NR > 1 && $NF != "-"' "$WORK/view" | sort -k${fk},${fk} -k${mk},${mk}nr; } | column -t | sed 's/^/    /'
+    fi
+    awk 'NR > 1 && $12 ~ /^(nodata|note):/ { k = substr($12, 1, 4) SUBSEP $2 SUBSEP substr($12, index($12, ":") + 1)
+            if (!(k in c)) kord[++nk] = k; c[k]++; if (c[k] <= 8) hl[k] = hl[k] " " $1 }
+        END { for (i = 1; i <= nk; i++) { k = kord[i]; split(k, p, SUBSEP); more = (c[k] > 8 ? " and " (c[k] - 8) " more" : "")
+                if (p[1] == "note") printf "  NOTE: %d host(s) gave no nvidia-smi reading (%s); their GPU temperatures come from the BMC (HGX GPU, HBM, NVLink):%s%s\n", c[k], p[3], hl[k], more
+                else if (c[k] == 1) printf "  NO TEMPERATURE DATA:%s %s (%s)\n", hl[k], p[2], p[3]
+                else printf "  NO TEMPERATURE DATA: %s (%s): %d hosts:%s%s\n", p[2], p[3], c[k], hl[k], more } }' "$ts" | sort
+    echo ""
+}
+
+# one JSON object per line: run, host (one per target), sample, reading, sensor (the summary), nodata, note, result.
+# Strings are already [A-Za-z0-9_.:=-] (the reader and clean() map the rest to _); q() escapes anyway.
+JSONL_AWK='
+function q(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); return "\"" s "\"" }
+function nm(x) { return (x == "-" || x == "") ? "null" : sprintf("%.1f", x) }
+FILENAME == ARGV[1] { st[$1] = $2; sord[++ns] = $1; next }
+FILENAME == ARGV[2] { k = $4 " " $2; if (!(k in tg)) { tord[++nx] = k; tt[k] = $4; tn[k] = $2; tl[k] = $5; ta[k] = $6 }
+    if (!(k in tg) || tg[k] == $2) tg[k] = $3; next }
+FILENAME == ARGV[3] { if (FNR == 1) {
+        printf "{\"type\":\"run\",\"tool\":\"thermals_capture\",\"version\":%s,\"label\":%s,\"start\":%s,\"end\":%s,\"samples\":%d,\"interval_s\":%s,\"duration_s\":%s,\"ipmi\":%s,\"ipmi_timeout_s\":%s,\"temp_margin_c\":%s,\"temp_rise_c\":%s,\"ssh_user\":%s,\"targets\":%d,\"unreachable\":%d}\n", q(ver), q(label), q(start), q(end), ns, (iv == "" ? "null" : iv), (du == "" ? "null" : du), ipmi, ito, margin, rise, q(user), nt, unreach
+        for (i = 1; i <= nx; i++) { k = tord[i]
+            printf "{\"type\":\"host\",\"target\":%s,\"host\":%s,\"target_type\":%s,\"login\":%s,\"auth\":%s}\n", q(tn[k]), q(tg[k]), q(tt[k]), q(tl[k]), q(ta[k]) }
+        for (i = 1; i <= ns; i++) printf "{\"type\":\"sample\",\"sample\":%s,\"time\":%s}\n", q(sord[i]), q(st[sord[i]])
+        next }
+    if ($6 == "none") next
+    printf "{\"type\":\"reading\",\"sample\":%s,\"time\":%s,\"host\":%s,\"source\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"temp_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"status\":%s}\n", q($1), q(st[$1]), q($2), q($3), q($4), q($5), q($6), nm($7), nm($8), nm($9), q($10)
+    next }
+FNR == 1 { next }
+$12 ~ /^nodata/ { nd++; printf "{\"type\":\"nodata\",\"host\":%s,\"source\":%s,\"why\":%s}\n", q($1), q($2), q(substr($12, 8)); next }
+$12 ~ /^note:/ { printf "{\"type\":\"note\",\"host\":%s,\"source\":%s,\"why\":%s,\"temps_from\":\"bmc\"}\n", q($1), q($2), q(substr($12, 6)); next }
+{ ns2++; if ($12 != "-") fl++
+  printf "{\"type\":\"sensor\",\"host\":%s,\"source\":%s,\"kind\":%s,\"chip\":%s,\"dev\":%s,\"sensor\":%s,\"first_c\":%s,\"min_c\":%s,\"max_c\":%s,\"last_c\":%s,\"high_c\":%s,\"crit_c\":%s,\"flag\":%s}\n", q($1), q($2), q($3), q($4), q($5), q($6), nm($7), nm($13), nm($8), nm($9), nm($10), nm($11), ($12 == "-" ? "null" : q($12)) }
+END { printf "{\"type\":\"result\",\"data\":%s,\"hosts_with_data\":%d,\"targets\":%d,\"sensors\":%d,\"flagged\":%d,\"nodata\":%d,\"unreachable\":%d}\n", q(res), hwd, nt, ns2, fl, nd, unreach }'
+
+# A self-contained page (no network): a left nav (after the cs plugin dashboards) with Overview, a page per type
+# (its OS table, then its BMC / IPMI table) and Not read at the foot. A table is one row per host; columns are
+# grouped by device, the same device on every host; cells the temperature (max with -d), flagged cells shaded.
+# The tables are static HTML, so the page reads and
+# prints without script; the inline script only switches panels and sorts a table on a header click.
+read -r -d '' HTML_HEAD <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>@TITLE@</title>
+<style>
+:root { --bg: #fbfbfa; --surface: #ffffff; --surface-2: #f2f1ed; --fg: #1d1f21; --fg-2: #52514e; --mut: #6b6a66;
+  --line: #dcdcd8; --accent: #2a78d6; --crit: #b3261e; --critbg: #fde7e5; --high: #b45309; --highbg: #fdf0e1;
+  --near: #8a6d00; --nearbg: #fbf6dc; --rise: #5b4bb7; --risebg: #eeebfb; --ok: #1e7d3c;
+  --head: #dce9f9; --head-ink: #173b66; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #17181a; --surface: #1f2124;
+  --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd; --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef;
+  --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366; --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14;
+  --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f; --head: #1d3350; --head-ink: #cfe2fb; } }
+:root[data-theme="dark"] { --bg: #17181a; --surface: #1f2124; --surface-2: #26282c; --fg: #e6e6e3; --fg-2: #c3c2bd;
+  --mut: #a0a3a8; --line: #33363a; --accent: #6aa6ef; --crit: #ff8a80; --critbg: #3d1c1a; --high: #ffb366;
+  --highbg: #3a2a16; --near: #e6cf5c; --nearbg: #332e14; --rise: #b3a6ff; --risebg: #2a2640; --ok: #7bd88f;
+  --head: #1d3350; --head-ink: #cfe2fb; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+h1 { font-size: 18px; margin: 0 0 2px; } h2 { font-size: 16px; margin: 4px 0 10px; } h3 { font-size: 14px; margin: 18px 0 8px; }
+.mut { color: var(--mut); }
+a { color: var(--accent); }
+.body { display: flex; align-items: flex-start; }
+#nav { position: sticky; top: 0; flex: 0 0 200px; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px;
+  height: 100vh; overflow-y: auto; scrollbar-width: thin; }
+#nav button { font: inherit; text-align: left; cursor: pointer; background: transparent; border: 0; border-radius: 6px;
+  color: var(--fg-2); padding: 6px 10px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+#nav button:hover { background: var(--surface-2); color: var(--fg); }
+#nav button[aria-selected="true"] { background: var(--surface); color: var(--fg); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+#nav .count { color: var(--mut); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 400; }
+#nav .navgroup { color: var(--mut); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; padding: 14px 10px 4px; }
+/* Not read sits at the foot of the nav, as the cs dashboards pin their gear */
+#nav-footer { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--line); }
+#nav-footer button { width: 100%; }
+#nav button.warn .count { color: var(--high); font-weight: 600; }
+main { flex: 1 1 auto; min-width: 0; padding: 14px 16px 32px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 12px; }
+.res { font-weight: 600; } .res.COMPLETE { color: var(--ok); } .res.PARTIAL, .res.NONE { color: var(--crit); }
+.nodata { border-color: var(--crit); } .nodata h3 { color: var(--crit); margin-top: 0; }
+/* a table scrolls inside its own box, no taller than the window, so its sideways scrollbar is always on screen;
+   the scrollbars are styled, so they show even where the system hides them until you scroll */
+.wrap { overflow: auto; max-height: calc(100vh - 150px); border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); scrollbar-width: auto; scrollbar-color: var(--mut) var(--surface-2); }
+.wrap::-webkit-scrollbar { width: 12px; height: 12px; }
+.wrap::-webkit-scrollbar-track { background: var(--surface-2); }
+.wrap::-webkit-scrollbar-thumb { background: var(--mut); border-radius: 6px; border: 3px solid var(--surface-2); }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+thead { position: sticky; top: 0; z-index: 2; }
+th { background: var(--head); color: var(--head-ink); font-weight: 600; }
+th.grp { text-align: left; border-left: 2px solid var(--surface); }
+th .chip { font-weight: 400; opacity: 0.75; font-size: 12px; margin-left: 6px; }
+th.gs, td.gs { border-left: 2px solid var(--line); }
+td.crit { background: var(--critbg); color: var(--crit); font-weight: 600; } td.high { background: var(--highbg); color: var(--high); font-weight: 600; }
+td.near { background: var(--nearbg); color: var(--near); } td.rise { background: var(--risebg); color: var(--rise); }
+th.n, td.n { text-align: right; }
+table.sortable th { cursor: pointer; user-select: none; }
+table.sortable th[aria-sort="ascending"]::after { content: " \25B2"; font-size: 10px; }
+table.sortable th[aria-sort="descending"]::after { content: " \25BC"; font-size: 10px; }
+td.host, th.host { position: sticky; left: 0; background: var(--surface); z-index: 1; }
+th.host { background: var(--head); z-index: 2; }
+th .dev { display: block; font-weight: 400; color: var(--mut); font-size: 12px; }
+tr.crit td { background: var(--critbg); color: var(--crit); } tr.high td { background: var(--highbg); color: var(--high); }
+tr.near td { background: var(--nearbg); color: var(--near); } tr.rise td { background: var(--risebg); color: var(--rise); }
+@media (max-width: 860px) {
+  .body { flex-direction: column; align-items: stretch; }
+  main { width: 100%; min-width: 0; }
+  #nav { position: static; flex: 1 1 auto; width: 100%; flex-direction: row; flex-wrap: wrap; max-height: none; }
+  #nav .navgroup { width: 100%; padding: 6px 10px 2px; }
+  #nav { height: auto; }
+  #nav-footer { margin-top: 0; width: 100%; }
+}
+@media print { #nav { display: none; } section.panel[hidden] { display: block !important; } }
+</style>
+</head>
+<body>
+EOF
+read -r -d '' HTML_TAIL <<'EOF'
+<script>
+(function () {
+  "use strict";
+  var nav = document.getElementById("nav");
+  var panels = Array.prototype.slice.call(document.querySelectorAll("section.panel"));
+  // each visible table box ends at the bottom of the window, so its sideways scrollbar is on screen
+  // and the nav ends there too, so Not read at its foot is on screen (wide layout only; narrow, the nav wraps)
+  function fitnav() {
+    if (window.innerWidth <= 860) { nav.style.height = ""; return; }
+    nav.style.height = (window.innerHeight - Math.max(0, nav.getBoundingClientRect().top)) + "px";
+  }
+  function fit() {
+    Array.prototype.forEach.call(document.querySelectorAll("section.panel:not([hidden]) .wrap"), function (w) {
+      var top = w.getBoundingClientRect().top + window.scrollY;
+      w.style.maxHeight = Math.max(160, window.innerHeight - top - 12) + "px";
+    });
+    fitnav();
+  }
+  window.addEventListener("resize", fit);
+  window.addEventListener("scroll", fitnav, { passive: true });
+  // a panel's element id is "p-" + its name, so the #name in the URL never makes the browser jump to it
+  function show(id) {
+    panels.forEach(function (p) { p.hidden = p.id !== "p-" + id; });
+    fit();
+    Array.prototype.forEach.call(nav.querySelectorAll("button[data-panel]"), function (b) {
+      b.setAttribute("aria-selected", b.getAttribute("data-panel") === id ? "true" : "false");
+    });
+    try { history.replaceState(null, "", "#" + id); } catch (e) { /* file:// in some browsers */ }
+  }
+  document.addEventListener("click", function (ev) {   // nav buttons, and links such as the Overview's "see Not read"
+    var b = ev.target.closest("[data-panel]");
+    if (!b) return;
+    ev.preventDefault(); show(b.getAttribute("data-panel")); window.scrollTo(0, 0);
+  });
+  // sort on a header click: numbers by data-v (no reading always last), text naturally (host-2 before host-10)
+  function val(row, i, num) {
+    var c = row.children[i];
+    if (!c) return null;
+    if (num) { var v = c.getAttribute("data-v"); return v === null || v === "" ? null : parseFloat(v); }
+    return c.textContent;
+  }
+  // the sortable headers carry data-col, their column index (a device group header above them doesn't sort)
+  Array.prototype.forEach.call(document.querySelectorAll("table.sortable"), function (t) {
+    var ths = t.tHead.querySelectorAll("th[data-col]");
+    Array.prototype.forEach.call(ths, function (th) {
+      var i = parseInt(th.getAttribute("data-col"), 10);
+      th.addEventListener("click", function () {
+        var dir = th.getAttribute("aria-sort") === "ascending" ? -1 : 1, num = th.classList.contains("n");
+        if (num && !th.hasAttribute("aria-sort")) dir = -1;   // first click on a number: hottest first
+        Array.prototype.forEach.call(ths, function (h) { h.removeAttribute("aria-sort"); });
+        th.setAttribute("aria-sort", dir === 1 ? "ascending" : "descending");
+        var body = t.tBodies[0], rows = Array.prototype.slice.call(body.rows);
+        rows.sort(function (a, b) {
+          var x = val(a, i, num), y = val(b, i, num);
+          if (x === null && y === null) return 0;
+          if (x === null) return 1;
+          if (y === null) return -1;
+          if (num) return dir * (x - y);
+          return dir * x.localeCompare(y, undefined, { numeric: true });
+        });
+        rows.forEach(function (r) { body.appendChild(r); });
+      });
+    });
+  });
+  var want = location.hash.slice(1);
+  show(want && document.getElementById("p-" + want) ? want : "overview");
+})();
+</script>
+</body>
+</html>
+EOF
+
+# The page body: header, nav and panels. Inputs: hostmax, view, temps_summary.txt, pivot ("group type chip dev sensor
+# host value high crit flag", sorted), hosts (sorted). Strings are already [A-Za-z0-9_.:=-]; e() escapes anyway.
+# A type table has a row of device groups over the sensors when any column has a device (gs[j] = 1 where a group
+# starts); a sensor's crit goes under its name when every host has the same one, else into each cell.
+HTML_AWK='
+function e(s) { gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s); gsub(/"/, "\\&quot;", s); return s }
+function fc(f) { return f ~ /^crit/ ? "crit" : f ~ /^high/ ? "high" : f ~ /^near/ ? "near" : f ~ /rise/ ? "rise" : "" }
+function f1(x) { return x == "-" ? x : sprintf("%.1f", x) }
+function num(x) { return x == "-" ? "" : x }
+FILENAME == ARGV[1] { hm[++nh] = $0; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "<thead><tr>"; for (i = 1; i <= NF; i++) hdr = hdr "<th data-col=\"" (i - 1) "\"" (i >= 7 && i < NF ? " class=\"n\"" : "") ">" $i "</th>"; hdr = hdr "</tr></thead>"; next }
+    ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
+FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "<tr><td class=\"host\">" e($1) "</td><td>" e($2) "</td><td>" e(substr($12, 8)) "</td></tr>"; next }
+FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
+    c = $3 ":" $5 "@" $4
+    if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cchip[p, nc[p]] = $3; cd[p, nc[p]] = $4; cs[p, nc[p]] = sname($1, $5); cr[p, c] = f1($9) }
+    else if (cr[p, c] != f1($9)) crmix[p, c] = 1
+    cell[p, c, $6] = f1($7); ccr[p, c, $6] = f1($9); cv[p, c, $6] = $7; cf[p, c, $6] = fc($10); has[p, $6] = 1; pc[p]++; next }
+function sname(g, s) { if (g == "bmc") sub(/_[Tt]emp$/, "", s); gsub(/_/, " ", s); return s }
+FILENAME == ARGV[5] { ho[++nho] = $1; next }
+FILENAME == ARGV[6] { ur[++nur] = "<tr><td class=\"host\">" e($1) "</td><td>" e($2) "</td></tr>"; next }
+function row(l,   p, i, n, s, c) { n = split(l, p, " "); c = fc(p[n]); s = "<tr" (c != "" ? " class=\"" c "\"" : "") ">"
+    for (i = 1; i <= n; i++) s = s "<td" (i >= 7 && i < n ? " class=\"n\" data-v=\"" num(p[i]) "\"" : "") ">" e(p[i]) "</td>"; return s "</tr>" }
+END {
+    split("inlet cpu gpu mem nvme nic other", tyo, " "); split("Inlet CPU GPU Mem NVMe NIC Other", tyn, " ")
+    for (i = 1; i <= 7; i++) tname[tyo[i]] = tyn[i]
+    gname["bmc"] = "BMC / IPMI"; gname["os"] = "OS (hwmon, nvidia-smi)"
+    printf "<header><h1>Thermals: %s</h1><div class=\"mut\">%s to %s UTC &middot; %s &middot; hwmon + nvidia-smi%s &middot; thermals_capture %s</div></header>\n", e(label), e(start), e(end), (nsamp > 1 ? nsamp " samples (cells show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), e(ver)
+    print "<div class=\"body\"><nav id=\"nav\" aria-label=\"Sections\">"
+    print "<button type=\"button\" data-panel=\"overview\" aria-selected=\"true\"><span>Overview</span><span class=\"count\">" nh "</span></button>"
+    print "<div class=\"navgroup\">By type</div>"
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; tc = ((("os-" ty) in pc) ? pc["os-" ty] : 0) + ((("bmc-" ty) in pc) ? pc["bmc-" ty] : 0); if (!tc) continue
+        print "<button type=\"button\" data-panel=\"" ty "\" aria-selected=\"false\"><span>" tname[ty] "</span><span class=\"count\">" tc "</span></button>" }
+    print "<div id=\"nav-footer\"><button type=\"button\" data-panel=\"notread\" aria-selected=\"false\"" (nn + nur ? " class=\"warn\"" : "") "><span>Not read</span><span class=\"count\">" nn + nur "</span></button></div>"
+    print "</nav><main>"
+    print "<section class=\"panel\" id=\"p-overview\"><h2>Overview</h2>"
+    printf "<div class=\"card\"><span class=\"res %s\">%s</span> &middot; %d of %d hosts gave readings &middot; %d sensors &middot; %d flagged &middot; %d no-data%s%s</div>\n", res, res, hwd, nt, ns, nf, nn, (unreach ? " &middot; " unreach " unreachable (no ssh connection)" : ""), (nn + nur ? " &middot; <a href=\"#notread\" data-panel=\"notread\">see Not read</a>" : "")
+    if (nh) { print "<h3>Hottest reading per host and type (&deg;C)</h3><div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th class=\"n\" data-col=\"1\">Inlet</th><th class=\"n\" data-col=\"2\">CPU</th><th class=\"n\" data-col=\"3\">GPU</th><th class=\"n\" data-col=\"4\">Mem</th><th class=\"n\" data-col=\"5\">NVMe</th><th class=\"n\" data-col=\"6\">NIC</th><th class=\"n\" data-col=\"7\">Other</th><th data-col=\"8\">Flags</th></tr></thead><tbody>"
+        for (i = 1; i <= nh; i++) { split(hm[i], q, " ")
+            w = q[9] ~ /crit/ ? "crit" : q[9] ~ /high/ ? "high" : q[9] ~ /near/ ? "near" : q[9] ~ /rise/ ? "rise" : ""
+            s = "<tr" (w != "" ? " class=\"" w "\"" : "") "><td class=\"host\">" e(q[1]) "</td>"; for (j = 2; j <= 8; j++) s = s "<td class=\"n\" data-v=\"" num(q[j]) "\">" q[j] "</td>"
+            print s "<td>" e(q[9]) "</td></tr>" }
+        print "</tbody></table></div>" }
+    if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
+    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
+        printf "<section class=\"panel\" id=\"p-%s\"><h2>%s</h2><p class=\"mut\">The OS table (hwmon, nvidia-smi) and the BMC / IPMI table. One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", ty, tname[ty], (nsamp > 1 ? "highest reading" : "reading")
+        for (g = 1; g <= 2; g++) { p = (g == 1 ? "os" : "bmc") "-" ty; if (!(p in pc)) continue
+        printf "<h3>%s <span class=\"mut\">&middot; %d reading%s</span></h3>\n", gname[pg[p]], pc[p], (pc[p] == 1 ? "" : "s")
+        two = 0; for (j = 1; j <= nc[p]; j++) { gs[j] = (j == 1 || cd[p, j] != cd[p, j - 1] || cchip[p, j] != cchip[p, j - 1]); if (cd[p, j] != "-") two = 1 }
+        s = "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\"" (two ? " rowspan=\"2\"" : "") ">Host</th>"
+        if (two) { for (j = 1; j <= nc[p]; j = k) { for (k = j + 1; k <= nc[p] && !gs[k]; k++) ; s = s "<th class=\"grp\" colspan=\"" (k - j) "\">" (cd[p, j] != "-" ? e(cd[p, j]) "<span class=\"chip\">" e(cchip[p, j]) "</span>" : e(cchip[p, j])) "</th>" }
+            s = s "</tr><tr>" }
+        for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+            s = s "<th class=\"n" (gs[j] ? " gs" : "") "\" data-col=\"" j "\">" e(cs[p, j]) "<span class=\"dev\">" (((p, c) in crmix) ? "temp / crit" : (cr[p, c] == "-" ? "no crit" : "crit " cr[p, c])) "</span></th>" }
+        print s "</tr></thead><tbody>"
+        for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
+            s = "<tr><td class=\"host\">" e(x) "</td>"
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]; k = "n" (gs[j] ? " gs" : "")
+                s = s (((p, c, x) in cell) ? "<td class=\"" k (cf[p, c, x] != "" ? " " cf[p, c, x] : "") "\" data-v=\"" num(cv[p, c, x]) "\">" cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : "") "</td>" : "<td class=\"" k "\" data-v=\"\">-</td>") }
+            print s "</tr>" }
+        print "</tbody></table></div>" }
+        print "</section>" }
+    print "<section class=\"panel\" id=\"p-notread\"><h2>Not read</h2>"
+    print "<h3>No temperature data (" nn ")</h3><p class=\"mut\">Reached, but a source gave no reading; never shown as cool.</p>"
+    if (nn) { print "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Host</th><th data-col=\"1\">Source</th><th data-col=\"2\">Reason</th></tr></thead><tbody>"; for (i = 1; i <= nn; i++) print nd[i]; print "</tbody></table></div>" }
+    else print "<p>None.</p>"
+    print "<h3>Unreachable (" nur ")</h3><p class=\"mut\">Took no ssh connection in any sample (timed out, refused, no route, name not found); left out of every count.</p>"
+    if (nur) { print "<div class=\"wrap\"><table class=\"sortable\"><thead><tr><th class=\"host\" data-col=\"0\">Target</th><th data-col=\"1\">Reason</th></tr></thead><tbody>"; for (i = 1; i <= nur; i++) print ur[i]; print "</tbody></table></div>" }
+    else print "<p>None.</p>"
+    print "</section></main></div>" }'
+
+# Markdown, laid out like the html: contents, Overview (result, no-data list, hottest per host and type, flagged
+# sensors), then a section per type with its OS and BMC / IPMI tables, one row per host. A BMC table has a column per sensor ("HGX GPU",
+# crit in the header when every host has the same one, else in the cell). An OS table has a column per device
+# ("ibp13s0 mlx5"); its cell lists that device's sensors ("asic 41.0 · Module0 26.4"), or "max T of N sensors" past 4 of
+# them (a CPU socket's cores). A flagged reading is bold with its flag. Every single reading is in the jsonl.
+MD_AWK='
+function f1(x) { return x == "-" ? x : sprintf("%.1f", x) }
+function sname(g, s) { if (g == "bmc") sub(/_[Tt]emp$/, "", s); gsub(/_/, " ", s); return s }
+function fl(v, f) { return f == "-" || f == "" ? v : "**" v " " f "**" }
+FILENAME == ARGV[1] { hm[++nh] = $0; next }
+FILENAME == ARGV[2] { if (FNR == 1) { hdr = "|"; al = "|"; for (i = 1; i <= NF; i++) { hdr = hdr " " $i " |"; al = al (i >= 7 && i < NF ? "--:|" : "---|") } hdr = hdr "\n" al; next }
+    ns++; if ($NF != "-") { nf++; fr[nf] = $0 } next }
+FILENAME == ARGV[3] { if (FNR > 1 && $12 ~ /^nodata/) nd[++nn] = "- **" $1 "** " $2 ": " substr($12, 8); next }
+FILENAME == ARGV[4] { p = $1 "-" $2; if (!(p in pc)) { pord[++np] = p; pg[p] = $1; pt[p] = $2 }
+    if ($1 == "bmc") { c = $5; if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cn[p, nc[p]] = sname($1, $5); cr[p, c] = f1($9) }
+        else if (cr[p, c] != f1($9)) crmix[p, c] = 1
+        cell[p, c, $6] = f1($7); ccr[p, c, $6] = f1($9); cf[p, c, $6] = $10 }
+    else { c = $4 " " $3; if (!((p, c) in seen)) { seen[p, c] = 1; col[p, ++nc[p]] = c; cn[p, nc[p]] = ($4 == "-" ? $3 : $4 " " $3) }
+        k = p SUBSEP c SUBSEP $6; n[k]++; if (n[k] == 1 || $7 + 0 > mx[k]) mx[k] = $7 + 0
+        lst[k] = lst[k] (lst[k] == "" ? "" : " · ") sname($1, $5) " " fl(f1($7), $10); if ($10 != "-") wf[k] = $10 }
+    has[p, $6] = 1; pc[p]++; next }
+{ ho[++nho] = $1 }
+function row(l,   q, i, m, s) { m = split(l, q, " "); s = "|"; for (i = 1; i <= m; i++) s = s " " (i == m && q[i] != "-" ? "**" q[i] "**" : q[i]) " |"; return s }
+END {
+    split("inlet cpu gpu mem nvme nic other", tyo, " "); split("Inlet CPU GPU Mem NVMe NIC Other", tyn, " ")
+    for (i = 1; i <= 7; i++) tname[tyo[i]] = tyn[i]
+    gname["bmc"] = "BMC / IPMI"; gname["os"] = "OS (hwmon, nvidia-smi)"; gshort["bmc"] = "BMC"; gshort["os"] = "OS"
+    printf "# Thermals: %s\n\n%s to %s UTC · %s · hwmon + nvidia-smi%s · thermals_capture %s\n\n", label, start, end, (nsamp > 1 ? nsamp " samples (tables show the max)" : "one reading"), (ipmi ? " + BMC (ipmitool)" : ""), ver
+    printf "**%s** · %d of %d hosts gave readings · %d sensors · %d flagged · %d no-data%s\n", res, hwd, nt, ns, nf, nn, (unreach ? " · " unreach " unreachable (no ssh connection)" : "")
+    s = ""
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; tc = ((("os-" ty) in pc) ? pc["os-" ty] : 0) + ((("bmc-" ty) in pc) ? pc["bmc-" ty] : 0)
+        if (tc) s = s " · [" tname[ty] "](#" ty ") (" tc ")" }
+    print "\n**Contents:** [Overview](#overview)" s
+    print "\n## Overview"
+    if (nn) { print "\n### No temperature data (never read as cool)\n"; for (i = 1; i <= nn; i++) print nd[i] }
+    if (nh) { print "\n### Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
+        for (i = 1; i <= nh; i++) { split(hm[i], q, " "); s = "| " q[1] " |"; for (j = 2; j <= 8; j++) s = s " " q[j] " |"; print s " " (q[9] == "-" ? "-" : "**" q[9] "**") " |" } }
+    if (nf) { print "\n### Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
+    print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high" (nsamp > 1 ? "; rise = up more than " rise "°C over the samples" : "") "."
+    for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
+        print "\n## " tname[ty]
+        for (gi = 1; gi <= 2; gi++) { g = (gi == 1 ? "os" : "bmc"); p = g "-" ty; if (!(p in pc)) continue
+        printf "\n### %s · %d reading%s\n\n", gname[g], pc[p], (pc[p] == 1 ? "" : "s")
+        s = "| Host |"; a = "|---|"
+        for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+            s = s " " cn[p, j] (g == "bmc" ? (((p, c) in crmix) ? " (temp / crit)" : (cr[p, c] == "-" ? "" : " (crit " cr[p, c] ")")) : "") " |"; a = a (g == "bmc" ? "--:|" : "---|") }
+        print s "\n" a
+        for (h = 1; h <= nho; h++) { x = ho[h]; if (!((p, x) in has)) continue
+            s = "| " x " |"
+            for (j = 1; j <= nc[p]; j++) { c = col[p, j]
+                if (g == "bmc") s = s " " (((p, c, x) in cell) ? fl(cell[p, c, x] (((p, c) in crmix) ? " / " ccr[p, c, x] : ""), cf[p, c, x]) : "-") " |"
+                else { k = p SUBSEP c SUBSEP x; s = s " " (!(k in n) ? "-" : n[k] <= 4 ? lst[k] : fl("max " f1(mx[k]) " of " n[k] " sensors", wf[k])) " |" } }
+            print s } } }
+    print "\nEvery single reading is in the jsonl (-o jsonl)." }'
+
+# ---------- a temperature capture after the targets are loaded (both tools: thermals_capture.sh, and
+# fabric_ferret.sh --thermals-only) ----------
+
+THERMALS_VERSION=1.0
+
+# tc_cleanup: the EXIT trap of a capture: close the ssh masters, remove SOCKET_DIR and WORK, keep the exit code
+tc_cleanup() {
+    local rc=$? t
+    trap '' INT TERM HUP
+    if [[ -n $SOCKET_DIR ]]; then
+        for t in "${!TARGETS[@]}"; do ssh -O exit -o "ControlPath=$SOCKET_DIR/%C" -l "${T_LOGIN[$t]}" "${TARGETS[$t]}" >> "$WORK/cleanup.log" 2>&1 & done
+        wait
+        rm -rf "${SOCKET_DIR:?}"
+    fi
+    [[ -n $WORK ]] && rm -rf "${WORK:?}"
+    exit $rc
+}
+
+# tc_check_settings: the settings a capture reads, after a -t file's settings lines have had their say
+tc_check_settings() {
+    local v
+    [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
+    for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
+    for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL; do
+        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
+    done
+}
+
+# tc_list: --list, the targets and BMCs a capture would read, one a line; exits 0
+tc_list() {
+    (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0
+}
+
+# tc_check_opts: -o into FMTS, -d and -i into the caller's du and iv (its locals: fmt du iv), refused loudly when wrong
+tc_check_opts() {
+    local v
+    FMTS=(); local -A seen=(); local -a fl
+    IFS=, read -ra fl <<<"$fmt"
+    [[ -n $fmt && $fmt != *, && $fmt != ,* && $fmt != *,,* ]] || die "-o takes a comma-separated list of jsonl, html, md; got '$fmt'"
+    for v in "${fl[@]}"; do
+        [[ $v == jsonl || $v == html || $v == md ]] || die "-o takes a comma-separated list of jsonl, html, md; got '$v' in '$fmt'"
+        [[ -n ${seen[$v]+x} ]] || { seen[$v]=1; FMTS+=("$v"); }
+    done
+    # -d 0 (default): one point-in-time read. -d N: a read now and one N seconds later (min/max), or every -i seconds
+    : "${du:=0}"
+    [[ $du =~ ^[0-9]+$ ]] || die "-d must be a whole number of seconds (0 = one reading), got '$du'"
+    [[ -z $iv || ( $iv =~ ^[0-9]+$ && $iv -gt 0 ) ]] || die "-i must be a positive whole number of seconds, got '$iv'"
+    [[ -z $iv ]] || (( du > 0 )) || die "-i needs -d (how long to sample)"
+    (( du > 0 )) && : "${iv:=$du}"
+    [[ -z $iv ]] || (( du >= iv )) || die "-d ($du) must be at least -i ($iv)"
+}
+
+# tc_run: the capture itself, the caller's verbose, du and iv in scope: samples, summary, stderr and stdout, the
+# thermcap_<UTC> files in FF_OUT_DIR, the RESULT line; exits 0 COMPLETE, 3 PARTIAL, 4 NONE
+tc_run() {
+    local v
+    [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
+    [[ -n $(command -v ssh) ]] || die "ssh not found"
+
+    LOCAL_IPMITOOL=; (( ${#BMCS[@]} )) && { LOCAL_IPMITOOL=$(command -v ipmitool); [[ -n $LOCAL_IPMITOOL ]] || log "ipmitool is not installed here: the bmc lines will have no data"; }
+    # a password ssh login: SSH_ASKPASS reading a one-use fifo (no sshpass, never in an environment or argv); pw_transport
+    # (auth.sh) checks this ssh takes it unattended, or dies
+    SETSID=; (( ${#T_PW[@]} )) && pw_transport
+    MODE=-; (( FF_IPMI )) && MODE=ipmi
+    # a host's whole read is cut off 30 s after the ipmitool timeout (a hung sysfs read or ssh), where timeout exists
+    HOST_LIMIT=$(( FF_IPMI_TIMEOUT + 30 )); TO=$(command -v timeout || command -v gtimeout)
+    [[ -n $TO ]] || log "no timeout command here: a hung host would stall the capture"
+
+    WORK=$(mktemp -d "${TMPDIR:-/tmp}/thermals.XXXXXX") || die "mktemp failed"
+    trap tc_cleanup EXIT   # from here every exit removes WORK, and SOCKET_DIR once it exists
+    SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
+    # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
+    SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
+              -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+    AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; write_askpass "$AUTH/askpass"
+    echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$WORK/temps.txt"
+    : > "$WORK/samples"; : > "$WORK/hosts"
+
+    local start end n=0 t0 next sp k
+    start=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    log "Reading temperatures on ${#TARGETS[@]} host(s)$( (( ${#BMCS[@]} )) && echo " and ${#BMCS[@]} BMC(s) out of band"): hwmon, nvidia-smi$( (( FF_IPMI )) && echo ", BMC (ipmitool, timeout ${FF_IPMI_TIMEOUT}s)")$([[ -n $iv ]] && echo ", every ${iv}s for ${du}s" || echo ", one reading"); read only"
+    STOP=0; trap 'STOP=1; log "Stopping after this sample (Ctrl-C again does nothing; each host read ends within its timeout)"' INT TERM HUP
+    t0=$SECONDS
+    while :; do
+        n=$(( n + 1 )); sample $n
+        [[ -z $iv ]] && break
+        (( STOP )) && { log "Stopped after $n sample(s)"; break; }
+        next=$(( n * iv ))
+        (( next > du )) && break
+        if (( SECONDS - t0 < next )); then
+            sleep $(( next - (SECONDS - t0) )) & sp=$!; wait $sp
+            (( STOP )) && k=$(kill "$sp" 2>&1)   # Ctrl-C ended the wait early; the sleep is still running
+        else log "sample $n took longer than -i ${iv}s; sample $(( n + 1 )) starts now"; fi
+        (( STOP )) && { log "Stopped after $n sample(s)"; break; }
+    done
+    end=$(date -u +%Y-%m-%dT%H:%M:%SZ); NSAMP=$n
+    unreachable_targets
+    # "target reason" per unreachable target: the html's Not read panel lists them (stderr only with -v)
+    for i in "${UNREACH[@]}"; do echo "${TARGETS[$i]} $(awk 'NF {l = $2} END {print l}' "$WORK/unreach.$i")"; done | sort -V > "$WORK/unreachlist"
+    local nt=$(( ${#TARGETS[@]} - ${#UNREACH[@]} + ${#BMCS[@]} ))
+
+    # the summary (tc_summary.sh, shared with fabric_ferret.sh); the high = 95% of crit copy replaces temps.txt here,
+    # so the jsonl carries the thresholds the flags used (10-26)
+    summarize_temps "$WORK/temps.txt" "$WORK/temps.hi" "$WORK/temps_summary.txt" && mv "$WORK/temps.hi" "$WORK/temps.txt"
+    awk -v ns="$NSAMP" "$VIEW_AWK" "$WORK/temps_summary.txt" > "$WORK/view"
+    awk "$HOST_MAX_AWK" "$WORK/temps_summary.txt" | sort -k1,1V > "$WORK/hostmax"
+    # the html's per-type tables: "group type chip dev sensor host value high crit flag", BMC first, then by type,
+    # chip, device and sensor (version order, any case: Core_2 before Core_10, asic before Module0); hosts likewise
+    awk 'BEGIN { split("inlet cpu gpu mem nvme nic other", t, " "); for (i = 1; i <= 7; i++) r[t[i]] = i }
+         NR > 1 && $6 != "none" { g = ($2 == "ipmi" ? "bmc" : "os"); print (g == "bmc" ? 1 : 2), r[$3], $4, $5, tolower($6), g, $3, $4, $5, $6, $1, $8, $10, $11, $12 }' \
+        "$WORK/temps_summary.txt" | sort -k1,1n -k2,2n -k3,3 -k4,4V -k5,5V | cut -d' ' -f6- > "$WORK/pivot"
+    awk 'NR > 1 && $6 != "none" {print $1}' "$WORK/temps_summary.txt" | sort -u | sort -V > "$WORK/hostorder"
+    local sensors flagged nodata hwd res rc
+    read -r sensors flagged nodata hwd < <(awk 'NR > 1 && $6 != "none" {s++; if ($12 != "-") f++; if (!($1 in h)) {h[$1] = 1; hw++}} NR > 1 && $12 ~ /^nodata/ {d++}
+        END {print s + 0, f + 0, d + 0, hw + 0}' "$WORK/temps_summary.txt")
+    if (( sensors == 0 )); then res=NONE rc=4; elif (( nodata > 0 )); then res=PARTIAL rc=3; else res=COMPLETE rc=0; fi
+    print_summary >&2
+    # stdout: one row per host and source (the summary and the closing counts stay on stderr)
+    if awk 'NR > 1 {f = 1} END {exit !f}' "$WORK/view"; then
+        awk "$SRC_AWK" "$WORK/temps_summary.txt" | { read -r hdr; echo "$hdr"; sort -k1,1 -k2,2; } | column -t
+    fi
+    (( nt == 0 )) && echo "NO TEMPERATURE DATA: none of the ${#TARGETS[@]} targets took an ssh connection$( (( verbose )) || echo " (-v lists them)")" >&2
+    if (( verbose && ${#UNREACH[@]} )); then
+        echo "Unreachable: ${#UNREACH[@]} target(s) took no ssh connection in any sample (left out of every count and file):" >&2
+        sed 's/^/  /' "$WORK/unreachlist" >&2
+        echo "" >&2
+    fi
+
+    local label=${FF_LABEL:-$(awk 'NR > 1 && $6 != "none" {print $1; exit}' "$WORK/temps_summary.txt")}
+    label=$(clean "${label:-${TARGETS[0]:-${BMCS[0]}}}")
+    local base=$FF_OUT_DIR/thermcap_$(date -u +%Y%m%dT%H%M%SZ) f out=()
+    local -a common=(-v ver="$THERMALS_VERSION" -v label="$label" -v start="$start" -v end="$end" -v res="$res" -v hwd="$hwd"
+                     -v nt="$nt" -v unreach="${#UNREACH[@]}" -v ipmi="$FF_IPMI" -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" -v nsamp="$NSAMP")
+    for v in "${FMTS[@]}"; do
+        f=$base.$v
+        case $v in
+            jsonl) awk "${common[@]}" -v iv="$iv" -v du="$du" -v ito="$FF_IPMI_TIMEOUT" -v user="$FF_SSH_USER" "$JSONL_AWK" \
+                       "$WORK/samples" "$WORK/hosts" "$WORK/temps.txt" "$WORK/temps_summary.txt" > "$f.tmp" ;;
+            html) { printf '%s\n' "${HTML_HEAD//@TITLE@/Thermals $label}"
+                    awk "${common[@]}" "$HTML_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder" "$WORK/unreachlist"
+                    printf '%s\n' "$HTML_TAIL"; } > "$f.tmp" ;;
+            md) awk "${common[@]}" "$MD_AWK" "$WORK/hostmax" "$WORK/view" "$WORK/temps_summary.txt" "$WORK/pivot" "$WORK/hostorder" > "$f.tmp" ;;
+        esac && mv "$f.tmp" "$f" || die "could not write $f"
+        out+=("$f")
+    done
+    # every ssh error the run saw (each failed or noisy read: "sample target rc: stderr"), when there were any: the reason
+    # a host gave no data is its last line; the whole text separates a dead host from one refused under load
+    local i e trc; for n in $(seq 1 "$NSAMP"); do for i in "${!TARGETS[@]}"; do
+        if [[ -e $WORK/e1.$n.$i ]]; then   # the first try of a read that was retried
+            printf 's%s %s rc=255 (retried): ' "$n" "${TARGETS[$i]}"; tr -d '\r' < "$WORK/e1.$n.$i" | tr '\n' '|'; echo; fi
+        e=$WORK/e.$n.$i; trc=$(<"$WORK/rc.$n.$i")
+        { [[ $trc != 0 ]] || [[ -s $e ]]; } || continue
+        printf 's%s %s rc=%s: ' "$n" "${TARGETS[$i]}" "$trc"; if [[ -s $e ]]; then tr -d '\r' < "$e" | tr '\n' '|'; else printf '(no message)'; fi; echo
+    done; done > "$base.ssh_errors.log.tmp"
+    if [[ -s $base.ssh_errors.log.tmp ]]; then mv "$base.ssh_errors.log.tmp" "$base.ssh_errors.log"; out+=("$base.ssh_errors.log"); else rm -f "$base.ssh_errors.log.tmp"; fi
+    for f in "${out[@]}"; do log "Wrote $f"; done
+    log "To copy here from a jump host: scp '$(hostname -f 2>&1):$(cd "$(dirname "${out[0]}")" && pwd)/${base##*/}.*' ."
+    # the closing count: unreachable (no ssh connection) and unavailable (reachable, no reading at all)
+    if (( ${#UNREACH[@]} || nt - hwd )); then
+        echo "Unreachable: ${#UNREACH[@]} (no ssh connection$( (( ${#UNREACH[@]} && ! verbose )) && echo "; -v lists them")), unavailable: $(( nt - hwd )) (connected, no readings)" >&2
+    fi
+    echo "RESULT data=$res hosts=$hwd/$nt sensors=$sensors flagged=$flagged nodata=$nodata unreachable=${#UNREACH[@]}" >&2
+    exit $rc
 }
 
 # ---------- helpers on discovery files ----------
@@ -1779,9 +2427,8 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
     wait
 }
 
-# collect_temps label [ipmi]: thermals_capture.sh's reader on every tested host and client, and hosts with no root
-# for the tests, as the login; ipmitool alone escalated inside the reader: root directly, the sweep's escalator, or
-# sudo -S with the row's password. Nothing back: a none row per source
+# collect_temps label [ipmi]: thermals_capture.sh's reader as the login on every tested host, client and no-root
+# host; ipmitool alone escalated (root, the sweep's escalator, or sudo -S). Nothing back: a none row per source
 collect_temps() {
     (( FF_TEMPS )) || return 0
     local label=$1 mode=- ipmi=0 k i j n t o rc why last lim=$(( FF_IPMI_TIMEOUT + 30 )); local -a tgt=() hn=() e=()
@@ -2631,7 +3278,7 @@ cleanup() {
     done
     wait
     if [[ -z $DONE ]]; then
-        if [[ -n $LOADED ]]; then { [[ -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"; log "Run did not finish; partial data left in $COLLECT_DIR"; }
+        if [[ -n $LOADED ]]; then { [[ -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"; log "Run did not finish; partial data left in $COLLECT_DIR: tar czf $(basename "$COLLECT_DIR").tgz -C $(dirname "$COLLECT_DIR") $(basename "$COLLECT_DIR") && python3 generate_dashboard.py $(basename "$COLLECT_DIR").tgz"; }
         else rm -rf "${COLLECT_DIR:?}"; fi
     fi
     rm -rf "${SOCKET_DIR:?}" "${WORK:?}"
@@ -2652,8 +3299,8 @@ write_targets_template() {
 #
 # Row format: <type>,<host>,<login>,<pw>
 #   type   backend (or host) and client: ssh targets; bmc: one BMC address, read out of band (fabric_ferret.sh
-#          skips bmc rows and says how many). A bare line (no comma) is a backend with the defaults, so a plain
-#          host list works as it is. Type * means backend and client, never bmc.
+#          reads bmc rows out of band too, when FF_IPMI is on). A bare line (no comma) is a backend with the
+#          defaults, so a plain host list works as it is. Type * means backend and client, never bmc.
 #   host   an IP, hostname, CIDR or range (as FF_HOSTS); a bmc takes one IP or hostname. A host of * or a glob
 #          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
 #          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).
@@ -2734,6 +3381,34 @@ check_settings() {
 
 # ======================================================================
 
+# thermals_only: --thermals-only, thermals_capture.sh's capture (tc_main.sh) on FF_HOSTS as backends and FF_CLIENTS as
+# clients, or on a -t file's lines; no rails, no network test, no bundle. Main's locals in scope; tc_run exits
+thermals_only() {
+    RES_KEY=data
+    local v nb; local -a cl=()
+    [[ -z $dur ]] || die "use -d for --thermals-only"
+    for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
+        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
+    done
+    [[ -n $FF_HOSTS$FF_CLIENTS || -n $tfile ]] || die "no targets: set FF_HOSTS (and FF_CLIENTS) or give -t <file> (--help)"
+    [[ -n $FF_HOSTS$FF_CLIENTS && -n $tfile ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
+    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
+    TARGETS=(); _SEEN=(); INPUT_RANGES=0
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    # clients first, so a target in both lists is caught; then TARGETS = hosts (backend), then clients (client)
+    if [[ -n $FF_CLIENTS ]]; then expand_targets "$FF_CLIENTS" FF_CLIENTS; cl=("${TARGETS[@]}"); fi
+    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; else TARGETS=(); _SEEN=(); fi
+    for v in "${cl[@]}"; do [[ -n ${_SEEN[$v]+x} ]] && die "target $v is in both FF_HOSTS and FF_CLIENTS"; done
+    nb=${#TARGETS[@]}; TARGETS+=("${cl[@]}")
+    for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; if (( v < nb )); then T_TYPE[$v]=backend; else T_TYPE[$v]=client; fi; done
+    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
+    tc_check_settings
+    (( list )) && tc_list
+    tc_check_opts
+    tc_run
+}
+
 main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
@@ -2745,17 +3420,26 @@ main() {
     : "${FF_TEMPS:=1}" "${FF_IPMI:=1}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}" "${FF_IPMI_TIMEOUT:=60}"
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
-    # arguments, any order: --list, -t FILE, one duration (whole seconds); anything else is refused
-    local list=0 tfile= dur=
+    # arguments, any order: --list, -t FILE, one duration (whole seconds); --thermals-only and thermals_capture.sh's
+    # -o -d -i -v (that mode only); anything else is refused
+    local list=0 tfile= dur= fmt=jsonl du= iv= verbose=0 topt=
     while (( $# )); do
         case $1 in
             --list) list=1; shift ;;
             -t) (( $# >= 2 )) || die "-t needs a file (--help)"; tfile=$2; shift 2 ;;
             -t?*) tfile=${1#-t}; shift ;;
+            --thermals-only) FF_THERMALS_ONLY=1; shift ;;
+            -o|-d|-i) (( $# >= 2 )) || die "$1 needs a value (--help)"; topt=${topt:-$1}
+                      case $1 in -o) fmt=$2 ;; -d) du=$2 ;; -i) iv=$2 ;; esac; shift 2 ;;
+            -v) verbose=1; topt=${topt:--v}; shift ;;
             *) [[ -z $dur && $1 =~ ^[0-9]+$ ]] || die "unexpected argument '$1' (arguments: [-t FILE] [--list] [duration_s]; --help)"
                dur=$1; shift ;;
         esac
     done
+    : "${FF_THERMALS_ONLY:=0}"
+    [[ $FF_THERMALS_ONLY == 0 || $FF_THERMALS_ONLY == 1 ]] || die "FF_THERMALS_ONLY must be 0 or 1, got '$FF_THERMALS_ONLY'"
+    [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
+    (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
@@ -3765,15 +4449,35 @@ main() {
     DONE=1; save_state
     [[ -n $FF_RUNLOG && -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"
     COPYFILE_DISABLE=1 tar czf "$tarball" -C "$(dirname "$COLLECT_DIR")" "$(basename "$COLLECT_DIR")" || die "tar failed; data left in $COLLECT_DIR"
-    log "Data archive: $tarball ($(du -h "$tarball" | cut -f1))"
+    log "Bundle: $tarball ($(du -h "$tarball" | cut -f1))"
     local abs; abs=$(cd "$(dirname "$tarball")" && pwd)/$(basename "$tarball")
+    # the dashboard beside the bundle, from generate_dashboard.py beside this script; never silent, and the run's rc
+    # stays its own (the generator's 3 = incomplete data, the page says where)
+    local html= gd py hrc herr; gd=$(dirname "${BASH_SOURCE[0]:-.}")/generate_dashboard.py; py=$(command -v python3)
+    if [[ -z ${BASH_SOURCE[0]} || ! -f $gd ]]; then
+        log "Dashboard not written: generate_dashboard.py not beside the tool (a bash -s run?); render it with: python3 generate_dashboard.py $abs"
+    elif [[ -z $py ]]; then
+        log "Dashboard not written: python3 not found; render it with: python3 generate_dashboard.py $abs"
+    else
+        html=${abs%.tgz}.html
+        "$py" "$gd" "$tarball" "$html" > "$WORK/render.out" 2> "$WORK/render.err"; hrc=$?
+        case $hrc in
+            0) log "Dashboard: $html" ;;
+            3) log "Dashboard: $html (data incomplete: the page says where)" ;;
+            *) herr=$(awk 'NF {l = $0} END {print l}' "$WORK/render.err")
+               log "Dashboard not written: rc $hrc: ${herr:-no message}"; rm -f "$html"; html= ;;
+        esac
+    fi
     if [[ -n $SSH_CONNECTION ]]; then   # ran on a jump host: say how to fetch it
         local srv; srv=$(awk '{print $3}' <<<"$SSH_CONNECTION")
         # SSH_CONNECTION shows the address this host sees; behind NAT that is private, so name the host too
-        log "Fetch and render: scp $(id -un)@$srv:$abs . && python3 generate_dashboard.py $(basename "$tarball")"
+        if [[ -n $html ]]; then   # one scp per file: a pasted line copies exactly one file, in any shell
+            log "Fetch: scp $(id -un)@$srv:$abs ."
+            log "Fetch: scp $(id -un)@$srv:$html ."
+        else
+            log "Fetch and render: scp $(id -un)@$srv:$abs . && python3 generate_dashboard.py $(basename "$tarball")"
+        fi
         log "  ($srv is this jump host's own address; from outside use the address you ssh to, e.g. $(hostname -f 2>&1 | head -n1))"
-    else
-        log "Render: python3 generate_dashboard.py $abs"
     fi
     rm -rf "${COLLECT_DIR:?}"
     echo "$RESULT_LINE" >&2

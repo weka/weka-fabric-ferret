@@ -1,7 +1,6 @@
 # ---------- collection ----------
 
-throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
-wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
+# throttle and wait_all: jobs.sh, shared with fabric_ferret.sh
 tmo() { tmo_s "$HOST_LIMIT" "$@"; }   # tmo_s: tc_bmc.sh
 clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 

@@ -1,0 +1,9 @@
+h22 enp5s0np0 198.19.1.22 leaf1.example swp22 FE_port_22 Cumulus_Linux
+h22 enp196s0np0 198.19.2.22 leaf2.example swp22 FE_port_22 Cumulus_Linux
+h21 enp5s0np0 198.19.1.21 leaf1.example swp21 FE_port_21 Cumulus_Linux
+h21 enp196s0np0 198.19.2.21 leaf2.example swp21 FE_port_21 Cumulus_Linux
+c4 ens1f0 198.19.10.4 cleaf1.example swp44 FE_port_c4_ens1f0 Cumulus_Linux
+c4 ens1f1 198.19.11.4 cleaf1.example swp54 FE_port_c4_ens1f1 Cumulus_Linux
+c3 bond0 198.19.10.3 cleaf1.example swp43 FE_port_c3_bond0 Cumulus_Linux
+c2 bond0 198.19.10.2 cleaf1.example swp42 FE_port_c2_bond0 Cumulus_Linux
+c1 bond0 198.19.10.1 cleaf1.example swp41 FE_port_c1_bond0 Cumulus_Linux

@@ -1,0 +1,29 @@
+#!/opt/homebrew/bin/bash
+# fake local ipmitool for thermals_capture.sh's bmc lines: only "-I lanplus -H <bmc> -U <user> (-E | -f <file>) sensor".
+# $FAKE_TC/bmc.<bmc> = ok (default), hot (inlet 45, status cr), slow (sleeps past the timeout), down (no answer);
+# $FAKE_TC/bmcpw.<bmc> and bmcuser.<bmc>, when present, must match the password (IPMI_PASSWORD under -E, the -f file's
+# first line) and -U. argv -> ipmi_calls.log; an environment variable holding bmcpw -> "pwenv bmc <bmc> <var>" in calls.log.
+FAKE_TC=${FAKE_TC:?FAKE_TC unset}
+echo "ipmitool $*" >> "$FAKE_TC/ipmi_calls.log"
+h=; u=; e=; s=; i=; pf=
+while (( $# )); do
+    case $1 in -I) i=$2; shift 2 ;; -H) h=$2; shift 2 ;; -U) u=$2; shift 2 ;; -E) e=1; shift ;; -f) pf=$2; shift 2 ;; sensor) s=1; shift ;; *) echo "fake ipmitool: unexpected $1" >&2; exit 99 ;; esac
+done
+[[ $i == lanplus && -n $h && -n $u && ( $e == 1 || -n $pf ) && $s == 1 ]] || { echo "fake ipmitool: bad call" >&2; exit 98; }
+if [[ -r $FAKE_TC/bmcpw.$h ]]; then pwv=$(cat "$FAKE_TC/bmcpw.$h"); for v in $(compgen -e); do [[ ${!v} == "$pwv" ]] && echo "pwenv bmc $h $v" >> "$FAKE_TC/calls.log"; done; fi
+if [[ -n $pf ]]; then IFS= read -r IPMI_PASSWORD < "$pf" || { echo "Unable to read password from file $pf" >&2; exit 1; }
+else [[ -n ${IPMI_PASSWORD+x} ]] || { echo "Unable to read password from environment" >&2; exit 1; }; fi
+c=ok; [[ -r $FAKE_TC/bmc.$h ]] && c=$(cat "$FAKE_TC/bmc.$h")
+case $c in
+    slow) exec sleep 30 ;;
+    down) echo "Error: Unable to establish IPMI v2 / RMCP+ session" >&2; exit 1 ;;
+esac
+if { [[ -r $FAKE_TC/bmcpw.$h ]] && [[ $IPMI_PASSWORD != "$(cat "$FAKE_TC/bmcpw.$h")" ]]; } || { [[ -r $FAKE_TC/bmcuser.$h ]] && [[ $u != "$(cat "$FAKE_TC/bmcuser.$h")" ]]; }; then
+    echo "Error: Unable to establish IPMI v2 / RMCP+ session" >&2; exit 1
+fi
+inlet='24.000     | degrees C  | ok   '; [[ $c == hot ]] && inlet='45.000     | degrees C  | cr   '
+cat <<OUT
+Inlet Temp       | $inlet | na        | -7.000    | -2.000    | 38.000    | 42.000    | na
+CPU1 Temp        | 61.000     | degrees C  | ok    | na        | 0.000     | 0.000     | 90.000    | 95.000    | na
+Fan1             | 8400.000   | RPM        | ok    | na        | 600.000   | 840.000   | na        | na        | na
+OUT

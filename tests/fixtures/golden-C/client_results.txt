@@ -1,0 +1,72 @@
+### client iteration:1 phase:C1 wave:1/2
+198.19.10.1,198.19.1.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:38.5/42.0  share:2
+198.19.10.2,198.19.1.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:41       cpu:33.5/49.0  share:2
+198.19.10.3,198.19.1.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:12       cpu:35.5/41.0  share:2
+198.19.10.4,198.19.1.22,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:47       cpu:20.5/56.0  share:2
+198.19.11.4,198.19.2.22,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:32       cpu:30.5/40.0  share:1
+### client iteration:1 phase:C1 wave:2/2
+198.19.10.1,198.19.2.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:39.5/65.0  share:2
+198.19.10.2,198.19.2.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:34       cpu:21.5/59.0  share:2
+198.19.10.3,198.19.2.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:24       cpu:20.5/56.0  share:2
+198.19.10.4,198.19.2.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:38       cpu:20.5/60.0  share:2
+198.19.11.4,198.19.1.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:35       cpu:37.5/52.0  share:1
+### client iteration:1 phase:C2 wave:1/2
+198.19.1.21,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:21.5/43.0  share:2
+198.19.1.22,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:42  cpu:22.5/48.0  share:2
+198.19.1.21,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:6   cpu:34.5/62.0  share:2
+198.19.1.22,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:37  cpu:21.5/64.0  share:2
+198.19.2.22,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:37  cpu:21.5/64.0  share:1
+### client iteration:1 phase:C2 wave:2/2
+198.19.2.22,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:38.5/64.0  share:2
+198.19.2.21,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:26.5/52.0  share:2
+198.19.2.22,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:33.5/59.0  share:2
+198.19.2.21,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:2
+198.19.1.21,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:1
+### client iteration:1 phase:F1
+198.19.10.1,198.19.1.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:38.5/42.0  share:2
+198.19.10.2,198.19.2.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:34       cpu:21.5/59.0  share:1
+198.19.10.3,198.19.1.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:33       cpu:24.5/56.0  share:1
+198.19.10.4,198.19.2.22,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:32       cpu:30.5/40.0  share:1
+198.19.11.4,198.19.1.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:38       cpu:20.5/60.0  share:2
+### client iteration:1 phase:F2
+198.19.1.21,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:21.5/43.0  share:2
+198.19.2.21,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:26.5/52.0  share:1
+198.19.1.22,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:33.5/59.0  share:1
+198.19.2.22,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:37  cpu:21.5/64.0  share:1
+198.19.1.21,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:2
+### client iteration:2 phase:C1 wave:1/2
+198.19.10.1,198.19.1.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:39.5/65.0  share:2
+198.19.10.2,198.19.1.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:34       cpu:21.5/59.0  share:2
+198.19.10.3,198.19.1.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:24       cpu:20.5/56.0  share:2
+198.19.10.4,198.19.1.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:38       cpu:20.5/60.0  share:2
+198.19.11.4,198.19.2.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:35       cpu:37.5/52.0  share:1
+### client iteration:2 phase:C1 wave:2/2
+198.19.10.1,198.19.2.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:38.5/42.0  share:2
+198.19.10.2,198.19.2.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:41       cpu:33.5/49.0  share:2
+198.19.10.3,198.19.2.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:12       cpu:35.5/41.0  share:2
+198.19.10.4,198.19.2.22,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:47       cpu:20.5/56.0  share:2
+198.19.11.4,198.19.1.22,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:32       cpu:30.5/40.0  share:1
+### client iteration:2 phase:C2 wave:1/2
+198.19.1.22,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:38.5/64.0  share:2
+198.19.1.21,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:26.5/52.0  share:2
+198.19.1.22,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:33.5/59.0  share:2
+198.19.1.21,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:2
+198.19.2.21,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:1
+### client iteration:2 phase:C2 wave:2/2
+198.19.2.21,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:21.5/43.0  share:2
+198.19.2.22,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:42  cpu:22.5/48.0  share:2
+198.19.2.21,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:6   cpu:34.5/62.0  share:2
+198.19.2.22,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:37  cpu:21.5/64.0  share:2
+198.19.1.22,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:37  cpu:21.5/64.0  share:1
+### client iteration:2 phase:F1
+198.19.10.1,198.19.2.21,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:1000000  cpu:38.5/42.0  share:2
+198.19.10.2,198.19.1.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:41       cpu:33.5/49.0  share:1
+198.19.10.3,198.19.2.22,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:33       cpu:24.5/56.0  share:1
+198.19.10.4,198.19.1.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:35       cpu:37.5/52.0  share:1
+198.19.11.4,198.19.2.21,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:38       cpu:20.5/60.0  share:2
+### client iteration:2 phase:F2
+198.19.2.21,198.19.10.1,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:25  cpu:21.5/43.0  share:2
+198.19.1.22,198.19.10.2,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:42  cpu:22.5/48.0  share:1
+198.19.2.22,198.19.10.3,[SUM]  0.00-1.00  sec  1850  GBytes  185  Gbits/sec  receiver  retransmits:27  cpu:33.5/59.0  share:1
+198.19.1.21,198.19.10.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:1
+198.19.2.21,198.19.11.4,[SUM]  0.00-1.00  sec  920   GBytes  92   Gbits/sec  receiver  retransmits:23  cpu:34.5/53.0  share:2

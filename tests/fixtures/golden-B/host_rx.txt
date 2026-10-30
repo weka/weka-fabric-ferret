@@ -1,0 +1,6 @@
+Host NUMA_A/B Ring_A Ring_B PCIe_A PCIe_B Governor IRQbal RcvCPU% RcvThr% SndCPU% Softnet_drop Squeeze TCP_rcv_drop NIC_discard AER Klog Flags
+h1 0/1 8192/8192 8192/8192 16.0x16/16.0x16 16.0x16/16.0x16 powersave on 95 5.9 38.5 0 8 0 0 0 1 gov:powersave,klog
+h2 0/1 1024/8192 1024/8192 16.0x16/16.0x16 16.0x16/16.0x16 performance on 95 95.0 38.5 0 8 0 0 0 0 ringA<max,ringB<max,rcv_cpu>=90/thread
+h3 0/1 8192/8192 8192/8192 8.0x16/16.0x16 16.0x16/16.0x16 performance on 95 5.9 21.5 28 8 28 0 0 0 pcieA<max,softnet_drop,tcp_rcv_drop
+h4 0/1 8192/8192 8192/8192 16.0x16/16.0x16 16.0x16/16.0x16 performance on 95 5.9 22.5 0 8 0 52 0 0 nic_discard
+h5 0/1 - - 16.0x16/16.0x16 16.0x16/16.0x16 - on 95 5.9 27.5 0 8 0 0 0 0 -

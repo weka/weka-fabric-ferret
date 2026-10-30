@@ -1,0 +1,46 @@
+### iteration:1 phase:U1
+198.19.1.21,198.19.1.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver
+198.19.2.22,198.19.2.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver
+### iteration:1 phase:U2
+198.19.1.21,198.19.2.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver
+198.19.2.22,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver
+### iteration:1 phase:UC1 wave:1/4
+198.19.10.1,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.2,198.19.1.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.3,198.19.2.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.4,198.19.2.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC1 wave:2/4
+198.19.10.1,198.19.2.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.2,198.19.2.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.3,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.4,198.19.1.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC1 wave:3/4
+198.19.11.4,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC1 wave:4/4
+198.19.11.4,198.19.2.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC2 wave:1/4
+198.19.1.21,198.19.10.1,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.1.22,198.19.10.2,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.2.22,198.19.10.3,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.2.21,198.19.10.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC2 wave:2/4
+198.19.2.22,198.19.10.1,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.2.21,198.19.10.2,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.1.21,198.19.10.3,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.1.22,198.19.10.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC2 wave:3/4
+198.19.1.21,198.19.11.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UC2 wave:4/4
+198.19.2.22,198.19.11.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+### iteration:1 phase:UF1
+198.19.10.1,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:2
+198.19.10.2,198.19.2.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.3,198.19.1.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.10.4,198.19.2.22,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.11.4,198.19.1.21,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:2
+### iteration:1 phase:UF2
+198.19.1.21,198.19.10.1,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:2
+198.19.2.21,198.19.10.2,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.1.22,198.19.10.3,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.2.22,198.19.10.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:1
+198.19.1.21,198.19.11.4,[SUM]  0.00-1.00  sec  29.1  GBytes  212.5  Gbits/sec  0.002  ms  150000/1000000  (0.1%)  receiver  share:2

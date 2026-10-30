@@ -1,0 +1,12 @@
+1 1 h2 198.19.1.2 h5 198.19.1.5 MTU 9000B no-fragment ping failed
+1 1 h4 198.19.2.4 h3 198.19.2.3 DOWN h4: link DOWN on enp196s0np0
+1 U1 h2 198.19.1.2 h5 198.19.1.5 MTU 9000B no-fragment ping failed
+1 U1 h4 198.19.2.4 h3 198.19.2.3 DOWN h4: link DOWN on enp196s0np0
+2 1 h4 198.19.1.4 h5 198.19.1.5 MTU 9000B no-fragment ping failed
+2 1 h5 198.19.2.5 h4 198.19.2.4 DOWN h4: link DOWN on enp196s0np0
+2 2 h4 198.19.2.4 h5 198.19.1.5 DOWN h4: link DOWN on enp196s0np0
+2 2 h5 198.19.1.5 h4 198.19.2.4 DOWN h4: link DOWN on enp196s0np0
+2 U1 h4 198.19.1.4 h5 198.19.1.5 MTU 9000B no-fragment ping failed
+2 U1 h5 198.19.2.5 h4 198.19.2.4 DOWN h4: link DOWN on enp196s0np0
+2 U2 h4 198.19.2.4 h5 198.19.1.5 DOWN h4: link DOWN on enp196s0np0
+2 U2 h5 198.19.1.5 h4 198.19.2.4 DOWN h4: link DOWN on enp196s0np0

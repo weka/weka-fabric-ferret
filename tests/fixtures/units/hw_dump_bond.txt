@@ -1,0 +1,32 @@
+=== host hx kernel 6.6.0 bash 5.2
+=== ethtool bond0
+Settings for bond0:
+	Speed: 400000Mb/s
+	Duplex: Full
+	Link detected: yes
+=== ethtool -i bond0
+driver: bonding
+version: 6.6.0
+firmware-version: 2
+bus-info: 
+=== ethtool -m bond0
+Cannot get module EEPROM information: Operation not supported
+=== ethtool -S bond0
+no stats available
+=== lldpcli ens1np0
+-------------------------------------------------------------------------------
+LLDP neighbors:
+-------------------------------------------------------------------------------
+Interface:    ens1np0, via: LLDP, RID: 1, Time: 3 days, 02:11:09
+  Chassis:
+    ChassisID:    mac 00:11:22:33:44:01
+    SysName:      leaf-003-compute
+    SysDescr:     Cumulus Linux version 5.16.7 running on Nvidia SN5610
+  Port:
+    PortID:       ifname swp5s1
+    PortDescr:    hx Port 1
+-------------------------------------------------------------------------------
+=== lldpcli ens1np1
+-------------------------------------------------------------------------------
+LLDP neighbors:
+-------------------------------------------------------------------------------

@@ -10,8 +10,8 @@ write_targets_template() {
 #
 # Row format: <type>,<host>,<login>,<pw>
 #   type   backend (or host) and client: ssh targets; bmc: one BMC address, read out of band (fabric_ferret.sh
-#          skips bmc rows and says how many). A bare line (no comma) is a backend with the defaults, so a plain
-#          host list works as it is. Type * means backend and client, never bmc.
+#          reads bmc rows out of band too, when FF_IPMI is on). A bare line (no comma) is a backend with the
+#          defaults, so a plain host list works as it is. Type * means backend and client, never bmc.
 #   host   an IP, hostname, CIDR or range (as FF_HOSTS); a bmc takes one IP or hostname. A host of * or a glob
 #          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
 #          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).

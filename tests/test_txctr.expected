@@ -1,0 +1,7 @@
+hx_eth0 none 1000 100
+hx_bond0 none 1500 150
+hx_vlan100 none 1500 150
+hx_plain none 7 na
+hx_badbond none 1007 na
+hx_vf0 none 6600000 na
+hx_nosuch none na na

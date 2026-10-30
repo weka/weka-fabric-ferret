@@ -1,0 +1,9 @@
+@@HWMON hx coretemp coretemp.0 Package_id_0 71000 80000 100000
+@@HWMON hx coretemp coretemp.0 Core_0 68000 80000 100000
+@@HWMON hx k10temp k10 Tctl 55125 - -
+@@HWMON hx nvme nvme0 Composite 44850 84850 84850
+@@HWMON hx mlx5 enp5s0np0 temp1 62000 - 105000
+@@HWMON hx ice ens1f0 temp1 58000 96000 102000
+@@ESC hx dzdo_-n
+@@IPMI hx Inlet_Temp 24.000 ok 38.000 42.000
+@@IPMI hx Exhaust_Temp 52.000 nc 50.000 55.000

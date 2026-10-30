@@ -1,0 +1,5 @@
+Client NUMA_1/2 Ring_1 Ring_2 PCIe_1 PCIe_2 Governor IRQbal RcvCPU% RcvThr% SndCPU% Softnet_drop Squeeze TCP_rcv_drop NIC_discard AER Klog Flags
+c1 1/- 8192/8192 - 16.0x16/16.0x16 - performance on 64 4.0 39.5 84 24 84 130 0 0 softnet_drop,tcp_rcv_drop,nic_discard
+c2 1/- 8192/8192 - 16.0x16/16.0x16 - performance on 52 3.2 33.5 0 24 0 0 0 0 -
+c3 1/- 8192/8192 - 16.0x16/16.0x16 - performance on 62 3.9 35.5 0 24 0 0 0 0 -
+c4 1/1 8192/8192 8192/8192 16.0x16/16.0x16 16.0x16/16.0x16 performance on 64 4.0 37.5 0 24 0 0 0 0 -

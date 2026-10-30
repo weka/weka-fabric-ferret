@@ -3,8 +3,8 @@
 #
 # Row format: <type>,<host>,<login>,<pw>
 #   type   backend (or host) and client: ssh targets; bmc: one BMC address, read out of band (fabric_ferret.sh
-#          skips bmc rows and says how many). A bare line (no comma) is a backend with the defaults, so a plain
-#          host list works as it is. Type * means backend and client, never bmc.
+#          reads bmc rows out of band too, when FF_IPMI is on). A bare line (no comma) is a backend with the
+#          defaults, so a plain host list works as it is. Type * means backend and client, never bmc.
 #   host   an IP, hostname, CIDR or range (as FF_HOSTS); a bmc takes one IP or hostname. A host of * or a glob
 #          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
 #          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).
@@ -138,7 +138,7 @@ backend,*,svc-fabric
 #   name in the report and tarball (first tested hostname)
 # FF_LABEL=
 #
-#   where the .tgz bundle goes (.)
+#   where the .tgz bundle and its .html dashboard go (.)
 # FF_OUT_DIR=.
 #
 #   draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
@@ -180,6 +180,15 @@ backend,*,svc-fabric
 #
 #   a sensor that climbs more than this many °C over the run is flagged rise (10)
 # FF_TEMP_RISE=10
+#
+#   1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture
+#   instead, the same files (thermcap_<UTC>.jsonl, and .html/.md with -o) in FF_OUT_DIR and the same
+#   RESULT line. Targets: FF_HOSTS as backends and FF_CLIENTS as clients (as -t backend and client
+#   lines would give them), or -t FILE with its backend, client and bmc lines. Its options, refused
+#   in a fabric run: -o jsonl,html,md; -d seconds (sample for that long; 0 = one reading); -i
+#   seconds (every so often within -d); -v (list the targets that took no ssh connection);
+#   --list prints the targets as thermals_capture.sh does
+# FF_THERMALS_ONLY=0
 #
 #   number of spines every leaf uplinks to (all three uplink settings or none; no defaults)
 # FF_SPINES=

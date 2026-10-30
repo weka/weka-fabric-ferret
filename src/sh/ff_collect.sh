@@ -15,9 +15,8 @@ collect_counters() {  # script outfile [k...]: run a counter script on every tes
     wait
 }
 
-# collect_temps label [ipmi]: thermals_capture.sh's reader on every tested host and client, and hosts with no root
-# for the tests, as the login; ipmitool alone escalated inside the reader: root directly, the sweep's escalator, or
-# sudo -S with the row's password. Nothing back: a none row per source
+# collect_temps label [ipmi]: thermals_capture.sh's reader as the login on every tested host, client and no-root
+# host; ipmitool alone escalated (root, the sweep's escalator, or sudo -S). Nothing back: a none row per source
 collect_temps() {
     (( FF_TEMPS )) || return 0
     local label=$1 mode=- ipmi=0 k i j n t o rc why last lim=$(( FF_IPMI_TIMEOUT + 30 )); local -a tgt=() hn=() e=()

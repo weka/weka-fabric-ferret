@@ -62,11 +62,11 @@ ssh jump "FF_HOSTS=10.1.0.0/24 FF_RAILS='10.20.1.0/24;10.20.2.0/24' bash -s -- 1
 # A cluster whose I/O can't stop: everything but the bandwidth tests (clients get their path checks)
 FF_HOSTS=@hosts.txt FF_RAILS='10.20.1.0/24;10.20.2.0/24' FF_SKIP_IPERF=1 FF_ITER=all FF_DURATION=120 ./fabric_ferret.sh
 
-# Render the dashboard (writes <run>.html next to the bundle)
+# Render a dashboard by hand (a run already writes <run>.html next to its bundle; this is for a bash -s run or an older bundle)
 python3 generate_dashboard.py fabric_ferret_<label>_<timestamp>.tgz
 ```
 
-A run ends by printing the `scp` and render command for the bundle it left behind.
+A run that finishes writes two files to `FF_OUT_DIR`: the bundle `fabric_ferret_<label>_<timestamp>.tgz` and its dashboard `fabric_ferret_<label>_<timestamp>.html`, rendered by `generate_dashboard.py` from beside the tool. The log names both (`Bundle:`, `Dashboard:`). When the dashboard can't be written (no `python3`, no `generate_dashboard.py` beside the tool, as in a `bash -s` run, or a generator error), the log says why in one `Dashboard not written:` line with the command to render it by hand; the run's own exit code is unchanged. On a jump host the run ends with one `scp` line per file. A run cut short leaves its partial data in a directory and logs the `tar` and render commands for it.
 
 ## Settings
 
@@ -131,6 +131,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | `FF_IPMI` (`1`) | with `FF_TEMPS`, also the BMC's temperatures (inlet, exhaust, GPU board, drives…) via `ipmitool sensor` on the host, once per iteration and at the end, where ipmitool is installed (root, the escalator the sweep found, or `sudo -S` with the row's password, for ipmitool alone; hwmon and nvidia-smi are read as the login), and a `-t` file's bmc lines out of band from here (`ipmitool -I lanplus`, as thermals_capture.sh reads them); `0` = off |
 | `FF_IPMI_TIMEOUT` (60) | seconds per ipmitool read |
 | `FF_TEMP_MARGIN` (5), `FF_TEMP_RISE` (10) | °C: "near" a sensor's high threshold, and a rise over the run that gets flagged |
+| `FF_THERMALS_ONLY` (`0`) | `1` = `--thermals-only`: temperatures only, thermals_capture.sh's capture and files, no network test (see "Temperatures only" below) |
 | `FF_RETR_PCT` (0.1) | a data NIC whose TCP retransmits exceed this % of the segments it sent (bytes sent ÷ (MTU − 52)) gets `(retr)` on its Status; throughput still decides OK/SLOW/CRITICAL |
 | `FF_SPINES`, `FF_SPINE_LINKS`, `FF_SPINE_GBPS` (none) | leaf-spine uplinks, all three or none: spines, links from each backend leaf to each spine, Gbps per link. The summary always totals each leaf's traffic to other leaves; with these set it judges the totals against the uplink capacity |
 | `FF_CLIENT_SPINE_LINKS`, `FF_CLIENT_SPINE_GBPS` (none) | the same for client leaves, both or neither, on the `FF_SPINES` spines (one spine layer). A leaf that serves clients and backends is flagged (`shared_leaf`) and judged as a backend leaf |
@@ -155,7 +156,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | Setting (default) | Meaning |
 |---|---|
 | `FF_LABEL` (first tested hostname) | name in the report and the bundle file name |
-| `FF_OUT_DIR` (.) | where the `.tgz` bundle goes |
+| `FF_OUT_DIR` (.) | where the `.tgz` bundle and its `.html` dashboard go |
 | `FF_FERRET` (0) | `1` = on a terminal, a ferret roams over the log while the run goes (see below). Needs `python3` only when set |
 
 ## How a run works
@@ -222,6 +223,13 @@ FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -d 60            # read now and 60 s
 FF_HOSTS=10.1.0.10-17 ./thermals_capture.sh -d 600 -i 30      # a reading every 30 s for 10 min
 ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o md" < thermals_capture.sh
 ./thermals_capture.sh -t targets.csv -o md                    # targets from a file: hosts and BMCs, logins
+```
+
+`fabric_ferret.sh --thermals-only` (or `FF_THERMALS_ONLY=1`, also as a `-t` file's settings line) runs this same capture from the one tool: no rails, no network test, no bundle, and the same `thermcap_<UTC>` files and `RESULT` line. It takes the same `-o`, `-d`, `-i` and `-v` options; a fabric run refuses them. `FF_HOSTS` hosts are read as backends and `FF_CLIENTS` hosts as clients, as `-t` backend and client lines would give them.
+
+```bash
+FF_HOSTS=10.1.0.0/24 FF_CLIENTS=10.30.0.0/23 ./fabric_ferret.sh --thermals-only -o jsonl,md
+./fabric_ferret.sh --thermals-only -t targets.csv -d 600 -i 30
 ```
 
 `-t FILE` lists targets one per line as `<type>,<host>,<login>,<pw>`; lines starting with `#` are comments. A line with no comma is a backend with the defaults, so a plain host list works as it is. A line whose host field is empty or starts with `#` is skipped. `hostlist.example.csv` in the repository shows every kind of row. A line `FF_<setting>=value` in the file sets that setting for the run as on the command line (read first and exported; the environment wins; fabric_ferret.sh's names are skipped and named in one log line; an unknown or credential-looking name, or `FF_HOSTS`, stops the run with its line number).

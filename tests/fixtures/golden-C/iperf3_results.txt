@@ -1,0 +1,12 @@
+### iteration:1 phase:1
+198.19.1.21,198.19.1.22,[SUM]  0.00-1.00  sec  3250  GBytes  325  Gbits/sec  receiver  retransmits:17  cpu:23.5/54.0
+198.19.2.22,198.19.2.21,[SUM]  0.00-1.00  sec  3850  GBytes  385  Gbits/sec  receiver  retransmits:27  cpu:25.5/64.0
+### iteration:1 phase:2
+198.19.1.21,198.19.2.22,[SUM]  0.00-1.00  sec  3250  GBytes  325  Gbits/sec  receiver  retransmits:17  cpu:23.5/54.0
+198.19.2.22,198.19.1.21,[SUM]  0.00-1.00  sec  3850  GBytes  385  Gbits/sec  receiver  retransmits:27  cpu:25.5/64.0
+### iteration:2 phase:1
+198.19.1.22,198.19.1.21,[SUM]  0.00-1.00  sec  3850  GBytes  385  Gbits/sec  receiver  retransmits:27  cpu:25.5/64.0
+198.19.2.21,198.19.2.22,[SUM]  0.00-1.00  sec  3250  GBytes  325  Gbits/sec  receiver  retransmits:17  cpu:23.5/54.0
+### iteration:2 phase:2
+198.19.1.22,198.19.2.21,[SUM]  0.00-1.00  sec  3850  GBytes  385  Gbits/sec  receiver  retransmits:27  cpu:25.5/64.0
+198.19.2.21,198.19.1.22,[SUM]  0.00-1.00  sec  3250  GBytes  325  Gbits/sec  receiver  retransmits:17  cpu:23.5/54.0

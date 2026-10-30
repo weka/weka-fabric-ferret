@@ -11,9 +11,11 @@ usage() {
 Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
        FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh -t FILE [duration_s]   (targets from a file instead)
        FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh; -t FILE works too)
+       FF_HOSTS=<targets> [FF_CLIENTS=<targets>] ./fabric_ferret.sh --thermals-only [-o jsonl,html,md] [-d s [-i s]] [-v]
+       ./fabric_ferret.sh --thermals-only -t FILE [options]   (temperatures only, as thermals_capture.sh)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
        ssh jump "FF_HOSTS=10.1.0.0/24 FF_RAILS='10.20.1.0/24;10.20.2.0/24' bash -s -- 120" < fabric_ferret.sh
-       The run ends by printing the scp + render line for the tarball it left on the jump host.
+       The run ends by printing the scp lines for the bundle and the dashboard it left on the jump host.
        With -t: bash -s -- -t FILE 120, and FILE must be on the jump host (copy it there first).
 
   -t FILE    targets from a file instead of FF_HOSTS/FF_CLIENTS (not both): <type>,<host>,<login>,<pw> lines, the
@@ -111,7 +113,7 @@ Optional (default)
   FF_SSH_RETRY_PARALLEL  retry targets that refused ssh under load (reset, kex) this many at a time (8)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_LABEL         name in the report and tarball (first tested hostname)
-  FF_OUT_DIR       where the .tgz bundle goes (.)
+  FF_OUT_DIR       where the .tgz bundle and its .html dashboard go (.)
   FF_FERRET=1      draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
                    for a font without braille; default 0
   FF_LINE_GBPS     link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
@@ -132,6 +134,13 @@ Optional (default)
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
+  FF_THERMALS_ONLY (0)  1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture
+                   instead, the same files (thermcap_<UTC>.jsonl, and .html/.md with -o) in FF_OUT_DIR and the same
+                   RESULT line. Targets: FF_HOSTS as backends and FF_CLIENTS as clients (as -t backend and client
+                   lines would give them), or -t FILE with its backend, client and bmc lines. Its options, refused
+                   in a fabric run: -o jsonl,html,md; -d seconds (sample for that long; 0 = one reading); -i
+                   seconds (every so often within -d); -v (list the targets that took no ssh connection);
+                   --list prints the targets as thermals_capture.sh does
 
                    Each iteration: phase 1 same rail (A->A, B->B, ...); phase 2 cross-rail, one flow each
                    way per pair between two rails (with more than two rails, the rail pair rotates each
@@ -161,7 +170,7 @@ exit 0 = COMPLETE, 3 = PARTIAL, 4 = NONE (no throughput result at all), 2 = stop
 EOF
 }
 
-die() { echo "ERROR: $*" >&2; echo "RESULT coverage=STOPPED ($*)" >&2; exit 2; }
+die() { echo "ERROR: $*" >&2; echo "RESULT ${RES_KEY:-coverage}=STOPPED ($*)" >&2; exit 2; }   # RES_KEY=data: --thermals-only
 log() { echo "# $*" >&2; }
 # phase_start / phase_end name / phase_skip name: phase_times.txt rows "iter phase start end" (UTC), to line
 # the tool's counters up with switch and monitoring data
@@ -197,6 +206,8 @@ log_hist() { err_hist "$@" | sed 's/^/#   /' >&2; }
 
 #@include sh/ff_rails.sh
 
+#@include sh/jobs.sh
+
 #@include sh/ff_remote.sh
 
 #@include sh/tc_reader.sh
@@ -204,6 +215,14 @@ log_hist() { err_hist "$@" | sed 's/^/#   /' >&2; }
 #@include sh/tc_bmc.sh
 
 #@include sh/tc_summary.sh
+
+#@include sh/tc_collect.sh
+
+#@include sh/tc_unreach.sh
+
+#@include sh/tc_output.sh
+
+#@include sh/tc_main.sh
 
 #@include sh/ff_discovery.sh
 
@@ -260,6 +279,34 @@ check_settings() {
 
 # ======================================================================
 
+# thermals_only: --thermals-only, thermals_capture.sh's capture (tc_main.sh) on FF_HOSTS as backends and FF_CLIENTS as
+# clients, or on a -t file's lines; no rails, no network test, no bundle. Main's locals in scope; tc_run exits
+thermals_only() {
+    RES_KEY=data
+    local v nb; local -a cl=()
+    [[ -z $dur ]] || die "use -d for --thermals-only"
+    for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
+        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
+    done
+    [[ -n $FF_HOSTS$FF_CLIENTS || -n $tfile ]] || die "no targets: set FF_HOSTS (and FF_CLIENTS) or give -t <file> (--help)"
+    [[ -n $FF_HOSTS$FF_CLIENTS && -n $tfile ]] && die "use FF_HOSTS/FF_CLIENTS or -t <file>, not both (unset them to use the file)"
+    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
+    TARGETS=(); _SEEN=(); INPUT_RANGES=0
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    # clients first, so a target in both lists is caught; then TARGETS = hosts (backend), then clients (client)
+    if [[ -n $FF_CLIENTS ]]; then expand_targets "$FF_CLIENTS" FF_CLIENTS; cl=("${TARGETS[@]}"); fi
+    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; else TARGETS=(); _SEEN=(); fi
+    for v in "${cl[@]}"; do [[ -n ${_SEEN[$v]+x} ]] && die "target $v is in both FF_HOSTS and FF_CLIENTS"; done
+    nb=${#TARGETS[@]}; TARGETS+=("${cl[@]}")
+    for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; if (( v < nb )); then T_TYPE[$v]=backend; else T_TYPE[$v]=client; fi; done
+    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
+    tc_check_settings
+    (( list )) && tc_list
+    tc_check_opts
+    tc_run
+}
+
 main() {
     [[ $1 == -h || $1 == --help ]] && { usage; exit 0; }
     check_settings
@@ -271,17 +318,26 @@ main() {
     : "${FF_TEMPS:=1}" "${FF_IPMI:=1}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}" "${FF_IPMI_TIMEOUT:=60}"
     # Default busy check: any WEKA container in STATE Running (docs.weka.io CLI reference, `weka local ps`)
     : "${FF_BUSY_CHECK:=$WEKA_BUSY_CHECK}"
-    # arguments, any order: --list, -t FILE, one duration (whole seconds); anything else is refused
-    local list=0 tfile= dur=
+    # arguments, any order: --list, -t FILE, one duration (whole seconds); --thermals-only and thermals_capture.sh's
+    # -o -d -i -v (that mode only); anything else is refused
+    local list=0 tfile= dur= fmt=jsonl du= iv= verbose=0 topt=
     while (( $# )); do
         case $1 in
             --list) list=1; shift ;;
             -t) (( $# >= 2 )) || die "-t needs a file (--help)"; tfile=$2; shift 2 ;;
             -t?*) tfile=${1#-t}; shift ;;
+            --thermals-only) FF_THERMALS_ONLY=1; shift ;;
+            -o|-d|-i) (( $# >= 2 )) || die "$1 needs a value (--help)"; topt=${topt:-$1}
+                      case $1 in -o) fmt=$2 ;; -d) du=$2 ;; -i) iv=$2 ;; esac; shift 2 ;;
+            -v) verbose=1; topt=${topt:--v}; shift ;;
             *) [[ -z $dur && $1 =~ ^[0-9]+$ ]] || die "unexpected argument '$1' (arguments: [-t FILE] [--list] [duration_s]; --help)"
                dur=$1; shift ;;
         esac
     done
+    : "${FF_THERMALS_ONLY:=0}"
+    [[ $FF_THERMALS_ONLY == 0 || $FF_THERMALS_ONLY == 1 ]] || die "FF_THERMALS_ONLY must be 0 or 1, got '$FF_THERMALS_ONLY'"
+    [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
+    (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
     : "${FF_DURATION:=120}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}"
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
@@ -1259,15 +1315,35 @@ main() {
     DONE=1; save_state
     [[ -n $FF_RUNLOG && -f $FF_RUNLOG ]] && cp "$FF_RUNLOG" "$COLLECT_DIR/run.log"
     COPYFILE_DISABLE=1 tar czf "$tarball" -C "$(dirname "$COLLECT_DIR")" "$(basename "$COLLECT_DIR")" || die "tar failed; data left in $COLLECT_DIR"
-    log "Data archive: $tarball ($(du -h "$tarball" | cut -f1))"
+    log "Bundle: $tarball ($(du -h "$tarball" | cut -f1))"
     local abs; abs=$(cd "$(dirname "$tarball")" && pwd)/$(basename "$tarball")
+    # the dashboard beside the bundle, from generate_dashboard.py beside this script; never silent, and the run's rc
+    # stays its own (the generator's 3 = incomplete data, the page says where)
+    local html= gd py hrc herr; gd=$(dirname "${BASH_SOURCE[0]:-.}")/generate_dashboard.py; py=$(command -v python3)
+    if [[ -z ${BASH_SOURCE[0]} || ! -f $gd ]]; then
+        log "Dashboard not written: generate_dashboard.py not beside the tool (a bash -s run?); render it with: python3 generate_dashboard.py $abs"
+    elif [[ -z $py ]]; then
+        log "Dashboard not written: python3 not found; render it with: python3 generate_dashboard.py $abs"
+    else
+        html=${abs%.tgz}.html
+        "$py" "$gd" "$tarball" "$html" > "$WORK/render.out" 2> "$WORK/render.err"; hrc=$?
+        case $hrc in
+            0) log "Dashboard: $html" ;;
+            3) log "Dashboard: $html (data incomplete: the page says where)" ;;
+            *) herr=$(awk 'NF {l = $0} END {print l}' "$WORK/render.err")
+               log "Dashboard not written: rc $hrc: ${herr:-no message}"; rm -f "$html"; html= ;;
+        esac
+    fi
     if [[ -n $SSH_CONNECTION ]]; then   # ran on a jump host: say how to fetch it
         local srv; srv=$(awk '{print $3}' <<<"$SSH_CONNECTION")
         # SSH_CONNECTION shows the address this host sees; behind NAT that is private, so name the host too
-        log "Fetch and render: scp $(id -un)@$srv:$abs . && python3 generate_dashboard.py $(basename "$tarball")"
+        if [[ -n $html ]]; then   # one scp per file: a pasted line copies exactly one file, in any shell
+            log "Fetch: scp $(id -un)@$srv:$abs ."
+            log "Fetch: scp $(id -un)@$srv:$html ."
+        else
+            log "Fetch and render: scp $(id -un)@$srv:$abs . && python3 generate_dashboard.py $(basename "$tarball")"
+        fi
         log "  ($srv is this jump host's own address; from outside use the address you ssh to, e.g. $(hostname -f 2>&1 | head -n1))"
-    else
-        log "Render: python3 generate_dashboard.py $abs"
     fi
     rm -rf "${COLLECT_DIR:?}"
     echo "$RESULT_LINE" >&2

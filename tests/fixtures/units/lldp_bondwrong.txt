@@ -1,0 +1,8 @@
+h1 enpA 198.18.0.1 leaf1 p x y
+h1 bond0 198.18.1.1 unknown unknown unknown unknown
+h1 m1 198.18.1.1 leaf2 p x y
+h1 m2 198.18.1.1 leaf1 p x y
+h2 enpA 198.18.0.2 leaf1 p x y
+h2 enpB 198.18.1.2 leaf2 p x y
+h3 enpA 198.18.0.3 leaf1 p x y
+h3 enpB 198.18.1.3 leaf2 p x y

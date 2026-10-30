@@ -1,0 +1,452 @@
+#!/opt/homebrew/bin/bash
+# bash 4.3+ (negative array subscripts): checked first, in bash 3 syntax (10-26 20:04)
+[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
+    echo "fake/ssh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; exit 2; }
+# Fake ssh: plays a small cluster from canned Linux output. Test harness only.
+# Hosts: 198.18.0.1-5 = h1..h5 on rails 198.19.1.0/24 (A) and 198.19.2.0/24 (B)
+#   h4: rail B link down   h5: rail A MTU 1500 path fails   h2: weka installed, stopped
+#   198.18.0.6 unreachable   198.18.0.7 = h1 again (same machine-id)   198.18.0.8 = bmc, no rails
+#   198.18.0.21-32 = h21..h32, plain hosts (large-fleet messages)
+#   FAKE_WEKA_RUNNING=h3 makes h3's weka containers Running
+#   FAKE_RAILS=1: backends have only enp5s0np0 (rail A); =3: also enp65s0np0 on 198.19.3.0/24 (rail C)
+#   FAKE_SAME16=1: backend data NICs report /16 masks (both rails look like 198.19.0.0/16)
+# Clients 198.18.1.1-4 = c1..c4, mgmt eno1 198.18.1.n/24, MTU 9000 data NICs:
+#   c1-c3: bond0 198.19.10.n/24 200000Mb/s   c4: ens1f0 198.19.10.4/24 + ens1f1 198.19.11.4/24, 100000Mb/s
+#   198.18.1.9 = h1 again (a backend listed as a client: same machine-id as 198.18.0.1)
+#   FAKE_CROUTE_BAD=c3[,..]: unsourced route to backend IPs leaves by eno1   FAKE_CLIENT_SPEED=<Gbps>: client iperf3 rate
+#   FAKE_CLIENT_MTU=cN:mtu: that client's data NICs' MTU   FAKE_CLIENT_SHARED_LEAF=1: client NICs see leaf1.example (backend rail A leaf)
+# SERVER takes "port count ip..." (or the old "port ip..."); it records ip:port per host in $FSTATE/listen.<h>, which
+#   ss -Htln lists; an iperf3 run to an ip:port not listed there is refused (no listen file for the host = old behaviour)
+# Privilege: the sweep's probe answers from FAKE_ESC (see below); escalators in front of a command are logged to esc.log
+# and taken off; sudo -S reads the password as stdin's first line (sudopw.<target> or pw.<target>).
+# -l login: logged per call to logins.log; FAKE_LOGIN="target:login ..." makes those targets refuse any other login
+# FAKE_STATE: dir for every file the fake keeps (counters, locks, iperf_args.log); one per test group lets groups run at once
+FSTATE=${FAKE_STATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}   # default: this fake's own dir (the groups set one each)
+[[ -d $FSTATE ]] || mkdir -p "$FSTATE"
+target=""; args=(); batch=; login=$USER   # not $(id -un): one more exec on every fake call costs the whole suite
+while (( $# )); do
+    case $1 in
+        -l) login=$2; shift 2 ;;
+        -o) [[ $2 == BatchMode=* && -z $batch ]] && batch=${2#BatchMode=}; shift 2 ;;   # ssh keeps an option's first value
+        -O) echo "Exit request sent." >&2; exit 0 ;;
+        -V) echo "${FAKE_SSH_VERSION:-OpenSSH_9.9p2, LibreSSL 3.3.6}" >&2; exit 0 ;;
+        -n|-f) shift ;;
+        *) if [[ -z $target ]]; then target=$1; shift; else args=("$@"); break; fi ;;
+    esac
+done
+# FAKE_FLAKY: first ssh to these targets is reset (fan-out refusal); FAKE_FLAKY_FOREVER: always reset
+if [[ " $FAKE_FLAKY_FOREVER " == *" $target "* ]]; then echo "kex_exchange_identification: read: Connection reset by peer" >&2; exit 255; fi
+if [[ " $FAKE_FLAKY " == *" $target "* ]]; then
+    st=$FSTATE/flaky.$target
+    if [[ ! -f $st ]]; then echo 1 > "$st"; echo "kex_exchange_identification: read: Connection reset by peer" >&2; exit 255; fi
+fi
+# logins: every call's "target login" -> logins.log; FAKE_LOGIN="target:login ..." = the only login those targets accept
+echo "$target $login" >> "$FSTATE/logins.log"
+for x in $FAKE_LOGIN; do [[ ${x%%:*} == "$target" && ${x#*:} != "$login" ]] && { echo "$login@$target: Permission denied (publickey,password)." >&2; exit 255; }; done
+# passwords: $FSTATE/pw.<target> = it takes only that password, asked once through SSH_ASKPASS (BatchMode=no,
+# SSH_ASKPASS_REQUIRE=force); a call that authenticated leaves authed.<target>.<login>, the open master later calls
+# ride (BatchMode=yes is fine then). Any environment variable holding the password -> "<target> <var>" in pwenv.log.
+if [[ -r $FSTATE/pw.$target ]]; then
+    pwv=$(< "$FSTATE/pw.$target")
+    for v in $(compgen -e); do [[ ${!v} == "$pwv" ]] && echo "$target $v" >> "$FSTATE/pwenv.log"; done
+    if [[ ! -e $FSTATE/authed.$target.$login ]]; then
+        got=
+        if [[ ${batch:-no} == no && $SSH_ASKPASS_REQUIRE == force && -x $SSH_ASKPASS ]]; then
+            got=$("$SSH_ASKPASS" "$login@$target's password: "); echo "$target $login" >> "$FSTATE/askpass.log"
+        fi
+        [[ $got == "$pwv" ]] || { echo "$login@$target: Permission denied (publickey,password)." >&2; exit 255; }
+        : > "$FSTATE/authed.$target.$login"
+    fi
+fi
+kind=b
+case $target in
+    198.18.0.[1-5]|198.18.0.2[1-9]|198.18.0.3[0-2]) n=${target##*.}; h=h$n ;;
+    198.18.0.7|198.18.1.9) n=1; h=h1 ;;
+    198.18.0.8) n=8; h=bmc ;;
+    198.18.1.[1-4]) n=${target##*.}; h=c$n; kind=c ;;
+    *) echo "ssh: connect to host $target port 22: Connection timed out" >&2; exit 255 ;;
+esac
+NR=${FAKE_RAILS:-2}; [[ $NR == [123] ]] || NR=2
+inlist() { [[ ",${2// /,}," == *",$1,"* ]]; }   # inlist word "a,b c"
+# client data NICs: "nic ip speed"
+cnics() { if [[ $h == c4 ]]; then echo "ens1f0 198.19.10.4 100000Mb/s"; echo "ens1f1 198.19.11.4 100000Mb/s"; else echo "bond0 198.19.10.$n 200000Mb/s"; fi; }
+cnic() { cnics | awk -v k="$1" '$1 == k'; }   # one client NIC's line (empty if not a data NIC)
+# host owning a data IP (for the iperf3 listen check)
+iphost() { case $1 in 198.19.[123].*) echo "h${1##*.}" ;; 198.19.1[01].*) echo "c${1##*.}" ;; esac; }
+# the sweep's privilege probe (sh -c <probe> ff-probe): "uid escalator". uid 0 for root, else 1000; the escalator from
+# FAKE_ESC="target:esc ..." (spaces as _, or none), else sudo_-n (the fake runs anything as root)
+if [[ ${args[-1]} == ff-probe ]]; then
+    echo "$target $login probe" >> "$FSTATE/probe.log"
+    [[ $login == root ]] && { echo "0 -"; exit 0; }
+    e=sudo_-n; for x in $FAKE_ESC; do [[ ${x%%:*} == "$target" ]] && e=${x#*:}; done; echo "1000 $e"; exit 0
+fi
+# the escalator in front of the remote command: logged ("target login words") to esc.log and taken off. sudo -S -k -p '':
+# the password is stdin's first line, read alone (as sudo does: a byte at a time to the newline), checked against
+# $FSTATE/sudopw.<target> (else pw.<target>); the rest of stdin is the script. Two ways sudo takes nothing from stdin,
+# leaving the password line where the command reads it: FAKE_SUDO_CACHED=1 without -k (a cached timestamp), and
+# FAKE_NOPASSWD="target ..." (sudoers NOPASSWD: no prompt, -k or not).
+priv=n   # y once an escalator prefix was taken off: the command then runs as root on the host (the temperature reader notes it)
+case ${args[0]} in
+    sudo|dzdo|doas|ksu|pbrun|sesu|pmrun)
+        priv=y
+        if [[ ${args[0]} == sudo && ${args[1]} == -S && ( ( ${args[2]} != -k && -n $FAKE_SUDO_CACHED ) || " $FAKE_NOPASSWD " == *" $target "* ) ]]; then
+            [[ ${args[2]} == -k ]] && nw=5 || nw=4
+            echo "$target $login ${args[*]:0:nw}" >> "$FSTATE/esc.log"; args=("${args[@]:nw}")
+        elif [[ ${args[0]} == sudo && ${args[1]} == -S ]]; then
+            echo "$target $login ${args[*]:0:5}" >> "$FSTATE/esc.log"
+            IFS= read -r spw; if [[ -r $FSTATE/sudopw.$target ]]; then want=$(< "$FSTATE/sudopw.$target"); else want=$(< "$FSTATE/pw.$target"); fi
+            [[ $spw == "$want" ]] || { echo "Sorry, try again."; echo "sudo: 1 incorrect password attempt" >&2; exit 1; }
+            args=("${args[@]:5}")
+        else
+            [[ ${args[1]} == -* ]] && nw=2 || nw=1   # not n: that is the host's number
+            echo "$target $login ${args[*]:0:nw}" >> "$FSTATE/esc.log"; args=("${args[@]:nw}")
+        fi ;;
+esac
+# fabric_ferret's sudo guard: `bash|sh -c <%q one-liner> ff-sudo [--] cmd...`. The one-liner reads a line, reads a
+# second if the first wasn't the sentinel, then execs the rest: done here as it would be on the host
+if [[ ${args[1]} == -c && ${args[3]} == ff-sudo ]]; then
+    eval "guard=${args[2]}"   # undo the %q quoting
+    [[ $guard =~ \[\ \"\$l\"\ =\ \"([^\"]+)\"\ \] ]] && sent=${BASH_REMATCH[1]}
+    IFS= read -r l; [[ $l == "$sent" ]] || IFS= read -r l
+    [[ $l == "$sent" ]] || { echo "fake ssh: the sentinel line never came (guard: $guard)" >&2; exit 1; }
+    if [[ $guard == *"exec bash -s"* ]]; then args=(bash -s "${args[@]:4}"); else args=("${args[@]:4}"); fi
+fi
+# a script whose first line is the host's password (sudo took nothing from the stream): bash would run that line as a
+# command, and say so on stderr. Any other first line is the script's, kept.
+rest1=
+if [[ ${args[*]:0:2} == "bash -s" ]] && { [[ -r $FSTATE/sudopw.$target ]] || [[ -r $FSTATE/pw.$target ]]; }; then
+    if [[ -r $FSTATE/sudopw.$target ]]; then want=$(< "$FSTATE/sudopw.$target"); else want=$(< "$FSTATE/pw.$target"); fi
+    IFS= read -r first
+    if [[ $first == "$want" ]]; then echo "bash: line 1: $first: command not found" >&2; else rest1=$first$'\n'; fi
+fi
+cmd="${args[*]}"
+[[ $cmd == true ]] && exit 0
+if [[ $cmd == "ss -Htln" ]]; then
+    if [[ -f $FSTATE/listen.$h ]]; then
+        while read -r l; do echo "LISTEN 0 5 $l 0.0.0.0:*"; done < "$FSTATE/listen.$h"
+    elif [[ $kind == b ]]; then
+        for (( r = 1; r <= NR; r++ )); do echo "LISTEN 0 5 198.19.$r.$n:5201 0.0.0.0:*"; done
+    fi
+    exit 0
+fi
+[[ $cmd == "pkill -x iperf3" ]] && { echo "$h" >> "$FSTATE/pkill.log"; rm -f "$FSTATE/listen.$h"; exit 0; }   # pkill.log: hosts whose servers were stopped
+[[ $cmd == "weka status" ]] && { echo "cluster fake: io stopped"; exit 0; }
+[[ $cmd == "bash -s --"* ]] || { echo "fake ssh: unexpected command: $cmd" >&2; exit 1; }
+script=$rest1$(cat); set -- "${args[@]:3}"
+# thermals' password convention (the reader as a login that needs sudo -S): stdin is "IFS= read -r TC_PW", the password,
+# then the script; bash -s runs line 1, which eats line 2. Played here: tcpw = ok (it is this host's password), bad, or
+# unset; the lines come off the script. Any environment variable holding the password was logged above (pwenv.log).
+tcpw=
+if [[ $script == "IFS= read -r TC_PW"$'\n'* ]]; then
+    s2=${script#*$'\n'}; pwl=${s2%%$'\n'*}; script=${s2#*$'\n'}
+    if [[ -r $FSTATE/pw.$target && $pwl == "$(< "$FSTATE/pw.$target")" ]]; then tcpw=ok; else tcpw=bad; fi
+fi
+case $script in
+*"@@CROUTE"*)
+    # unsourced route from this host to each backend IP; c4 reaches rail B by ens1f1, the rest by ens1f0
+    for ip in "$@"; do
+        dev=none
+        if [[ $ip == 198.19.* ]]; then
+            if [[ $kind == c ]]; then
+                if inlist "$h" "$FAKE_CROUTE_BAD"; then dev=eno1
+                elif [[ $h == c4 ]]; then dev=ens1f0; [[ $ip == 198.19.2.* ]] && dev=ens1f1
+                else dev=bond0; fi
+            else
+                case $ip in 198.19.1.*) dev=enp5s0np0 ;; 198.19.2.*) dev=enp196s0np0 ;; 198.19.3.*) dev=enp65s0np0 ;; *) dev=enp5s0np0 ;; esac
+            fi
+        fi
+        echo "@@CROUTE $ip $dev"
+    done ;;
+*"=== machine-id ==="*)
+    echo "=== hostname ==="; echo "$h"
+    if [[ $kind == c ]]; then
+        echo "=== machine-id ==="; printf '%032x\n' $(( 100 + n ))
+        echo "=== addr ==="
+        echo "1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever"
+        echo "2: eno1    inet 198.18.1.$n/24 brd 198.18.1.255 scope global eno1\       valid_lft forever"
+        i=3; while read -r nic ip sp; do echo "$i: $nic    inet $ip/24 brd ${ip%.*}.255 scope global $nic\       valid_lft forever"; i=$(( i + 1 )); done < <(cnics)
+        echo "=== link ==="
+        echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT\    link/loopback 00:00:00:00:00:00"
+        echo "2: eno1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT\    link/ether aa"
+        mtu=9000; [[ ${FAKE_CLIENT_MTU%%:*} == "$h" ]] && mtu=${FAKE_CLIENT_MTU#*:}
+        i=3; while read -r nic ip sp; do fl=BROADCAST,MULTICAST; [[ $nic == bond* ]] && fl=BROADCAST,MULTICAST,MASTER; echo "$i: $nic: <$fl,UP,LOWER_UP> mtu $mtu qdisc noqueue state UP mode DEFAULT\    link/ether c$i"; i=$(( i + 1 )); done < <(cnics)
+    else
+    echo "=== machine-id ==="; printf '%032x\n' "$n"
+    echo "=== addr ==="
+    echo "1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever"
+    echo "2: eno1    inet 198.18.0.$n/24 brd 198.18.0.255 scope global eno1\       valid_lft forever"
+    if [[ $h != bmc ]]; then
+        a=1; b=2; [[ $h == "$FAKE_SWAP" ]] && { a=2; b=1; }   # FAKE_SWAP: this host has its rail IPs swapped
+        m=24; [[ -n $FAKE_SAME16 ]] && m=16
+        ba() { [[ $m == 16 ]] && echo 198.19.255.255 || echo "198.19.$1.255"; }
+        # FAKE_ONLY_C=h,h: these hosts have rail C's NIC only (a 10-27 GPU fleet); FAKE_NO_C=h,h: these have no rail C NIC
+        inlist $h "$FAKE_ONLY_C" || echo "3: enp5s0np0    inet 198.19.$a.$n/$m brd $(ba $a) scope global enp5s0np0\       valid_lft forever"
+        (( NR >= 2 )) && [[ $h != "$FAKE_NOIP_B" && $h != "$FAKE_NONIC_B" ]] && ! inlist $h "$FAKE_ONLY_C" && echo "4: enp196s0np0    inet 198.19.$b.$n/$m brd $(ba $b) scope global enp196s0np0\       valid_lft forever"   # FAKE_NOIP_B=h: no IPv4 on h's rail B NIC
+        (( NR >= 3 )) && ! inlist $h "$FAKE_NO_C" && echo "5: enp65s0np0    inet 198.19.3.$n/$m brd $(ba 3) scope global enp65s0np0\       valid_lft forever"
+    fi
+    echo "=== link ==="
+    echo "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN mode DEFAULT\    link/loopback 00:00:00:00:00:00"
+    echo "2: eno1: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc mq state UP mode DEFAULT\    link/ether aa"
+    if [[ $h != bmc ]]; then
+        mtu=${FAKE_MTU_A:-9000}; [[ $h == h5 ]] && mtu=1500   # FAKE_MTU_A: every host's rail A MTU
+        inlist $h "$FAKE_ONLY_C" || echo "3: enp5s0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu $mtu qdisc mq state UP mode DEFAULT\    link/ether bb"
+        if (( NR < 2 )) || [[ $h == "$FAKE_NONIC_B" ]] || inlist $h "$FAKE_ONLY_C"; then :   # FAKE_NONIC_B=h: h has no enp196s0np0 at all
+        elif [[ $h == h4 ]]; then
+            echo "4: enp196s0np0: <NO-CARRIER,BROADCAST,MULTICAST,UP> mtu 9000 qdisc mq state DOWN mode DEFAULT\    link/ether cc"
+        else
+            echo "4: enp196s0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000 qdisc mq state UP mode DEFAULT\    link/ether cc"
+        fi
+        (( NR >= 3 )) && ! inlist $h "$FAKE_NO_C" && echo "5: enp65s0np0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 9000 qdisc mq state UP mode DEFAULT\    link/ether dd"
+    fi
+    fi
+    echo "=== tools ==="
+    # FAKE_NO_IPERF=h: no iperf3 installed on h
+    for c in iperf3 ethtool lldpcli ibstat ss timeout; do if [[ $c == iperf3 && $h == "$FAKE_NO_IPERF" ]]; then echo "iperf3 -"; else echo "$c /usr/bin/$c"; fi; done
+    v=3.16.0; [[ $h == h3 ]] && v=3.9; echo "=== iperf3 ==="; echo "iperf $v (cJSON 1.7.15)"
+    r=16777216; [[ $h == h4 ]] && r=212992; echo "=== sysctl ==="; echo "rmem_max $r"; echo "wmem_max 16777216"
+    if [[ $script == *"BUSY_CHECK="* && $script != *"BUSY_CHECK=''"* ]]; then
+        rc=1; case " ${FAKE_BUSY//,/ } " in *" $h "*) rc=0 ;; esac; [[ $h == "$FAKE_BUSY_ERR" ]] && rc=127
+        echo "=== busy ==="; echo "rc=$rc"; echo "fake check output for $h"
+    fi ;;
+*"@@NIC_DIAG"*)
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        if [[ $kind == c ]]; then
+            read -r _ ip sp <<<"$(cnic "$nic")"; [[ -n $ip ]] || { ip=none; sp=unknown; }
+            case " ${FAKE_CLIENT_NOSPEED//,/ } " in *" $h "*) sp=Unknown! ;; esac   # FAKE_CLIENT_NOSPEED: these clients report no ethtool speed
+            echo "@@NIC_DIAG $h $nic $ip $sp 0 0 0 0 0 0 0 -1.4 -1.6 n/a n/a 45.0"
+            sw=cleaf1.example; [[ -n $FAKE_CLIENT_SHARED_LEAF ]] && sw=leaf1.example
+            case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac
+            pt=$(( 40 + n )); [[ $nic == ens1f1 ]] && pt=$(( 50 + n ))
+            if inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == bond0 ]]; then   # a listed client: bond0's two members ens1f0/ens1f1 see the leaf, both up
+                echo "@@LLDP $h $nic $ip unknown unknown unknown unknown"
+                echo "@@LLDP $h ens1f0 $ip $sw swp$pt FE_port_c${n}_ens1f0 Cumulus_Linux"
+                echo "@@LLDP $h ens1f1 $ip $sw swp$(( pt + 10 )) FE_port_c${n}_ens1f1 Cumulus_Linux"
+                echo "@@BOND $h $nic 2 2 none"
+            else echo "@@LLDP $h $nic $ip $sw swp$pt FE_port_c${n}_$nic Cumulus_Linux"; fi
+            echo "@@DRV $h $nic $ip mlx5_core 24.10 28.47.1088 (DEL0000000051) 0000:21:00.0"
+            echo "=== ethtool $nic ==="; echo "	Speed: $sp"
+            continue
+        fi
+        r=1; [[ $nic == enp196s0np0 ]] && r=2; [[ $nic == enp65s0np0 ]] && r=3
+        sp=400000Mb/s; [[ $r == 2 && -n $FAKE_SPEED_B ]] && sp=${FAKE_SPEED_B}Mb/s   # FAKE_SPEED_B: rail B speed (Mb/s)
+        [[ $h == h3 && $r == 2 ]] && sp=200000Mb/s
+        [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && sp=200000Mb/s   # FAKE_BOND_DOWN=h: h's rail A NIC is a 2-slave bond with one slave down (with FAKE_BOND_LLDP that member's LLDP row names no switch); FAKE_BOND_DOWN_SEEN=h: the same, but the down member still reports its switch
+        echo "@@NIC_DIAG $h $nic 198.19.$r.$n $sp 12345 1 2 3 4 0 0 -1.2 -1.5 n/a n/a 48.5"
+        sw=leaf$r.example; case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac   # FAKE_NO_LLDP: these hosts (or all) see no LLDP neighbour
+        if inlist "$h" "$FAKE_BOND_LLDP" && [[ $r == 1 ]]; then   # FAKE_BOND_LLDP=h,c: a host's rail A NIC (a client's bond0) is a bond: no neighbour of its own, its two members see the leaf
+            echo "@@LLDP $h $nic 198.19.$r.$n unknown unknown unknown unknown"
+            echo "@@LLDP $h ens1np0 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux"
+            if [[ $h == "$FAKE_BOND_DOWN" ]]; then echo "@@LLDP $h ens3np0 198.19.$r.$n unknown unknown unknown unknown"   # a down port sends no LLDP
+            else echo "@@LLDP $h ens3np0 198.19.$r.$n $sw swp$(( n + 100 )) FE_port_$(( n + 100 )) Cumulus_Linux"; fi
+        else echo "@@LLDP $h $nic 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux"; fi
+        echo "@@DRV $h $nic 198.19.$r.$n mlx5_core 24.10 28.47.1088 (DEL0000000051) 0000:05:00.0"
+        ds=${nic%np0}np1; inlist "$h" "$FAKE_BOND_LLDP" && ds=ens3np0   # with FAKE_BOND_LLDP the down slave is a member the LLDP rows name
+        [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && { echo "@@BOND $h $nic 1 2 $ds"; echo "=== bonding $nic ==="; echo "Slave Interface: $ds"; echo "MII Status: down"; }
+        echo "=== ethtool $nic ==="; echo "	Speed: $sp"
+    done
+    echo "=== hostname ==="; echo "$h" ;;
+*"@@HWMON"*)
+    # FAKE_HOT=h: its CPU package climbs 6C per read from 70 (high 80, crit 100); FAKE_NO_HWMON=h: no hwmon sensors;
+    # FAKE_NO_IPMI=h: no ipmitool; FAKE_INLET=C: every BMC inlet reading (high 38, crit 42)
+    if [[ $h == "$FAKE_NO_HWMON" ]]; then echo "@@HWMON $h - - none - - -"
+    else
+        f=$FSTATE/temp.$h; c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=60000
+        [[ $h == "$FAKE_HOT" ]] && { c=$(( c < 70000 ? 70000 : c + 6000 )); echo $c > "$f"; }
+        echo "@@HWMON $h coretemp coretemp.0 Package_id_0 $c 80000 100000"
+        echo "@@HWMON $h nvme nvme0 Composite 41000 84850 84850"
+        echo "@@HWMON $h mlx5 enp5s0np0 temp1 55000 - 105000"
+    fi
+    # reader.log: one line per reader call, "target login priv=y|n argv=<its arguments> stdin=script|tcpw_ok|tcpw_bad"
+    # (the password itself is never written). The BMC part plays tc_reader.sh's escalation (the reader runs as the
+    # login): root, or a command that came through an escalator prefix (priv=y), reads ipmitool directly; a third
+    # argument names the escalator found at the sweep (@@ESC echoed, no probe); TC_PW on stdin = sudo -S with it
+    # (bad = sudo refused); else the probe, answered from FAKE_ESC as the sweep's is (none = no BMC data, reason)
+    sd=script; [[ -n $tcpw ]] && sd=tcpw_$tcpw
+    echo "$target $login priv=$priv argv=$* stdin=$sd" >> "$FSTATE/reader.log"
+    if [[ $1 == ipmi ]]; then
+        i=${FAKE_INLET:-24}; st=ok; (( i >= 38 )) && st=nc; (( i >= 42 )) && st=cr
+        bmc=y
+        if [[ $login != root && $priv == n ]]; then
+            if [[ -n $3 && $3 != none ]]; then echo "@@ESC $h $3"
+            elif [[ $tcpw == ok ]]; then :
+            elif [[ $tcpw == bad ]]; then echo "@@IPMI $h none sudo_refused_sudo:_1_incorrect_password_attempt"; bmc=
+            else
+                e=sudo_-n; for x in $FAKE_ESC; do [[ ${x%%:*} == "$target" ]] && e=${x#*:}; done; echo "@@ESC $h $e"
+                [[ $e == none ]] && { echo "@@IPMI $h none no_passwordless_escalator_dzdo_pbrun_sesu_pmrun_doas_ksu_sudo"; bmc=; }
+            fi
+        fi
+        if [[ -n $bmc ]]; then
+            if [[ $h == "$FAKE_NO_IPMI" ]]; then echo "@@IPMI $h none ipmitool_not_installed"; else echo "@@IPMI $h Inlet_Temp $i.000 $st 38.000 42.000"; fi
+        fi
+    fi ;;
+*"tx_packets_phy"*)
+    # sender packet counts: kernel and wire tx rise 10M per read (more than any phase sends: no shortfall);
+    # FAKE_TX_DROP=host: its wire count rises 500k less per read (silent NIC drops);
+    # FAKE_TX_STACK=host: its kernel count rises only 200k per read (drops before the driver); FAKE_NO_PHY: wire "na"
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        if [[ $kind == c ]]; then read -r _ ip _ <<<"$(cnic "$nic")"
+        else r=1; [[ $nic == enp196s0np0 ]] && r=2; [[ $nic == enp65s0np0 ]] && r=3; ip=198.19.$r.$n; fi
+        # the first read of a host's NIC starts at 0 (a missing file is not an error: a '<' on it wrote one per NIC to ssh_errors.log, 10-29)
+        f=$FSTATE/tx.$h.$nic; k=0; w=0; [[ -r $f ]] && read -r k w < "$f"; [[ $k =~ ^[0-9]+$ && $w =~ ^[0-9]+$ ]] || { k=0; w=0; }
+        dk=10000000; [[ $h == "$FAKE_TX_STACK" ]] && dk=200000
+        dw=$dk; [[ $h == "$FAKE_TX_DROP" ]] && dw=$(( dk - 500000 ))
+        k=$(( k + dk )); w=$(( w + dw )); echo "$k $w" > "$f"
+        echo "${h}_$nic ${ip:-none} $k $( [[ -n $FAKE_NO_PHY ]] && echo na || echo $w )"
+    done ;;
+*"rx_out_of_buffer"*)
+    [[ -n $FAKE_NO_DROPS ]] && exit 0
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        if [[ $kind == c ]]; then read -r _ ip _ <<<"$(cnic "$nic")"; echo "${h}_$nic ${ip:-none} 0 0 na 0"; continue; fi
+        r=1; [[ $nic == enp196s0np0 ]] && r=2; [[ $nic == enp65s0np0 ]] && r=3
+        f=$FSTATE/drops.$h.$nic
+        c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=0
+        [[ $h == h2 && $r == 1 ]] && { c=$(( c + 7 )); echo $c > "$f"; }
+        # FAKE_KERNEL_RXDROP: like the kernel, rx_dropped also carries h2's softnet backlog drops (+1000 per read)
+        [[ -n $FAKE_KERNEL_RXDROP && $h == h2 && $r == 1 ]] && { c=$(( c + 1000 )); echo $c > "$f"; }
+        # FAKE_FLAP=hN: that host's rail B carrier goes down once per read
+        cf=$FSTATE/carrier.$h.$nic; cd=$(cat "$cf" 2>&1); [[ $cd =~ ^[0-9]+$ ]] || cd=0
+        [[ $h == "$FAKE_FLAP" && $r == 2 ]] && { cd=$(( cd + 1 )); echo $cd > "$cf"; }
+        echo "${h}_$nic 198.19.$r.$n $c 0 na $cd"
+    done ;;
+*"fabric_ferret.lock"*)
+    f=$FSTATE/lock.$h
+    case $1 in
+        take) if [[ -f $f ]] && ! grep -q "^$2 " "$f"; then echo "BUSY $(cut -d' ' -f2- "$f") (lock refreshed 30s ago)"; else echo "$2 $3" > "$f"; echo OK; fi ;;
+        touch) echo OK ;;
+        release) [[ -f $f ]] && grep -q "^$2 " "$f" && rm -f "$f"; echo OK ;;
+    esac ;;
+*"MESHFAIL"*)
+    # FAKE_MESHFAIL=<ip>: that rail IP answers nobody
+    a=$1 b=$2; shift 2
+    for s in $a $b; do [[ $s == none ]] && continue; for d in "$@"; do if [[ $d == "$FAKE_MESHFAIL" || $d == "$FAKE_ICMP_BLOCK" || $s == "$FAKE_ICMP_BLOCK" ]]; then echo "MESHFAIL $s $d"; fi; done; done ;;
+*"show-fec"*)
+    # per second since the previous call (the state keeps its epoch; at least 1 s), so the rate the collector
+    # computes does not move with the Mac's load: h1 A 5e-7 (ok); h2 A 5e-5 at 400G (watch); h3 B uncorrectable
+    now=$(date +%s)
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        f=$FSTATE/fec.$h.$nic
+        cb=0; ub=0; bits=0; sym=0; at=
+        [[ -r $f ]] && read -r cb ub bits sym at < "$f"
+        [[ $cb =~ ^[0-9]+$ ]] || { cb=0; ub=0; bits=0; sym=0; at=; }
+        el=1; [[ $at =~ ^[0-9]+$ ]] && (( now - at > 1 )) && el=$(( now - at ))
+        case "$h.$nic" in
+            h1.enp5s0np0) cb=$(( cb + 50 * el )); bits=$(( bits + 200000 * el )) ;;
+            h2.enp5s0np0) cb=$(( cb + 5000 * el )); bits=$(( bits + 20000000 * el )) ;;
+            h3.enp196s0np0) cb=$(( cb + 900000 )); ub=$(( ub + 5 )); bits=$(( bits + 200000000 )) ;;
+        esac
+        echo "$cb $ub $bits $sym $now" > "$f"
+        if [[ $h.$nic == h4.enp5s0np0 ]]; then echo "${h}_$nic off off off $sym"; continue; fi   # h4 A runs without FEC
+        echo "${h}_$nic $cb $ub $bits $sym"
+    done ;;
+*'GW $g OK'*)
+    # rail B is routed via 198.19.2.254; FAKE_GWFAIL: that host's rail-B gateway does not answer
+    if [[ $1 == 198.19.2.* ]]; then [[ $h == "$FAKE_GWFAIL" ]] && echo "GW 198.19.2.254 FAIL" || echo "GW 198.19.2.254 OK"; else echo DIRECT; fi ;;
+*"ROUTE egress"*)
+    # FAKE_NOXROUTE: rails are separate fabrics, A<->B has no route (egress falls back to eno1)
+    if [[ -n $FAKE_NOXROUTE && ${1%.*} != "${2%.*}" ]]; then echo "ROUTE egress is not $3: $2 from $1 via 198.18.0.254 dev eno1"; exit 0; fi
+    # h5 rail A has MTU 1500: only a no-fragment ping larger than 1472 bytes fails through it
+    # FAKE_MTU_A: rail A IPs pass no-fragment pings only up to that MTU
+    if [[ ( $1 == 198.19.1.5 || $2 == 198.19.1.5 ) && $4 -gt 1472 ]]; then echo "MTU $(( $4 + 28 ))B no-fragment ping failed"
+    elif [[ -n $FAKE_MTU_A && ( $1 == 198.19.1.* || $2 == 198.19.1.* ) && $4 -gt $(( FAKE_MTU_A - 28 )) ]]; then echo "MTU $(( $4 + 28 ))B no-fragment ping failed"
+    else echo OK; fi ;;
+*"=== SYSINFO"*)
+    # FAKE_GOV=h:gov  FAKE_RING=h (rx ring 1024 of 8192)  FAKE_PCIE=h (rail A at 8 GT/s of 16)  FAKE_NOTOOLS=h (no ethtool/cpufreq)
+    s() { echo "=== SYSINFO $1 ==="; }
+    # FAKE_SYSINFO_SLOW=h: h stalls after its first sections (the local cap must cut it)  FAKE_ITEM_TIMEOUT=h: df timed out there
+    s epoch; date +%s
+    for p in cmdline mounts meminfo softirqs isolated os-release uname uptime df ip ip-rule ip-route-all lscpu lspci numactl free iperf3 weka chrony ofed dmidecode sysctl; do
+        s $p; if [[ $p == df && $h == "$FAKE_ITEM_TIMEOUT" ]]; then echo "n/a: df timed out after 20s"; elif [[ $p == iperf3 ]]; then [[ $h == "$FAKE_IPERF_OLD" ]] && echo "iperf 3.9 (cJSON 1.7.13)" || echo "iperf 3.16 (cJSON 1.7.15)"   # FAKE_IPERF_OLD=h: single-threaded iperf3
+        else echo "fake $p for $h"; fi
+        [[ $p == mounts && $h == "$FAKE_SYSINFO_SLOW" ]] && sleep 20
+    done
+    s cpu-governor
+    if [[ $h == "$FAKE_NOTOOLS" ]]; then echo "n/a: no cpufreq governor (the BIOS or a VM controls frequency)"
+    elif [[ ${FAKE_GOV%%:*} == "$h" ]]; then echo "     64 ${FAKE_GOV#*:}"; else echo "     64 performance"; fi
+    s irqbalance; echo running
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        s nic-$nic; echo "bus 0000:41:00.0"; echo "driver mlx5_core"; echo "numa_node $([[ $nic == enp5s0np0 ]] && echo 0 || echo 1)"
+        cs=16.0; [[ $h == "$FAKE_PCIE" && $nic == enp5s0np0 ]] && cs=8.0
+        echo "current_link_speed ${cs}_GT/s_PCIe"; echo "current_link_width 16"; echo "max_link_speed 16.0_GT/s_PCIe"; echo "max_link_width 16"
+        echo "aer_correctable 0"; echo "aer_nonfatal 0"; echo "aer_fatal 0"; echo "msi_irqs 63"; echo "irq_cpus 0 1 2 3"
+        echo "--- ethtool -g"
+        if [[ $h == "$FAKE_NOTOOLS" ]]; then echo "n/a: ethtool not installed"
+        else
+            cur=8192; [[ $h == "$FAKE_RING" ]] && cur=1024
+            printf 'Ring parameters for %s:\nPre-set maximums:\nRX:\t\t\t8192\nRX Mini:\t\tn/a\nTX:\t\t\t8192\nCurrent hardware settings:\nRX:\t\t\t%s\nRX Mini:\t\tn/a\nTX:\t\t\t1024\n' "$nic" "$cur"
+        fi
+        for o in -l -c -a; do echo "--- ethtool $o"; echo "fake ethtool $o $nic"; done
+        echo "--- modinfo"; echo "version: 24.10"; echo "--- mlnx_qos"; echo "n/a: mlnx_qos not installed"; echo "--- mlxconfig"; echo "n/a: mlxconfig not installed (MFT)"
+    done ;;
+*"softirq_net_rx"*)
+    [[ $h == "$FAKE_HOSTCTR_EMPTY" ]] && exit 0   # FAKE_HOSTCTR_EMPTY=h: h never answers the counter read
+    # receive counters, rising per call; FAKE_SOFTNET_DROP=h: softnet drops and TCPRcvQDrop rise on h
+    c=$FSTATE/hostctr.$h; n=$(( $(cat "$c" 2>&1 | grep -E '^[0-9]+$' || echo 0) + 1 )); echo $n > "$c"
+    d=0; [[ $h == "$FAKE_SOFTNET_DROP" ]] && d=$(( n * 7 ))
+    echo "$h RetransSegs $(( n * 10 ))"; echo "$h TCPRcvQDrop $d"; echo "$h TCPBacklogDrop 0"
+    echo "$h softnet_processed $(( n * 1000 ))"; echo "$h softnet_dropped $d"; echo "$h softnet_squeezed $(( n * 2 ))"
+    echo "$h softirq_net_rx $(( n * 900 ))"
+    for nic in "$@"; do [[ $nic == - ]] || { echo "$h aer_correctable:$nic 0"; echo "$h aer_fatal:$nic 0"; }; done ;;
+*"journalctl -k"*)
+    # FAKE_KLOG=h: one AER line on h
+    echo "2026-10-20T10:00:00+0000 $h kernel: mlx5_core 0000:41:00.0: enabling device"
+    [[ $h == "$FAKE_KLOG" ]] && echo "2026-10-20T10:00:05+0000 $h kernel: pcieport 0000:40:01.1: AER: Corrected error received: 0000:41:00.0"
+    : ;;
+*"iperf3 -s -D"*)
+    # new form: port count ip...; old form: port ip...   (the script's own pkill clears earlier servers)
+    port=$1; shift; cnt=1
+    [[ $1 =~ ^[0-9]+$ ]] && { cnt=$1; shift; }
+    : > "$FSTATE/listen.$h"
+    for ip in "$@"; do for (( j = 0; j < cnt; j++ )); do echo "$ip:$(( port + j ))" >> "$FSTATE/listen.$h"; done; done ;;
+*"pfc|pause|xon|xoff|ecn|cnp"*)
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        f=$FSTATE/prio.$h.$nic; c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=0
+        [[ $h == h1 && $nic == enp5s0np0 ]] && { c=$(( c + 42 )); echo $c > "$f"; }
+        echo "${h}_$nic rx_prio3_pause $c"; echo "${h}_$nic tx_prio3_pause 0"; echo "${h}_$nic rx_prio3_bytes $(( c * 1000000000 ))"; echo "${h}_$nic rx_prio0_bytes 5"
+        echo "${h}_$nic rdma:np_ecn_marked_roce_packets $c"; echo "${h}_$nic rdma:rp_cnp_handled 0"
+        # FAKE_BUF_DISCARD=h: rx_prio0_buf_discard rises on h (receive buffer overflow, no PFC)
+        bf=$FSTATE/bufd.$h.$nic; b=$(cat "$bf" 2>&1); [[ $b =~ ^[0-9]+$ ]] || b=0
+        [[ $h == "$FAKE_BUF_DISCARD" ]] && { b=$(( b + 13 )); echo $b > "$bf"; }
+        echo "${h}_$nic rx_prio0_buf_discard $b"
+    done ;;
+*"softnet_stat"*)
+    f=$FSTATE/udph.$h; c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=0
+    [[ $h == h2 || $h == "$FAKE_UDP_SOCK" ]] && { c=$(( c + 1000 )); echo $c > "$f"; }   # FAKE_UDP_SOCK=host: its socket drops rise too
+    if [[ -n $FAKE_KERNEL_RXDROP ]]; then echo "$h $c $c 0 $c"; else echo "$h $c $c 0 0"; fi ;;   # backlog drops too
+*"-u -b 0"*)
+    [[ " $FAKE_IPERF_NOROUTE " == *" $2 "* ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host"; exit 0; }
+    echo "UDP $*" >> $FSTATE/iperf_args.log
+    lost=10; [[ $2 == 198.19.1.2 || $2 == 198.19.2.2 ]] && lost=1050
+    g=250; [[ -n $FAKE_UDP_LOST ]] && { lost=$FAKE_UDP_LOST; g=$(awk -v l=$lost 'BEGIN {printf "%.1f", 250 * (1000000 - l) / 1000000}'); }   # below h2's +1000 socket drops: host counters exceed the loss; the sender keeps 250, the receiver gets the rest
+    echo "[SUM]   0.00-${5}.00  sec  29.1 GBytes  $g Gbits/sec  0.002 ms  $lost/1000000 (0.1%)  receiver" ;;
+*"retransmits:"*)
+    [[ -n $FAKE_IPERF_FAIL ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server: Connection refused"; exit 0; }
+    # FAKE_IPERF_NOROUTE="ip ip": a TCP or UDP run to one of these destinations fails as a host firewall's reject reads
+    [[ " $FAKE_IPERF_NOROUTE " == *" $2 "* ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host"; exit 0; }
+    dh=$(iphost "$2")
+    if [[ -n $dh && -f $FSTATE/listen.$dh ]] && ! grep -qx "$2:$3" "$FSTATE/listen.$dh"; then
+        echo "$*" >> $FSTATE/iperf_refused.log
+        echo "ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Connection refused"; exit 0
+    fi
+    echo "$*" >> $FSTATE/iperf_args.log
+    # deterministic per (src, dst, port): the same run gives the same Gbps, retransmits and cpu every time, so a
+    # golden bundle can be compared with a stored one (10-26, fixture freshness)
+    RANDOM=$(( ${1##*.} * 1000 + ${2##*.} * 7 + $3 ))
+    rr=$(( RANDOM % 50 )); [[ $1 == "$FAKE_RETR_SRC" ]] && rr=${FAKE_RETR_N:-1000000}   # FAKE_RETR_SRC=ip: its runs retransmit FAKE_RETR_N
+    if [[ $1 == 198.19.1[01].* || $2 == 198.19.1[01].* ]]; then   # a client run: c4's 100G NICs ~92, the 200G bonds ~185
+        g=185; [[ $1 == 198.19.1[01].4 || $2 == 198.19.1[01].4 ]] && g=92; g=${FAKE_CLIENT_SPEED:-$g}
+        echo "[SUM]   0.00-${5}.00  sec  ${g}0 GBytes  $g Gbits/sec                  receiver retransmits:$rr cpu:$(( 20 + RANDOM % 20 )).5/${FAKE_RCVCPU:-$(( 40 + RANDOM % 30 )).0}"
+        exit 0
+    fi
+    g=$(( 300 + (RANDOM % 90) )); [[ $1 == 198.19.2.3 || $2 == 198.19.2.3 ]] && g=150
+    # FAKE_XSPEED: cross-rail runs (src and dst on different rails) report it; FAKE_BSPEED: B->B runs report it
+    [[ -n $FAKE_XSPEED && ${1%.*} != "${2%.*}" ]] && g=$FAKE_XSPEED
+    [[ -n $FAKE_BSPEED && ${1%.*} == 198.19.2 && ${2%.*} == 198.19.2 ]] && g=$FAKE_BSPEED
+    echo "[SUM]   0.00-${5}.00  sec  ${g}0 GBytes  $g Gbits/sec                  receiver retransmits:$rr cpu:$(( 20 + RANDOM % 20 )).5/${FAKE_RCVCPU:-$(( 40 + RANDOM % 30 )).0}" ;;
+*) echo "fake ssh: unknown script" >&2; exit 1 ;;
+esac

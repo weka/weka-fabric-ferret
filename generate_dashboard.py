@@ -97,6 +97,13 @@ def generate_html(data, output_path):
     # Per-IP stats (each IP's throughput regardless of src/dst role; same-rail runs unless it has none)
     ip_stats, _ = _ip_speeds(results, data.get('ip_rail', {}))
     ip_avgs = {ip: sum(v)/len(v) for ip, v in ip_stats.items()}
+    # "Worst run" in the panels: the slowest single run the NIC took part in, same-rail or cross (a client NIC: its
+    # client runs). The same-rail mean above still colours and sizes the map; it is never labelled "Worst run"
+    worst_ip = {}
+    for ip, g in [(ip, r['gbps']) for r in results for ip in (r['src'], r['dst'])] + \
+                 [(f['client_ip'], f['gbps']) for f in (data.get('clients') or {}).get('flows', [])]:
+        worst_ip[ip] = min(worst_ip.get(ip, g), g)
+    worst = lambda ip, fallback: round(worst_ip[ip], 1) if ip in worst_ip else fallback
     slow_ip_count = sum(1 for ip, v in ip_avgs.items() if v < tip(ip, 'F'))
 
     # Per-iteration stats for box plot
@@ -304,7 +311,7 @@ def generate_html(data, output_path):
 
     def panel(kind, host, role, n, l, **extra):
         """What a click on a link shows: the host side (the host's names, the worst run) and the switch side (LLDP)."""
-        return {'kind': kind, 'host': host, 'role': role, 'nic': n['nic'], 'ip': n['ip'], 'gbps': n['avg_gbps'],
+        return {'kind': kind, 'host': host, 'role': role, 'nic': n['nic'], 'ip': n['ip'], 'gbps': worst(n['ip'], n['avg_gbps']),
                 'leaf': l['switch'], 'port_id': l['port_id'], 'port_desc': l['port_desc'], 'sys_desc': l['sys_desc'],
                 'down': n['ip'] in data['down_ips'], **extra}
 
@@ -365,8 +372,8 @@ def generate_html(data, output_path):
 
     def host_panel(host, role, nics, status=None):
         """What a tap on a host shows: its NICs (the leaf from LLDP, bond members), the worst run, its heat."""
-        return {'kind': 'host', 'host': host, 'role': role, 'status': status, 'worst': min((n['avg_gbps'] for n in nics), default=0),
-                'nics': [{'nic': n['nic'], 'ip': n['ip'], 'leaf': leaf_of(n), 'gbps': n['avg_gbps'], 'down': n['ip'] in data['down_ips'],
+        return {'kind': 'host', 'host': host, 'role': role, 'status': status, 'worst': min((worst(n['ip'], n['avg_gbps']) for n in nics), default=0),
+                'nics': [{'nic': n['nic'], 'ip': n['ip'], 'leaf': leaf_of(n), 'gbps': worst(n['ip'], n['avg_gbps']), 'down': n['ip'] in data['down_ips'],
                           'status': cnic[n['ip']]['status'] if n['ip'] in cnic else '',
                           'members': [{'nic': m['nic'], 'leaf': leaf_of(m), 'down': m['nic'] in n['bond']['down']} for m in n['members']]} for n in nics],
                 'temps': temps_of(host)}
@@ -375,11 +382,19 @@ def generate_html(data, output_path):
 
     def note_leaf(host, n):
         for l in (n['members'] or [n]):
-            on_leaf[l['switch']].append({'host': host, 'nic': l['nic'], 'ip': n['ip'], 'gbps': n['avg_gbps']})
+            on_leaf[l['switch']].append({'host': host, 'nic': l['nic'], 'ip': n['ip'], 'gbps': worst(n['ip'], n['avg_gbps'])})
 
     # clients: own node type, colored by their judged status (a client line is not the rail line)
     ccol = {'OK': '#4ecca3', 'SLOW': '#ffc107', 'CRITICAL': '#e94560'}
-    hot_hosts = {t['Host'] for t in data.get('temps', []) if t['Flag'].split('+')[0] in ('crit', 'high')}   # heat before fabric: these keep their label
+    hot_hosts = set(_hot(data))   # heat before fabric: these keep their label and wear the ring
+
+    def ring(node):
+        """a hot host: an orange ring (#ff7a1a, 4 px) over its speed colour, kept when selected or hovered"""
+        if node['hot']:
+            c = {'background': node['color']['background'], 'border': '#ff7a1a'}
+            node['color'] = {**c, 'highlight': dict(c), 'hover': dict(c)}
+            node['borderWidth'] = 4
+        return node
     for host in [h for h, ns in host_nics.items() if all(n['ip'] in cnic for n in ns)]:
         nics = host_nics.pop(host)
         st = max((cnic[n['ip']]['status'] for n in nics), key=lambda s: {'OK': 0, 'SLOW': 1, 'CRITICAL': 2}.get(s, 3))
@@ -390,6 +405,7 @@ def generate_html(data, output_path):
             'title': f'{host} (client, {st}, avg {avg:.0f} Gbps)' + ''.join(nic_line(n, f" ({cnic[n['ip']]['status']})") for n in nics),
             'hostAvg': round(avg, 1), 'isDown': st not in ccol, 'hot': host in hot_hosts, 'panel': host_panel(host, 'client', nics, st),
         }
+        ring(topo_nodes[host])
         for n in nics:
             note_leaf(host, n)
             nic_edges(host, 'client', n, ccol.get(cnic[n['ip']]['status'], '#666666'), [6, 4])
@@ -405,6 +421,7 @@ def generate_html(data, output_path):
             'hostAvg': round(host_avg, 1),
             'isDown': is_down, 'hot': host in hot_hosts, 'panel': host_panel(host, 'backend', nics),
         }
+        ring(topo_nodes[host])
         for n in nics:
             edge_color = '#4ecca3' if n['avg_gbps'] >= G else '#0dcaf0' if n['avg_gbps'] >= F else '#ffc107' if n['avg_gbps'] >= S else '#e94560'
             if n['ip'] in data['down_ips']:
@@ -420,6 +437,7 @@ def generate_html(data, output_path):
         topo_nodes[sid]['panel'] = {'kind': 'spine', 'spine': topo_nodes[sid]['label'], 'spines': ns}
 
     leg_clients = ' &nbsp; Clients: <b id="legClients">0</b>' if cnic else ''
+    n_hot = sum(1 for n in topo_nodes.values() if n.get('hot'))   # hosts on the map with the ring
     topo_nodes_json = json.dumps(list(topo_nodes.values()))
     topo_edges_json = json.dumps(topo_edges)
 
@@ -649,16 +667,95 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
     clients_html = _clients_html(data)
     n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
     checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html) if c]
-    tab = lambda tid, text: f'<li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#{tid}">{text}</a></li>'
+    n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html)
+
+    # Where to look first, above the tabs: the findings of every kind, worst first (the _w_* functions)
+    slow, hot = _slow(nic_rows), _hot(data)
+    leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else 'no switch seen') for ns in host_nics.values() for n in ns}
+    ipr_ = data.get('ip_rail', {})
+    xr = [r for r in data['iperf_results'] if ipr_.get(r['src']) and ipr_.get(r['dst']) and _cross(r, ipr_)]
+    xs = [r for r in xr if r['gbps'] < tpath(r, 'F')]
+    colname = {k: v.split('<small>')[0] for k, v in col_head.items()}
+    run_checks = [('preflight', pf_bad, 'preflight findings'), ('UDP', udp_beyond, 'datagrams lost beyond expected'),
+                  ('runs with no result', len(errs), 'runs'), ('not tested', len(data['not_tested']), 'rows')]
+    findings = _where([_w_heat(slow, hot), _w_uplinks(busy), _w_slow(slow, hot, leaf_ip, colname), _w_cross(xr, xs, ip_to_host),
+                       _w_drops(data['packet_drops'], slow), _w_heatonly(data, slow, bool(temps_html)),
+                       _w_checks(run_checks) if checks else []])
+    where_html = _where_html(findings)
+
+    # the drawer's NIC and leaf panels, built here so the page needs no second copy of a rule: per NIC its runs
+    # (slowest 8 and a count of the rest), drops, columns and host heat; per leaf its rails and runs to the other leaves
+    drops_ip = {d['ip']: d['rx_drop'] + d['tx_drop'] + d['rx_oob'] for d in data['packet_drops']}
+    members_ip = {n['ip']: [{'nic': m['nic'], 'leaf': m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen',
+                             'down': m['nic'] in n['bond']['down']} for m in n['members']]
+                  for ns in host_nics.values() for n in ns if n['members']}
+    runs_ip = defaultdict(list)
+    for r in data['iperf_results']:
+        for me, peer, way in ((r['src'], r['dst'], '→'), (r['dst'], r['src'], '←')):
+            runs_ip[me].append({'dir': way, 'peer': peer, 'host': ip_to_host.get(peer, '-'), 'leaf': leaf_ip.get(peer, '-'),
+                                'gbps': round(r['gbps'], 1), 'retr': r.get('retransmits', 0)})
+    topo_nic = {}
+    for x in nic_rows:
+        if x['ip'] in ('-', ''):
+            continue
+        rs = sorted(runs_ip.get(x['ip'], []), key=lambda r: r['gbps'])
+        topo_nic[x['ip']] = {'host': x['host'], 'nic': x['nic'], 'ip': x['ip'], 'role': x['role'], 'rail': x['rail'], 'status': x['status'],
+                             'leaf': leaf_ip.get(x['ip'], '-'), 'members': members_ip.get(x['ip'], []), 'retr': x['retr'],
+                             'drops': drops_ip.get(x['ip']), 'cols': [[colname.get(k, k), v['g'], v['lv']] for k, v in x['cols'].items() if v],
+                             'temps': temps_of(x['host']), 'runs': rs[:8], 'more': max(0, len(rs) - 8),
+                             'others': [[y['nic'], y['ip'], y['status']] for y in nic_rows if y['host'] == x['host'] and y['ip'] != x['ip']]}
+    leaf_runs = defaultdict(lambda: defaultdict(list))
+    for r in data['iperf_results']:
+        a, b = leaf_ip.get(r['src']), leaf_ip.get(r['dst'])
+        for lf, other in ((a, b), (b, a)):
+            if lf and other:
+                leaf_runs[lf]['inside ' + lf if other == lf else lf + ' ↔ ' + other].append(r['gbps'])
+    med = lambda v: sorted(v)[len(v) // 2] if len(v) % 2 else sum(sorted(v)[len(v) // 2 - 1:len(v) // 2 + 1]) / 2
+    topo_leaf = {lf: {'rails': '+'.join(sorted({x['rail'] for x in nic_rows if leaf_ip.get(x['ip']) == lf and x['rail'] not in ('-', '')})) or '-',
+                      'paths': [[k, round(med(v), 1), round(min(v), 1), len(v)] for k, v in sorted(paths.items())]}
+                 for lf, paths in leaf_runs.items()}
+
+    # each tab's dot from the same findings (_tab_states); a coloured number only where the tab counts faults
+    tstate = _tab_states(slow, hot, findings, temps_flagged, temps_bad, n_checks, nics_with_drops)
+    dot = lambda tid: (f' <span class="tab-dot" style="background:{tstate[tid]};" title="{TAB_DOT_TITLE[tstate[tid]]}"></span>'
+                       if tstate.get(tid) else '')
+    tab = lambda tid, text: f'<li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#{tid}">{text}{dot(tid)}</a></li>'
     pane = lambda tid, body: f'<div class="tab-pane fade" id="{tid}">\n{body}\n</div>'
     tcls = 'stat-bad' if temps_bad else 'stat-warn' if temps_flagged else ''
     temps_tab = tab('tab-temps', f'Temperatures (<span class="{tcls}">{temps_flagged}</span> flagged)') if temps_html else ''
     temps_pane = pane('tab-temps', temps_html) if temps_html else ''
     clients_tab = tab('tab-clients', f'Clients ({n_clients})') if clients_html else ''
     clients_pane = pane('tab-clients', clients_html) if clients_html else ''
-    n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html)
     checks_tab = tab('tab-checks', 'Run checks' + (f' (<span class="stat-bad">{n_checks}</span>)' if n_checks else '')) if checks else ''
     checks_pane = pane('tab-checks', ''.join(checks)) if checks else ''
+    repair = _repair(slow)
+    repair_n = f'<span class="stat-bad">{len(repair)}</span>' if repair else '0'
+    tcls_slow = 'stat-bad' if repair else 'stat-good'   # the header count, as Needs Repair's dot
+    # Needs Repair's first card: the repair set (DOWN or CRITICAL), one row per NIC; NICs with no switch seen grouped
+    # by role and status in a row that opens to their own rows
+    def repair_row(x):
+        worst = sorted((v['lv'] or 0, -v['g'], k) for k, v in x['cols'].items() if v)
+        wc = f"{colname.get(worst[-1][2], worst[-1][2])} {-worst[-1][1]:g} Gbps ({x['lo']:.0f}% of expected)" if worst else '-'
+        ipl = (f'<a href="#" class="ip-link" title="Open this NIC&#x27;s panel" onclick="topoNicPanel(&#x27;{escape(x["ip"])}&#x27;); return false;">'
+               f'{escape(x["ip"])}</a>') if x['ip'] not in ('-', '') else '-'
+        return (f"<tr><td>{escape(x['host'])}</td><td>{escape(x['nic'])}</td><td>{ipl}</td><td>{escape(leaf_ip.get(x['ip'], '-'))}</td>"
+                f"<td>{escape(wc)}</td><td>{escape(x['status'])}</td></tr>")
+    unseen = lambda x: leaf_ip.get(x['ip'], '-') in ('-', 'no switch seen')
+    groups = defaultdict(list)
+    for x in repair:
+        if unseen(x):
+            groups[x['role'], x['status']].append(x)
+    head = '<tr><th>Host</th><th>NIC</th><th>IP</th><th>Leaf</th><th>Worst column</th><th>Status</th></tr>'
+    grows = ''.join(f'<tr><td colspan="6"><details><summary>{len(xs)} {escape(role)} NICs: no switch seen, {escape(st.lower())}'
+                    f'{" (not cabled or not in use?)" if st == "DOWN" else ""}</summary><table class="table table-sm mb-0"><thead>{head}</thead>'
+                    f'<tbody>{"".join(repair_row(x) for x in xs)}</tbody></table></details></td></tr>'
+                    for (role, st), xs in sorted(groups.items(), key=lambda kv: -len(kv[1])))
+    repair_html = (f'<div class="card mb-3"><div class="card-header">NICs that need repair — {len(repair)} (down, or CRITICAL: a run under the repair '
+                   f'cut-off; worst first; "(retr)": its retransmits were over the limit too). SLOW NICs that need no repair are in Connection Health</div><div class="card-body" style="max-height:420px; overflow-y:auto;">'
+                   + (f'<table class="table table-sm table-striped"><thead>{head}</thead>'
+                      f'<tbody>{"".join(repair_row(x) for x in repair if not unseen(x))}{grows}</tbody></table>' if repair else
+                      '<p class="text-success mb-0">No NIC needs repair.</p>') + '</div></div>')
+    drops_n = f' (<span class="stat-warn">{nics_with_drops} with drops</span>)' if nics_with_drops else ''
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -687,6 +784,17 @@ th small {{ display: block; font-weight: 400; color: #8899aa; font-size: 0.7rem;
 .stat-label {{ color: #8899aa; font-size: 0.85rem; margin-top: 4px; }}
 .nav-tabs .nav-link {{ color: #8899aa; border: none; padding: 6px 14px; font-size: 0.9rem; }}
 .nav-tabs .nav-link.active {{ color: #e94560; background: #0f3460; border-bottom: 2px solid #e94560; }}
+.where .card-body {{ font-size: 0.9rem; color: #e0e0e0; }}
+.where-text {{ color: #e0e0e0; }}
+.where ul {{ list-style: none; padding-left: 0; }}
+.where li {{ margin: 2px 0; }}
+.where-sev {{ display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 1px 6px; border-radius: 3px; margin-right: 6px; }}
+.where-sev.s0 {{ background: #ff7a1a; color: #1a1a2e; }}
+.where-sev.s1 {{ background: #e94560; color: #fff; }}
+.where-sev.s2 {{ background: #ffc107; color: #1a1a2e; }}
+.where-sev.ok {{ background: #4ecca3; color: #1a1a2e; }}
+.where-go {{ color: #0dcaf0; margin-left: 6px; white-space: nowrap; }}
+.tab-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }}
 .nav-tabs {{ border-bottom: 1px solid #0f3460; }}
 .table {{ color: #e0e0e0; }}
 .table thead th {{ background: #0f3460; color: #4ecca3; border-bottom: 2px solid #e94560; position: sticky; top: 0; }}
@@ -722,7 +830,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         <b class="stat-info">{total_ips}</b> connections |
         <b class="stat-good">{healthy_ips}</b> healthy (&ge;{G}G) |
         <b class="stat-info">{functional_ips}</b> functional ({F}-{G}G) |
-        <b class="{'stat-bad' if needs_repair > 20 else 'stat-warn'}">{needs_repair}</b> need repair (&lt;{F}G) |
+        <b class="{tcls_slow}">{len(repair)}</b> need repair |
         <b class="stat-bad">{len(data['down_ips'])}</b> down |
         avg <b class="{'stat-good' if avg_gbps >= F else 'stat-warn'}">{avg_gbps:.0f}</b> Gbps ({pct_line:.0f}%) |
         <b class="{'stat-good' if total_retransmits == 0 else 'stat-warn' if total_retransmits < 1000 else 'stat-bad'}">{total_retransmits:,}</b> retransmits ({retransmit_pct_str}%) |
@@ -730,16 +838,17 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         <b class="{'stat-good' if not data['not_tested'] else 'stat-bad'}">{len(data['not_tested'])}</b> not tested
     </span>
 </div>
+{where_html}
 {problems_html}
 
-<!-- Tabs — connection health first; every card is in a tab (a tab only when its card is), the banner alone above -->
+<!-- Tabs: the map (Topology) opens first; every card is in a tab (a tab only when its card is), Where to look and the banner above -->
 <ul class="nav nav-tabs mb-2" role="tablist">
-    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-connections">Connection Health</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-slow">Needs Repair ({needs_repair})</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-connections">Connection Health{dot('tab-connections')}</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-slow">Needs Repair ({repair_n}){dot('tab-slow')}</a></li>
     {temps_tab}
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-nic">NIC / Optics</a></li>
+    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-nic">NIC / Optics{drops_n}{dot('tab-nic')}</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-distribution">Test Distribution</a></li>
-    <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-topology">Topology</a></li>
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-topology">Topology{dot('tab-topology')}</a></li>
     {clients_tab}
     {checks_tab}
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-all">Raw Data ({count})</a></li>
@@ -748,7 +857,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 <div class="tab-content">
 
 <!-- Tab: Connection Health (default) -->
-<div class="tab-pane fade show active" id="tab-connections">
+<div class="tab-pane fade" id="tab-connections">
     <div class="card">
         <div class="card-header">Average Throughput per Connection — {total_ips} IPs sorted lowest to highest (green=healthy &ge;{G}G, blue=functional {F}-{G}G, yellow &lt;{F}G, red &lt;{S}G)</div>
         <div class="card-body p-2">
@@ -759,6 +868,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 
 <!-- Tab: Needs Repair -->
 <div class="tab-pane fade" id="tab-slow">
+    {repair_html}
     <div class="card">
         <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Connections Below Functional (&lt;{F} Gbps) — with NIC Diagnostics<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('slowIpTable','needs_repair.csv')">Download CSV</button></div>
         <div class="card-body"><div id="slowIpContainer"></div></div>
@@ -879,7 +989,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 </div>
 
 <!-- Tab: Topology -->
-<div class="tab-pane fade" id="tab-topology">
+<div class="tab-pane fade show active" id="tab-topology">
     <div class="card">
         <div class="card-header">
             Network Topology — hosts colored by avg throughput (green=healthy &ge;{G}G, blue=functional {F}-{G}G, yellow &lt;{F}G, red &lt;{S}G, gray=down)
@@ -974,6 +1084,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div id="topoLegend" style="position:absolute; top:10px; left:10px; background:rgba(15,52,96,0.95); padding:8px 12px; border-radius:6px; font-size:0.8rem; color:#e0e0e0; line-height:1.7; z-index:10; min-width:160px; cursor:default;">
                 <div style="font-weight:600; margin-bottom:4px; color:#4ecca3;">Displayed</div>
                 <div>Backends: <b id="legHosts">0</b>{leg_clients} &nbsp; Links: <b id="legLinks">0</b> &nbsp; Switches: <b id="legSwitches">0</b></div>
+                <div><span style="display:inline-block; width:12px; height:12px; border-radius:50%; border:3px solid #ff7a1a; vertical-align:middle; margin-right:6px;"></span>hot host (high / crit): <b id="legHot">{n_hot}</b></div>
                 <!-- Hover detail -->
                 <div id="topoLegendDetail" style="display:none; margin-top:6px; border-top:1px solid rgba(78,204,163,0.3); padding-top:6px;">
                     <table style="width:100%; font-size:0.78rem; color:#ccc;">
@@ -988,11 +1099,6 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 </div>
             </div>
         </div>
-    </div>
-    <!-- the uplinks card: a drawer over the map (nothing sits below the map), opened by the toolbar's Uplinks button -->
-    <div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" data-bs-backdrop="false" data-bs-scroll="true" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
-        <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" id="topoPanelTitle" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
-        <div class="offcanvas-body"><div id="topoUplinksCard">{uplinks_html}</div><div id="topoLinkPanel" style="display:none;"></div></div>
     </div>
 </div>
 {clients_pane}
@@ -1051,6 +1157,13 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 </div>
 
 </div><!-- container -->
+
+<!-- the drawer: the uplinks card (the map toolbar's Uplinks button) and the node, link and NIC panels; in the body, so a
+     NIC panel opens over any tab -->
+<div class="offcanvas offcanvas-end" tabindex="-1" id="topoUplinks" data-bs-backdrop="false" data-bs-scroll="true" style="background:#16213e; color:#e0e0e0; width:min(90vw, 1100px);">
+    <div class="offcanvas-header" style="background:#0f3460;"><h6 class="offcanvas-title" id="topoPanelTitle" style="color:#4ecca3;">Leaf uplinks</h6><button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas"></button></div>
+    <div class="offcanvas-body"><div id="topoUplinksCard">{uplinks_html}</div><div id="topoLinkPanel" style="display:none;"></div></div>
+</div>
 
 <script src="https://code.jquery.com/jquery-3.7.0.min.js" integrity="sha384-NXgwF8Kv9SSAr+jemKKcbvQsz+teULH/a5UNJvZc6kP47hZgl62M1vGnw6gHQhb1" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js" integrity="sha384-geWF76RCwLtnZ8qwWowPQNguL3RmwHVBC9FhGdlKrxdiJJigb/j/68SIy3Te4Bkz" crossorigin="anonymous"></script>
@@ -1138,6 +1251,11 @@ Plotly.newPlot('fecChart', [{{
     yaxis: {{ ...plotLayout.yaxis, title: 'Corrected Bits', type: 'log' }},
 }}, plotConfig);
 
+// an IP cell in a table: a link that opens the NIC's panel on the map (window.topoNicPanel); "-" stays plain
+function nicIpCell(ip) {{
+    return !ip || ip === '-' ? (ip || '-') : '<a href="#" class="ip-link" title="Open this NIC\\'s panel" onclick="topoNicPanel(\\'' + ip + '\\'); return false;">' + ip + '</a>';
+}}
+
 // All table init in document.ready so dtOpts is available everywhere
 $(document).ready(function() {{
 
@@ -1150,7 +1268,7 @@ $(document).ready(function() {{
         slowData.forEach(function(r) {{
             var d = r.diag || {{}};
             var badge = r.avg >= {F} ? 'badge-ok' : r.avg >= {S} ? 'badge-slow' : 'badge-down';
-            slowHtml += '<tr><td></td><td>' + (d.host || '-') + '</td><td>' + r.ip + '</td><td><span class="badge ' + badge + '">' + r.avg.toFixed(1) + '</span></td><td>' + r.samples + (r.cross_only ? ' <small>(cross-rail runs only)</small>' : '') + '</td>';
+            slowHtml += '<tr><td></td><td>' + (d.host || '-') + '</td><td>' + nicIpCell(r.ip) + '</td><td><span class="badge ' + badge + '">' + r.avg.toFixed(1) + '</span></td><td>' + r.samples + (r.cross_only ? ' <small>(cross-rail runs only)</small>' : '') + '</td>';
             slowHtml += '<td>' + (d.nic || '-') + '</td><td>' + (d.speed || '-') + '</td>';
             slowHtml += '<td>' + (d.fec ? d.fec.toLocaleString() : '-') + '</td>';
             slowHtml += '<td class="diag-warn">' + (d.diagnosis || '-') + '</td></tr>';
@@ -1302,7 +1420,7 @@ $(document).ready(function() {{
                 var low = nicLow(r);
                 if (rawLastThreshold > 0 && (low === null || low < rawLastThreshold)) return;
                 var heat = r.heat ? ' <span class="badge badge-down" title="' + r.heat.replace(/"/g, '&quot;') + '">HOT</span>' : '';   // heat before fabric
-                tbody += '<tr><td></td><td>' + r.host + heat + '</td><td>' + statusBadge(r.status) + '</td><td>' + r.role + '</td><td>' + r.nic + '</td><td>' + r.ip + '</td>';
+                tbody += '<tr><td></td><td>' + r.host + heat + '</td><td>' + statusBadge(r.status) + '</td><td>' + r.role + '</td><td>' + r.nic + '</td><td>' + nicIpCell(r.ip) + '</td>';
                 nicCols.forEach(function(k) {{ tbody += '<td>' + colCell(r.cols[k]) + '</td>'; }});
                 tbody += '<td>' + (r.retr === 0 ? '0' : '<span class="badge badge-down">' + r.retr.toLocaleString() + '</span>' + (r.retr_pct === null ? '' : ' <small style="color:#8899aa;">(' + r.retr_pct + '%)</small>')) + '</td><td>' + (r.expect === null ? '-' : r.expect) + '</td></tr>';
                 shown++;
@@ -1364,6 +1482,7 @@ $(document).ready(function() {{
 
     // --- vis-network topology ---
     var topoNodesData = {topo_nodes_json};
+    var topoNicData = {json.dumps(topo_nic)}, topoLeafData = {json.dumps(topo_leaf)};   // the NIC and leaf panels' rows
     var topoEdgesData = {topo_edges_json};
     var topoNodes = new vis.DataSet(topoNodesData);
     var topoEdges = new vis.DataSet(topoEdgesData);
@@ -1614,12 +1733,44 @@ $(document).ready(function() {{
     var topoUplinksOf = function(key, id) {{   // the uplink edges' panels at one end: key 'from' for a leaf, 'to' for a spine
         return topoEdgesData.filter(function(e) {{ return e.uplink && e[key] === id; }}).map(function(e) {{ return e.panel; }});
     }};
-    var upGrid = function(ups) {{   // uplink panels as rows: leaf, spine, declared, busiest phase, verdict
-        return grid('Uplinks', ['Leaf', 'Spine', 'Declared', 'Busiest', 'Verdict'], ups.map(function(u) {{
-            return [u.leaf, u.spine, u.declared || '-', u.phase ? u.phase + ': out ' + u.out.toFixed(1) + ' G / in ' + u['in'].toFixed(1) + ' G' + (u.pct != null ? ', ' + u.pct.toFixed(0) + '% of declared' : '') : 'no cross-leaf runs',
-                    u.verdict || (u.declared ? 'within the declared capacity' : 'not judged: no spine declaration')];
+    var upCol = function(u) {{ return u.fault === 'down' ? '#e94560' : u.fault ? '#ffc107' : '#4ecca3'; }};   // the map's uplink colours
+    var upVerdict = function(u) {{ return u.verdict || (u.declared ? 'within the declared capacity' : 'not judged: no spine declaration'); }};
+    var upGrid = function(ups) {{   // uplink panels as rows: leaf, spine, declared, busiest phase, verdict (in the uplink's colour)
+        return gridH('Uplinks', ['Leaf', 'Spine', 'Declared', 'Busiest', 'Verdict'], ups.map(function(u) {{
+            return [esc(u.leaf), esc(u.spine), esc(u.declared || '-'), esc(u.phase ? u.phase + ': out ' + u.out.toFixed(1) + ' G / in ' + u['in'].toFixed(1) + ' G' + (u.pct != null ? ', ' + u.pct.toFixed(0) + '% of declared' : '') : 'no cross-leaf runs'),
+                    '<span style="color:' + upCol(u) + ';">' + esc(upVerdict(u)) + '</span>'];
         }}));
     }};
+    // cells already HTML (an IP link, a coloured verdict); every other cell goes through esc first
+    var gridH = function(title, heads, rows) {{
+        return '<h6 style="color:#4ecca3;">' + title + '</h6><table class="table table-sm table-striped mb-3"><thead><tr>' + heads.map(function(h) {{ return '<th>' + h + '</th>'; }}).join('') +
+            '</tr></thead><tbody>' + rows.map(function(r) {{ return '<tr>' + r.map(function(c) {{ return '<td>' + c + '</td>'; }}).join('') + '</tr>'; }}).join('') + '</tbody></table>';
+    }};
+    var rowH = function(k, html) {{ return '<tr><th style="color:#8899aa; font-weight:normal; width:40%;">' + k + '</th><td>' + html + '</td></tr>'; }};
+    var dash = function(v) {{ return v == null || v === '' ? '-' : v; }};
+    // an IP that opens its NIC's panel (window.topoNicPanel); an IP with no NIC row stays plain text
+    var ipLink = function(ip) {{
+        return topoNicData[ip] ? '<a href="#" class="ip-link" title="Open this NIC\\'s panel" onclick="topoNicPanel(\\'' + esc(ip) + '\\'); return false;">' + esc(ip) + '</a>' : esc(dash(ip));
+    }};
+    var lvName = ['OK', 'SLOW', 'CRITICAL'];
+    function topoNicPanelHtml(ip) {{
+        var x = topoNicData[ip];
+        if (!x) return '<p style="color:#8899aa;">No NIC row for ' + esc(ip) + ' in this run.</p>';
+        var t = x.temps || {{ max: [], flags: [] }};
+        var rows = [row('Host', x.host), row('Role', x.role + ', rail ' + dash(x.rail) + ', status ' + dash(x.status))];
+        if (x.members.length) x.members.forEach(function(m) {{ rows.push(row(m.nic, '→ ' + m.leaf + (m.down ? ' (down)' : ''))); }});
+        else rows.push(row('Leaf (LLDP)', dash(x.leaf)));
+        x.cols.forEach(function(c) {{ rows.push(row(c[0], c[1] + ' Gbps' + (c[2] != null ? ' (' + lvName[c[2]] + ')' : ''))); }});
+        rows.push(row('Retransmits', x.retr == null ? '-' : x.retr.toLocaleString()), row('Rx drops', x.drops == null ? '-' : x.drops.toLocaleString()),
+                  row('Host heat (max)', t.max.length ? t.max.join(', ') : '-'), row('Heat flags', t.flags.length ? t.flags.join('; ') : 'none'));
+        if (x.others.length) rows.push(rowH('Other NICs', x.others.map(function(o) {{ return esc(o[0]) + ' ' + ipLink(o[1]) + ' ' + esc(o[2]); }}).join('<br>')));
+        var runs = x.runs.length ? gridH('Backend runs, slowest first', ['', 'Peer', 'Leaf', 'Gbps', 'Retr'], x.runs.map(function(r) {{
+                return [r.dir, esc(r.host) + ' ' + ipLink(r.peer), esc(r.leaf), r.gbps.toFixed(1), (r.retr || 0).toLocaleString()];
+            }})) + (x.more ? '<p style="color:#8899aa;">+' + x.more + ' more (all in Raw Data)</p>' : '')
+            : '<p style="color:#8899aa;">No backend runs for this NIC: a client is judged by its runs to and from the backends (the columns above).</p>';
+        return tbl('NIC', rows) + runs + '<p style="color:#8899aa;">FEC and optics for this NIC: the NIC / Optics tab.</p>';
+    }}
+    window.topoNicPanel = function(ip) {{ topoShowPanel('nic', ip); }};   // from any IP link, on any tab: built from topoNicData alone
     function topoNodePanelHtml(id) {{
         var n = topoNodes.get(id), d = n && n.panel;
         if (!d) return '';
@@ -1627,16 +1778,25 @@ $(document).ready(function() {{
         if (d.kind === 'host') {{
             var t = d.temps, rows = [row('Host', d.host), row('Role', d.role + (d.status ? ' (' + d.status + ')' : '')), row('Worst run', d.worst + ' Gbps'),
                                      row('Heat', t.max.length ? t.max.join(', ') : 'no temperature data'), row('Heat flags', t.flags.length ? t.flags.join('; ') : 'none')];
-            body = tbl('Host', rows) + grid('NICs', ['NIC', 'IP', 'Leaf', 'Worst run'], d.nics.map(function(x) {{
+            body = tbl('Host', rows) + gridH('NICs (an IP opens its panel)', ['NIC', 'IP', 'Rail', 'Leaf', 'Worst run', 'Drops'], d.nics.map(function(x) {{
                 var leaf = x.members.length ? x.members.map(function(m) {{ return m.nic + ' → ' + m.leaf + (m.down ? ' (down)' : ''); }}).join(', ') : x.leaf;
-                return [x.nic + (x.members.length ? ' (bond)' : ''), x.ip, leaf, x.gbps + ' Gbps' + (x.down ? ' (down)' : '') + (x.status ? ' ' + x.status : '')];
+                var nd = topoNicData[x.ip] || {{}};
+                return [esc(x.nic + (x.members.length ? ' (bond)' : '')), ipLink(x.ip), esc(dash(nd.rail)), esc(dash(leaf)),
+                        esc(x.gbps + ' Gbps' + (x.down ? ' (down)' : '') + (x.status ? ' ' + x.status : '')), esc(nd.drops == null ? '-' : nd.drops.toLocaleString())];
             }}));
         }} else if (d.kind === 'leaf') {{
             var hosts = {{}}; d.nics.forEach(function(x) {{ hosts[x.host] = 1; }});
-            body = tbl('Leaf', [row('Switch', d.leaf), row('Host ports', d.ports), row('NICs on it', d.nics.length + ' (from ' + Object.keys(hosts).length + ' hosts)')]) + upGrid(topoUplinksOf('from', d.leaf)) +
-                grid('NICs on this leaf, worst first', ['Host', 'NIC', 'IP', 'Worst run'], d.nics.slice().sort(function(p, q) {{ return p.gbps - q.gbps; }}).map(function(x) {{ return [x.host, x.nic, x.ip, x.gbps + ' Gbps']; }}));
+            var ups = topoUplinksOf('from', d.leaf), u0 = ups.reduce(function(b, u) {{ return !b || (u.pct || 0) > (b.pct || 0) ? u : b; }}, null), ld = topoLeafData[d.leaf] || {{ rails: '-', paths: [] }};
+            var upLine = u0 ? (u0.declared ? u0.declared + ' to each of ' + ups.length + ' spines declared' : 'not declared') + '; busiest ' + (u0.pct == null ? '-' : u0.pct.toFixed(0) + '%') : '-';
+            body = tbl('Leaf', [row('Switch', d.leaf), row('Rail', ld.rails), row('Host ports', d.ports), row('NICs on it', d.nics.length + ' (from ' + Object.keys(hosts).length + ' hosts)'), row('Uplinks', upLine)]) +
+                (u0 ? '<p style="border-left:3px solid ' + upCol(u0) + '; padding-left:8px; color:' + upCol(u0) + ';">' + esc(upVerdict(u0)) + '</p>' : '') +
+                upGrid(ups) +
+                (ld.paths.length ? grid('Runs to the other leaves', ['Path', 'Median', 'Min', 'Runs'], ld.paths.map(function(p) {{ return [p[0], p[1] + ' Gbps', p[2] + ' Gbps', p[3]]; }}))
+                    : '<p style="color:#8899aa;">No backend runs touch this leaf (a client leaf: its NICs are judged by their client runs, in the NIC panels).</p>') +
+                gridH('NICs on this leaf, worst first', ['Host', 'NIC', 'IP', 'Worst run'], d.nics.slice().sort(function(p, q) {{ return p.gbps - q.gbps; }}).map(function(x) {{ return [esc(x.host), esc(x.nic), ipLink(x.ip), esc(x.gbps + ' Gbps')]; }}));
         }} else if (d.kind === 'spine') {{
-            body = tbl('Spine', [row('Spine', d.spine), row('Name', d.spines ? 'hosts see only their leaves, so spines are numbered from the declaration' : 'not declared: set FF_SPINES, FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks')]) + upGrid(topoUplinksOf('to', id));
+            var sups = topoUplinksOf('to', id), sdecl = sups.length && sups[0].declared ? sups[0].declared + ' from each leaf (' + d.spines + ' spines)' : 'not declared';
+            body = tbl('Spine', [row('Spine', d.spine), row('Declared', sdecl), row('Name', d.spines ? 'hosts see only their leaves, so spines are numbered from the declaration' : 'not declared: set FF_SPINES, FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks')]) + upGrid(sups);
         }} else if (d.kind === 'bond') {{
             body = tbl('Bond', [row('Host', d.host), row('Role', d.role), row('Bond', d.nic + ' ' + d.ip), row('Members up', d.up + ' of ' + d.total), row('Worst run', d.gbps + ' Gbps' + (d.down ? ' (down)' : ''))]
                 .concat(d.leaves.map(function(m) {{ return row(m.nic, m.leaf + (m.down ? ' (down)' : ' (up)')); }})));
@@ -1662,6 +1822,7 @@ $(document).ready(function() {{
         if (d.kind === 'member') hostRows.push(row('Member of', d.member_of), row('Member link', d.member_down ? 'down' : 'up'));
         if (d.kind === 'bond') hostRows.push(row('Members', d.members.join(', ')), row('Members up', d.up + ' of ' + d.total));
         hostRows.push(row('Worst run', d.gbps + ' Gbps' + (d.down ? ' (down)' : '')));
+        if (topoNicData[d.ip]) hostRows.push(rowH('NIC panel', ipLink(d.ip)));   // runs, drops, heat for this NIC
         var swRows = d.kind === 'bond' ? [row('Switch side', 'see the member links')] :
             d.no_switch ? [row('Switch', 'no switch seen')] :
             [row('Switch', d.leaf), row('Switch port', d.port_id), row('Port description', d.port_desc), row('System', d.sys_desc)];
@@ -1669,11 +1830,13 @@ $(document).ready(function() {{
     }}
     window.topoShowPanel = function(what, d) {{
         var card = document.getElementById('topoUplinksCard'), pane = document.getElementById('topoLinkPanel'), title = document.getElementById('topoPanelTitle');
-        topoPanelNode = null;
+        topoPanelNode = null; topoPanelKind = what;
         // the uplinks card needs the full width; a node or link panel takes half, leaving the toolbar and map in reach
-        document.getElementById('topoUplinks').style.width = what === 'link' || what === 'node' ? 'min(90vw, 560px)' : 'min(90vw, 1100px)';
+        document.getElementById('topoUplinks').style.width = what === 'link' || what === 'node' || what === 'nic' ? 'min(90vw, 560px)' : 'min(90vw, 1100px)';
         if (what === 'link') {{ pane.innerHTML = topoLinkPanelHtml(d); pane.style.display = ''; card.style.display = 'none';
             title.textContent = d.kind === 'uplink' ? 'Uplink ' + d.leaf + ' ↔ ' + d.spine : 'Link ' + d.host + ' ' + d.nic; }}
+        else if (what === 'nic') {{ var x = topoNicData[d]; pane.innerHTML = topoNicPanelHtml(d); pane.style.display = ''; card.style.display = 'none';
+            title.textContent = x ? 'NIC ' + x.host + ' ' + x.nic + ' ' + x.ip : 'NIC ' + d; }}
         else if (what === 'node') {{
             var n = topoNodes.get(d); if (!n || !n.panel) return;
             pane.innerHTML = topoNodePanelHtml(d); pane.style.display = ''; card.style.display = 'none'; title.textContent = topoNodeTitle(n.panel);
@@ -1683,7 +1846,10 @@ $(document).ready(function() {{
         else {{ pane.style.display = 'none'; card.style.display = ''; title.textContent = 'Leaf uplinks'; }}
         bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).show();
     }};
-    window.topoHidePanel = function() {{ topoPanelNode = null; bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).hide(); }};
+    window.topoHidePanel = function() {{ topoPanelNode = null; topoPanelKind = null; bootstrap.Offcanvas.getOrCreateInstance(document.getElementById('topoUplinks')).hide(); }};
+    // leaving the map closes a map panel (node, link, uplinks); a NIC panel stays open on any tab
+    var topoPanelKind = null;
+    $('a[href="#tab-topology"]').on('hide.bs.tab', function() {{ if (topoPanelKind && topoPanelKind !== 'nic') topoHidePanel(); }});
 
     // --- Exclusion sets ---
     var topoExcludedHosts = new Set();
@@ -1827,10 +1993,23 @@ $(document).ready(function() {{
         if (topoNetwork) topoNetwork.redraw();
     }}
     $(window).on('resize', function() {{ if (topoInitialized) topoSize(); }});
-    // Lazy init on tab show
-    $('a[href="#tab-topology"]').on('shown.bs.tab', function() {{
+    // Init on first show; the map's tab is the one open at load, so it is drawn then too, with no click
+    function topoShown() {{
         topoSize();
         if (!topoInitialized) {{ topoInit(); topoInitialized = true; topoLayoutLimit(); topoSetLayout(topoCurrentLayout); topoUpdateLegend(); }}
+    }}
+    $('a[href="#tab-topology"]').on('shown.bs.tab', topoShown);
+    // "open →" in Where to look: a tab, or on the map a node's panel or a NIC's link panel (the edge named "host nic")
+    window.topoOpen = function(g) {{
+        var tabOf = function(id) {{ return document.querySelector('a[href="#' + id + '"]'); }};
+        if (g.tab) {{ topoHidePanel(); var t = tabOf(g.tab); if (t) bootstrap.Tab.getOrCreateInstance(t).show(); return; }}   // no drawer over a tab
+        bootstrap.Tab.getOrCreateInstance(tabOf('tab-topology')).show(); topoShown();
+        var e = g.link ? topoEdges.get({{ filter: function(x) {{ return x.name === g.link && x.panel; }} }})[0] : null;
+        if (e) {{ topoNetwork.selectEdges([e.id]); topoShowPanel('link', e.panel); return; }}
+        if (g.node && topoNodes.get(g.node)) {{ topoNetwork.selectNodes([g.node]); topoNetwork.focus(g.node, {{ animation: true }}); topoShowPanel('node', g.node); }}
+    }};
+    document.querySelectorAll('.where-go').forEach(function(a) {{
+        a.addEventListener('click', function(ev) {{ ev.preventDefault(); topoOpen(JSON.parse(a.getAttribute('data-go'))); }});
     }});
     // above TOPO_BIG nodes the physics layouts are off the menu (their buttons say why) and the map stays Radial
     function topoLayoutLimit() {{
@@ -2032,6 +2211,9 @@ $(document).ready(function() {{
         topoUpdateLegend();
         topoToast('Map reset');
     }};
+
+    // last in this block: the map's tab is open at load, and its first draw calls the window.topo* functions above
+    if (document.getElementById('tab-topology').classList.contains('active')) topoShown();
 }});
 </script>
 </body>
@@ -2187,6 +2369,147 @@ def _cross_finding(data):
                   f"same-rail median {' / '.join(f'{f(sm[x])} ({x})' for x in rails)} Gbps. The hosts pass on their own rail, so the likely "
                   'limit is the shared path between the rails (switch inter-link or spine), not the hosts.')
     return agg, shared
+
+
+# "Where to look first": one function per finding kind, each giving {sev, kind, text, go} items (sev 0 first; go =
+# where "open →" leads: a node, a NIC's link, a tab). The tab colours read the same kinds
+def _hot(data):
+    """host -> its sensors flagged crit or high (the hot rule)"""
+    hot = defaultdict(list)
+    for t in data.get('temps', []):
+        if t['Flag'].split('+')[0] in ('crit', 'high'):
+            hot[t['Host']].append(t)
+    return hot
+
+
+def _slow(nic_rows):
+    """the data NICs that ran slow or are down (a run under its OK cut-off, or no link)"""
+    return [x for x in nic_rows if x['status'].startswith(('SLOW', 'CRITICAL')) or x['status'] == 'DOWN']
+
+
+def _repair(slow):
+    """the repair set: the slow NICs that are DOWN or CRITICAL (a run under the repair cut-off); SLOW alone is not"""
+    return [x for x in slow if x['status'] == 'DOWN' or x['status'].startswith('CRITICAL')]
+
+
+def _w_heat(slow, hot):
+    out = []
+    for h in sorted({x['host'] for x in slow if x['host'] in hot}):
+        ht, n = hot[h], sum(1 for x in slow if x['host'] == h)
+        out.append({'sev': 0, 'kind': 'heat', 'go': {'node': h},
+                    'text': f"{h}: {', '.join(f'''{t['Type']} {t['Max_C']}C ({t['Flag']})''' for t in ht[:3])}{', …' if len(ht) > 3 else ''}"
+                            f" and {n} NIC(s) slow. Check heat before the fabric."})
+    return out
+
+
+def _w_uplinks(busy):
+    out = []
+    for lf, r in sorted(busy.items()):
+        f = r.get('fault', '')
+        if f in ('down', 'cap', 'unsure'):
+            out.append({'sev': 1, 'kind': 'uplink' if f == 'down' else 'uplinkpair', 'go': {'node': lf},
+                        'text': f"{lf} uplinks: {r['verdict']}"})
+    return out
+
+
+def _w_slow(slow, hot, leaf, colname):
+    cool = [x for x in slow if x['host'] not in hot]
+    if len(cool) > 5:   # more than 5: one line by role and leaf, the worst 3 named; Needs Repair lists them all
+        by = Counter(f"{x['role']} NICs on {leaf.get(x['ip'], 'no switch seen')}" for x in cool)
+        top = sorted(by.items(), key=lambda kv: -kv[1])
+        worst = sorted(cool, key=lambda x: x['lo'])[:3]
+        return [{'sev': 1, 'kind': 'slowmany', 'go': {'tab': 'tab-slow'},
+                 'text': f"{len(cool)} NICs ran slow or are down ({', '.join(f'{n} {k}' for k, n in top[:4])}{', …' if len(top) > 4 else ''}); "
+                         f"worst: {', '.join(f'''{x['host']} {x['nic']} {x['lo']:.0f}%''' for x in worst)} of expected."}]
+    out = []
+    for x in cool:
+        low = [f"{colname.get(k, k)} {v['g']:g}" for k, v in x['cols'].items() if v and v['lv'] and v['lv'] >= 1]
+        what = 'down' if x['status'] == 'DOWN' else f"{', '.join(low)} Gbps, {x['lo']:.0f}% of expected at worst"   # lo: a percentage
+        out.append({'sev': 1, 'kind': 'slow', 'go': {'link': f"{x['host']} {x['nic']}", 'node': x['host']},
+                    'text': f"{x['host']} {x['nic']} ({leaf.get(x['ip'], 'no switch seen')}): {what}."})
+    return out
+
+
+def _w_cross(xr, xs, host_of):
+    if not xs:
+        return []
+    low = sorted(xs, key=lambda r: r['gbps'])[:3]
+    return [{'sev': 1, 'kind': 'cross', 'go': {'tab': 'tab-slow'},
+             'text': f"{len(xs)} of {len(xr)} cross-rail runs below their OK cut-off "
+                     f"({', '.join(f'''{host_of.get(r['src'], r['src'])} → {host_of.get(r['dst'], r['dst'])} {r['gbps']:.0f}''' for r in low)}"
+                     f"{', …' if len(xs) > 3 else ''} Gbps): the path between the rails goes through the switches between them."}]
+
+
+def _w_drops(drops, slow):
+    if not drops:
+        return []
+    sl = {x['ip'] for x in slow}
+    tot = lambda d: d['rx_drop'] + d['tx_drop'] + d['rx_oob']
+    top = sorted(drops, key=lambda d: -tot(d))[:3]
+    k = sum(1 for d in drops if d['ip'] in sl)
+    return [{'sev': 2, 'kind': 'drops', 'go': {'tab': 'tab-nic'},
+             'text': f"{len(drops)} NICs counted drops over the run ({', '.join(f'''{d['host_nic']} {tot(d):,}''' for d in top)}"
+                     f"{', …' if len(drops) > 3 else ''}); {f'{k} of them ran slow' if k else 'none of them ran slow'}."}]
+
+
+def _w_heatonly(data, slow, has_temps_tab):
+    sl = {x['host'] for x in slow}
+    rank = {'crit': 0, 'high': 1, 'near': 2, 'rise': 3}
+    return [{'sev': 2, 'kind': 'heatonly', 'go': {'tab': 'tab-temps'} if has_temps_tab else {'node': t['Host']},
+             'rank': rank.get(t['Flag'].split('+')[0], 4),
+             'text': f"{t['Host']}: {t['Type']} {t['Sensor']} {t['Max_C']}C, flag {t['Flag']}; its NICs are not slow."}
+            for t in data.get('temps', []) if t['Flag'] != '-' and t['Sensor'] != 'none' and t['Host'] not in sl
+            and not t['Flag'].startswith(('nodata', 'note'))]
+
+
+def _w_checks(checks):
+    return [{'sev': 1, 'kind': 'check', 'go': {'tab': 'tab-checks'}, 'text': f"Run check {name}: {n:,} {what}."}
+            for name, n, what in checks if n > 0]
+
+
+# Tab dots: red = a fault, amber = a warning, green = none; no dot where nothing is judged.
+#   Topology: red, an uplink verdict "down"; amber, a capacity or "?" verdict, or a slow cross-rail run
+
+#   Connection Health: the NICs that ran slow or are down (_slow); red, one CRITICAL or DOWN; amber, SLOW only.
+#   Clients: the same, client NICs. Needs Repair: the CRITICAL or DOWN ones (_repair), counted, red; else green
+
+#   Temperatures: red, a crit or high sensor; amber, near or rise. NIC / Optics: amber, a NIC with drops
+#   Run checks: red, a flagged check. Coloured numbers count faults only; Test Distribution, Raw Data: no dot
+TAB_RED, TAB_AMBER, TAB_GREEN = '#e94560', '#ffc107', '#4ecca3'
+TAB_DOT_TITLE = {TAB_RED: 'a fault to look at', TAB_AMBER: 'a warning', TAB_GREEN: 'nothing flagged'}
+
+
+def _tab_states(slow, hot, findings, temps_flagged, temps_bad, n_checks, n_drops):
+    """tab id -> its dot colour, from the same slow NICs, hot hosts and findings as Where to look (the table above)"""
+    kinds = {f['kind'] for f in findings}
+    crit = lambda xs: any(x['status'].startswith('CRITICAL') or x['status'] == 'DOWN' for x in xs)
+    nic = lambda xs: TAB_RED if crit(xs) else TAB_AMBER if xs else TAB_GREEN
+    return {'tab-topology': TAB_RED if 'uplink' in kinds else TAB_AMBER if kinds & {'uplinkpair', 'cross'} else TAB_GREEN,
+            'tab-connections': nic(slow),
+            'tab-slow': TAB_RED if _repair(slow) else TAB_GREEN,
+            'tab-temps': TAB_RED if temps_bad else TAB_AMBER if temps_flagged else TAB_GREEN,
+            'tab-nic': TAB_AMBER if n_drops else TAB_GREEN,
+            'tab-clients': nic([x for x in slow if x['role'] == 'client']),
+            'tab-checks': TAB_RED if n_checks else TAB_GREEN}
+
+
+def _where(parts):
+    """every finding, worst first: by severity, then a kind's own rank (heat-only: crit, high, near, rise); stable otherwise"""
+    return sorted((f for p in parts for f in p), key=lambda f: (f['sev'], f.get('rank', 0)))
+
+
+def _where_html(findings):
+    if not findings:
+        return ('<div class="card mb-3 where calm"><div class="card-body"><span class="where-sev ok">CLEAN</span> '
+                'Nothing to look at first.</div></div>')
+    chip = lambda s: f'<span class="where-sev s{s}">{("HEAT + SLOW", "LOOK", "NOTE")[s]}</span>'
+    # "open →" first: a drawer open on the right covers a long line's end
+    line = lambda f: (f'<a href="#" class="where-go" data-go="{escape(json.dumps(f["go"]))}">open →</a> '
+                      f'{chip(f["sev"])} <span class="where-text">{escape(f["text"])}</span>')
+    items = ''.join(f'<li>{line(f)}</li>' for f in findings)   # one list, the first line like the rest
+    return (f'<div class="card mb-3 where"><div class="card-header"><b>Where to look first</b> '
+            f'<span style="color:#8899aa;">{len(findings)} findings, heat and slowness on the same host first</span></div>'
+            f'<div class="card-body"><ul class="where-list mb-0">{items}</ul></div></div>')
 
 
 def _uplinks(data):

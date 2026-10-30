@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# The test suites of this repo, from a clone: tests/run [--fast|--full] [-j N] [ff|tc|all] [group ...]
+#   ff   the fabric_ferret.sh + generate_dashboard.py groups (tests/ff/NN_*.sh)      --fast ~35 s, --full ~7 min
+#   tc   the thermals_capture.sh sections (tests/thermals/NN_*.sh)                   --fast ~15 s, --full ~100 s
+#   all  (default) ff then tc, one after the other (one suite at a time: the machine-wide lock in suite_lock.sh)
+# --fast: the groups marked "# tier: fast" (every commit); --full (default): every group (before a push).
+# Results: tests/regress.XXXX (ff) and tests/thermals/regress.XXXX (tc): result.txt, <group>.out, <group>.rc.
+# Needs: bash 4.3+ first on PATH and at /opt/homebrew/bin/bash, python3, node, jq, perl, GNU timeout, /usr/bin/expect;
+# gawk and mawk for the awk-portability checks. A group whose "# needs:" is unmet is SKIPPED by name, never silently
+# green (lib.sh); site data (a real cluster's sample) is never in the repo: FFT_SITE_DATA names it, when there is one.
+[ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
+    echo "tests/run: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; exit 2; }
+T=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); R=$(cd "$T/.." && pwd)
+opts=(); which=all; sel=()
+while (( $# )); do
+    case $1 in
+        --fast|--full) opts+=("$1"); shift ;;
+        -j) opts+=(-j "$2"); shift 2 ;;
+        -j*) opts+=("$1"); shift ;;
+        ff|tc|all) which=$1; shift ;;
+        -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+        *) sel+=("$1"); shift ;;
+    esac
+done
+# awkbin/<name>/awk: one name per awk, made where the awk exists (the thermals sections need them before any ff group ran)
+for a in bsd:/usr/bin/awk mawk:"$(command -v mawk)" gawk:"$(command -v gawk)"; do
+    [[ -x ${a#*:} && ! -e $T/awkbin/${a%%:*}/awk ]] && { mkdir -p "$T/awkbin/${a%%:*}" && ln -s "${a#*:}" "$T/awkbin/${a%%:*}/awk"; }
+done
+rc=0
+if [[ $which == ff || $which == all ]]; then
+    /opt/homebrew/bin/bash "$T/run_all.sh" "$R/fabric_ferret.sh" "$R/generate_dashboard.py" "${opts[@]}" "${sel[@]}" || rc=$?
+fi
+if [[ $which == tc || $which == all ]]; then
+    RA_TESTS=$T/thermals RA_RESULTS=$T/thermals /opt/homebrew/bin/bash "$T/run_all.sh" "$R/thermals_capture.sh" "$R/fabric_ferret.sh" "${opts[@]}" "${sel[@]}" || rc=$?
+fi
+exit $rc

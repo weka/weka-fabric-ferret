@@ -1,0 +1,11 @@
+### iteration:1 phase:1
+198.18.0.1,198.18.0.2,ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host
+198.18.0.3,198.18.0.4,ERROR   rc=1   iperf3:  error  -  unable  to  connect  to  server  -  server  may  have  stopped  running  or  use  a  different  port,  firewall  issue,  etc.:  No  route  to  host
+198.18.0.1,198.18.0.5,ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host
+198.18.0.1,198.18.0.6,ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host
+198.18.0.3,198.18.0.7,ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host
+198.18.0.4,198.18.0.2,ERROR rc=1 iperf3: error - unable to connect to server: Connection refused
+198.18.0.5,198.18.0.2,ERROR rc=1 iperf3: error - unable to connect to server: Connection refused
+198.18.0.7,198.18.0.2,ERROR rc=1 iperf3: error - unable to connect to server: Connection refused share:2
+198.18.0.6,198.18.0.9,ERROR timeout or ssh failure
+198.18.0.2,198.18.0.1,[SUM]   0.00-10.00  sec  300 GBytes  340 Gbits/sec  receiver retransmits:3 cpu:21.5/44.0

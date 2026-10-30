@@ -1,0 +1,6 @@
+Host  Target      Rail_A_NIC  Rail_A_IP   MTU_A  State_A  Rail_B_NIC   Rail_B_IP   MTU_B  State_B
+h1    198.18.0.1  enp5s0np0   198.19.1.1  9000   ok       enp196s0np0  198.19.2.1  9000   ok
+h2    198.18.0.2  enp5s0np0   198.19.1.2  9000   ok       enp196s0np0  198.19.2.2  9000   ok
+h3    198.18.0.3  enp5s0np0   198.19.1.3  9000   ok       enp196s0np0  198.19.2.3  9000   ok
+h4    198.18.0.4  enp5s0np0   198.19.1.4  9000   ok       enp196s0np0  198.19.2.4  9000   link_DOWN_on_enp196s0np0
+h5    198.18.0.5  enp5s0np0   198.19.1.5  1500   ok       enp196s0np0  198.19.2.5  9000   ok

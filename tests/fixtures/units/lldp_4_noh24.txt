@@ -1,0 +1,8 @@
+h21 enp5s0np0 198.19.1.21 leaf1.example swp21 x y
+h21 enp196s0np0 198.19.2.21 leaf2.example swp21 x y
+h22 enp5s0np0 198.19.1.22 leaf1.example swp22 x y
+h22 enp196s0np0 198.19.2.22 leaf2.example swp22 x y
+h23 enp5s0np0 198.19.1.23 leaf1.example swp23 x y
+h23 enp196s0np0 198.19.2.23 leaf2.example swp23 x y
+h24 enp5s0np0 198.19.1.24 unknown swp24 x y
+h24 enp196s0np0 198.19.2.24 unknown swp24 x y

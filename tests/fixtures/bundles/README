@@ -1,0 +1,29 @@
+Stored parser archives (10-26):the dashboard checks of 11, 12, 13 and 14 parse these instead of running FF.
+golden-B (50) and golden-C (52) keep the fresh FF -> parser wiring in --full.
+
+Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the fresh golden-B bundle: member names
+(host paths folded; excluded.txt and unreachable.txt may be missing), header lines, metadata keys. When it FAILs with
+"bundle format changed": FF's bundle changed; remake the archives with tools/mkbundles.sh into a new directory, rerun
+11-14 on them, then swap them in and update the commit below.
+
+11_routed32.tgz, 11_xcrit.tgz, 12_slowcross.tgz, 12_bslow.tgz, 14_ua.tgz, 14_ub.tgz, 14_un.tgz, 14_ul.tgz, 14_ux.tgz
+    made by tools/mkbundles.sh with weka-fabric-ferret at 191a333, 10-29 18:51 (same format as the d43c628 set; remade
+    with the fake's tx counter read fixed, so ssh_errors.log is empty, and rails.txt aligned to the 198.18/15 addresses);
+    before that at d43c628, 10-29 15:52 (temps_summary.txt gained Min_C as column 13
+    and thermals' seven types; the reader runs as the login); before that: 14_* at c3a2aa6's bundle format (the first
+    phase-3 build, 41a695b, amended into c3a2aa6 without a format change), 10-27 18:10 (metadata.txt gained cross_group,
+    cross_group_pairs_total, cross_group_pairs_covered), and all nine at 2315ee8, 10-27 02:10 (14's dashboard uplink
+    card; bonds.txt joined the bundle).
+    Remake them (into a new directory, then swap) when the bundle format changes; update this commit.
+14_where.tgz, 14_clean.tgz
+    14's "Where to look" edges (10-29): a hot host with CRITICAL B NICs on five hosts and four slow clients, h4 without
+    LLDP (14_where); two hosts with nothing wrong (14_clean). Made with the nine above (191a333, 10-29 18:51).
+14_ub_oldtypes.tar.gz
+    the 14_ub.tgz made at c3a2aa6's format (above), kept as it was before the 10-29 regeneration: a 12-column
+    temps_summary.txt with BMC rows typed bmc, the shape every bundle before 83d55e4 has. 14 renders it for the
+    older-bundle path (BMC max column, "older bundle" note). Not regenerated: it IS the old shape. Named .tar.gz, as
+    12_old_v2 is: 50's freshness loop checks *.tgz only, so an archive that is old on purpose is a .tar.gz.
+12_old_v2_allAtoB.tar.gz
+    made once by the pre-ferret fabric_sleuth v2 (FS_ renamed to FF_), FF_RAILS=198.19.1.0/24,198.19.2.0/24
+    FAKE_XSPEED=240 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 (the fake's hosts, renumbered with it). The old-format
+    input; not regenerated.

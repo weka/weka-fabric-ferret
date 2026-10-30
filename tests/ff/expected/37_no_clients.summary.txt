@@ -1,0 +1,8 @@
+UDP (-b 0) by receiving host: avg Gbps per run, datagrams lost/sent, loss %:
+  Expected_% = the loss the offered load alone guarantees: what the senders sent into a NIC above its line rate
+  Host  Avg_Gbps  Lost/Sent   Loss_%  Expected_%
+  h22   250.0     20/2000000  0.001   0.000
+  h21   250.0     20/2000000  0.001   0.000
+  Lost datagrams 40 of 4000000: sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 40
+  Expected from overload: 0; unaccounted beyond it (likely fabric): 40
+  UDP runs with no result: 0

@@ -1,0 +1,11 @@
+hx_enp5s0np0 rdma:local_ack_timeout_err 1
+hx_enp5s0np0 rdma:np_cnp_sent 7
+hx_enp5s0np0 rdma:np_ecn_marked_roce_packets 11
+hx_enp5s0np0 rdma:out_of_buffer 9
+hx_enp5s0np0 rdma:out_of_sequence 2
+hx_enp5s0np0 rdma:port_xmit_discards 3
+hx_enp5s0np0 rdma:req_transport_retries_exceeded 2
+hx_enp5s0np0 rdma:roce_adp_retrans 4
+hx_enp5s0np0 rdma:roce_slow_restart 0
+hx_enp5s0np0 rdma:rp_cnp_handled 5
+hx_vlan100 rdma:np_cnp_sent 6

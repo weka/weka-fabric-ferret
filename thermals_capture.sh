@@ -7,8 +7,6 @@
 [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
     echo "thermals_capture.sh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; echo "RESULT data=STOPPED (needs bash 4.3+)" >&2; exit 2; }
 
-THERMALS_VERSION=1.0
-
 usage() {
     cat <<'EOF'
 Usage: FF_HOSTS=<targets> ./thermals_capture.sh [-o jsonl,html,md] [-d seconds [-i seconds]] [-v]
@@ -423,10 +421,14 @@ summarize_temps() {
     rm -f "$out.raw" "$out.sorted"
 }
 
-# ---------- collection ----------
+# ---------- background jobs (both tools) ----------
 
 throttle() { while (( $(jobs -rp | wc -l) >= FF_SSH_PARALLEL )); do wait -n; done; }
 wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C ends a bare wait early
+
+# ---------- collection ----------
+
+# throttle and wait_all: jobs.sh, shared with fabric_ferret.sh
 tmo() { tmo_s "$HOST_LIMIT" "$@"; }   # tmo_s: tc_bmc.sh
 clean() { printf '%s' "${1//$'\r'/}" | tr -c 'A-Za-z0-9_.:=-' '_' | cut -c1-80; }   # ssh ends its errors with \r\n
 
@@ -525,7 +527,7 @@ sample() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -1039,9 +1041,13 @@ END {
             print s } } }
     print "\nEvery single reading is in the jsonl (-o jsonl)." }'
 
-# ---------- main ----------
+# ---------- a temperature capture after the targets are loaded (both tools: thermals_capture.sh, and
+# fabric_ferret.sh --thermals-only) ----------
 
-cleanup() {
+THERMALS_VERSION=1.0
+
+# tc_cleanup: the EXIT trap of a capture: close the ssh masters, remove SOCKET_DIR and WORK, keep the exit code
+tc_cleanup() {
     local rc=$? t
     trap '' INT TERM HUP
     if [[ -n $SOCKET_DIR ]]; then
@@ -1053,47 +1059,24 @@ cleanup() {
     exit $rc
 }
 
-main() {
-    [[ $1 == --help ]] && { usage; exit 0; }
-    local pl; for pl in "${HF_PRELOG[@]}"; do log "$pl"; done   # the -t file's settings notes (settings_prepass, run first)
-    : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
-    : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
-    local v; for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
-        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
-    done
-    local list=0; [[ $1 == --list ]] && { list=1; shift; }
-
-    local opt fmt=jsonl iv= du= verbose=0 tfile=
-    while getopts ":o:i:d:t:vh" opt; do
-        case $opt in
-            o) fmt=$OPTARG ;;
-            t) tfile=$OPTARG ;;
-            v) verbose=1 ;;
-            i) iv=$OPTARG ;;
-            d) du=$OPTARG ;;
-            h) usage; exit 0 ;;
-            :) die "-$OPTARG needs a value (--help)" ;;
-            \?) die "unknown option -$OPTARG (--help)" ;;
-        esac
-    done
-    shift $(( OPTIND - 1 ))
-    (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
-    [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
-    [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
-    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh), or the -t file's rows (FF_SSH_USER the default login)
-    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
-    TARGETS=(); _SEEN=(); INPUT_RANGES=0
-    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
-    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
-    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
-    (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
-    # the other settings are checked here, after a -t file's settings lines have had their say
+# tc_check_settings: the settings a capture reads, after a -t file's settings lines have had their say
+tc_check_settings() {
+    local v
     [[ $FF_IPMI == 0 || $FF_IPMI == 1 ]] || die "FF_IPMI must be 0 or 1, got '$FF_IPMI'"
     for v in FF_TEMP_MARGIN FF_TEMP_RISE; do [[ ${!v} =~ ^[0-9]+$ ]] || die "$v must be a whole number, got '${!v}'"; done
     for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL; do
         [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
     done
-    if (( list )); then (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0; fi
+}
+
+# tc_list: --list, the targets and BMCs a capture would read, one a line; exits 0
+tc_list() {
+    (( ${#TARGETS[@]} )) && printf '%s\n' "${TARGETS[@]}"; (( ${#BMCS[@]} )) && printf '%s (bmc)\n' "${BMCS[@]}"; exit 0
+}
+
+# tc_check_opts: -o into FMTS, -d and -i into the caller's du and iv (its locals: fmt du iv), refused loudly when wrong
+tc_check_opts() {
+    local v
     FMTS=(); local -A seen=(); local -a fl
     IFS=, read -ra fl <<<"$fmt"
     [[ -n $fmt && $fmt != *, && $fmt != ,* && $fmt != *,,* ]] || die "-o takes a comma-separated list of jsonl, html, md; got '$fmt'"
@@ -1108,6 +1091,12 @@ main() {
     [[ -z $iv ]] || (( du > 0 )) || die "-i needs -d (how long to sample)"
     (( du > 0 )) && : "${iv:=$du}"
     [[ -z $iv ]] || (( du >= iv )) || die "-d ($du) must be at least -i ($iv)"
+}
+
+# tc_run: the capture itself, the caller's verbose, du and iv in scope: samples, summary, stderr and stdout, the
+# thermcap_<UTC> files in FF_OUT_DIR, the RESULT line; exits 0 COMPLETE, 3 PARTIAL, 4 NONE
+tc_run() {
+    local v
     [[ -d $FF_OUT_DIR && -w $FF_OUT_DIR ]] || die "FF_OUT_DIR '$FF_OUT_DIR' is not a writable directory"
     [[ -n $(command -v ssh) ]] || die "ssh not found"
 
@@ -1121,7 +1110,7 @@ main() {
     [[ -n $TO ]] || log "no timeout command here: a hung host would stall the capture"
 
     WORK=$(mktemp -d "${TMPDIR:-/tmp}/thermals.XXXXXX") || die "mktemp failed"
-    trap cleanup EXIT   # from here every exit removes WORK, and SOCKET_DIR once it exists
+    trap tc_cleanup EXIT   # from here every exit removes WORK, and SOCKET_DIR once it exists
     SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
@@ -1215,6 +1204,49 @@ main() {
     fi
     echo "RESULT data=$res hosts=$hwd/$nt sensors=$sensors flagged=$flagged nodata=$nodata unreachable=${#UNREACH[@]}" >&2
     exit $rc
+}
+
+# ---------- main ----------
+
+main() {
+    [[ $1 == --help ]] && { usage; exit 0; }
+    local pl; for pl in "${HF_PRELOG[@]}"; do log "$pl"; done   # the -t file's settings notes (settings_prepass, run first)
+    : "${FF_SSH_USER:=$(id -un)}" "${FF_SSH_PARALLEL:=64}" "${FF_MAX_TARGETS:=4096}" "${FF_OUT_DIR:=.}"
+    : "${FF_IPMI:=1}" "${FF_IPMI_TIMEOUT:=60}" "${FF_TEMP_MARGIN:=5}" "${FF_TEMP_RISE:=10}"
+    local v; for v in FF_IPMI_TIMEOUT FF_SSH_PARALLEL FF_MAX_TARGETS; do   # FF_HOSTS expands against FF_MAX_TARGETS below
+        [[ ${!v} =~ ^[0-9]+$ ]] && (( ${!v} > 0 )) || die "$v must be a positive integer, got '${!v}'"
+    done
+    local list=0; [[ $1 == --list ]] && { list=1; shift; }
+
+    local opt fmt=jsonl iv= du= verbose=0 tfile=
+    while getopts ":o:i:d:t:vh" opt; do
+        case $opt in
+            o) fmt=$OPTARG ;;
+            t) tfile=$OPTARG ;;
+            v) verbose=1 ;;
+            i) iv=$OPTARG ;;
+            d) du=$OPTARG ;;
+            h) usage; exit 0 ;;
+            :) die "-$OPTARG needs a value (--help)" ;;
+            \?) die "unknown option -$OPTARG (--help)" ;;
+        esac
+    done
+    shift $(( OPTIND - 1 ))
+    (( $# == 0 )) || die "unexpected argument '$1' (targets go in FF_HOSTS or -t <file>; --help)"
+    [[ -n $FF_HOSTS || -n $tfile ]] || die "no targets: set FF_HOSTS or give -t <file> (--help)"
+    [[ -n $FF_HOSTS && -n $tfile ]] && die "use FF_HOSTS or -t <file>, not both (unset FF_HOSTS to use the file)"
+    # targets: FF_HOSTS (backends as FF_SSH_USER, key ssh), or the -t file's rows (FF_SSH_USER the default login)
+    declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() T_FROM=() T_ROW=() BMCS=() B_LOGIN=() B_PW=() B_LINE=() B_ROW=(); HAVE_PW=0
+    TARGETS=(); _SEEN=(); INPUT_RANGES=0
+    [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
+    if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
+    [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
+    # the capture (tc_main.sh, shared with fabric_ferret.sh --thermals-only)
+    tc_check_settings
+    (( list )) && tc_list
+    tc_check_opts
+    tc_run
 }
 
 # run when executed or fed on stdin (ssh jump 'bash -s' < script: BASH_SOURCE is empty); not when sourced

@@ -1,0 +1,6 @@
+### iteration:1 phase:1
+198.19.1.21,198.19.1.22,[SUM]  0.00-1.00  sec  3600  GBytes  360  Gbits/sec  receiver  retransmits:0   cpu:20.5/40.0
+198.19.2.22,198.19.2.21,[SUM]  0.00-1.00  sec  480  GBytes  48  Gbits/sec  receiver  retransmits:0   cpu:20.5/40.0
+### iteration:1 phase:2
+198.19.1.21,198.19.2.22,[SUM]  0.00-1.00  sec  3800  GBytes  380  Gbits/sec  receiver  retransmits:0   cpu:20.5/40.0
+198.19.2.22,198.19.1.21,[SUM]  0.00-1.00  sec  3800  GBytes  380  Gbits/sec  receiver  retransmits:0   cpu:20.5/40.0

@@ -1,0 +1,21 @@
+#!/usr/bin/expect -f
+# ferret_roll.exp <kind> <capture> <ferret_view.py>: the viewer on a pty with FF_FERRET=<kind> (over|ball), fed 50
+# synthetic log lines over about 4 s; "r" is sent after 1 s so the roll runs while lines still come; every byte
+# the pty shows goes to <capture>; the exit status is the viewer's.
+set kind [lindex $argv 0]
+set cap [lindex $argv 1]
+set view [lindex $argv 2]
+set timeout 60
+log_user 0
+log_file -a -noappend $cap
+set env(FF_FERRET) $kind
+set env(TERM) xterm-256color
+spawn /opt/homebrew/bin/bash -c "for i in \$(seq 1 50); do echo \"# line \$i fabric_ferret.sh: 4 backends\"; sleep 0.08; done | python3 $view"
+after 1000
+send "r"
+expect {
+    eof {}
+    timeout { puts stderr "ferret_roll.exp: timeout"; exit 99 }
+}
+lassign [wait] pid spawnid oserr rc
+exit $rc

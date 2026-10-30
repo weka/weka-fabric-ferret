@@ -1,0 +1,22 @@
+Ethernet Channel Bonding Driver: v6.6.0
+
+Bonding Mode: IEEE 802.3ad Dynamic link aggregation
+Transmit Hash Policy: layer3+4 (1)
+MII Status: up
+MII Polling Interval (ms): 100
+Up Delay (ms): 0
+Down Delay (ms): 0
+
+Slave Interface: ens1np0
+MII Status: up
+Speed: 400000 Mbps
+Duplex: full
+Link Failure Count: 0
+Permanent HW addr: 00:11:22:33:44:55
+
+Slave Interface: ens1np1
+MII Status: down
+Speed: Unknown
+Duplex: Unknown
+Link Failure Count: 3
+Permanent HW addr: 00:11:22:33:44:56

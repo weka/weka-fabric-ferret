@@ -1,0 +1,4 @@
+h21 enp5s0np0 198.19.1.21 unknown swp21 x y
+h21 enp196s0np0 198.19.2.21 unknown swp21 x y
+h22 enp5s0np0 198.19.1.22 unknown swp22 x y
+h22 enp196s0np0 198.19.2.22 unknown swp22 x y

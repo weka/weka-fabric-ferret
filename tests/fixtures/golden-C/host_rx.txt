@@ -1,0 +1,3 @@
+Host NUMA_A/B Ring_A Ring_B PCIe_A PCIe_B Governor IRQbal RcvCPU% RcvThr% SndCPU% Softnet_drop Squeeze TCP_rcv_drop NIC_discard AER Klog Flags
+h21 0/1 8192/8192 8192/8192 16.0x16/16.0x16 16.0x16/16.0x16 performance on 64 4.0 34.5 0 24 0 0 0 0 -
+h22 0/1 8192/8192 8192/8192 16.0x16/16.0x16 16.0x16/16.0x16 performance on 65 4.1 38.5 0 24 0 0 0 0 -

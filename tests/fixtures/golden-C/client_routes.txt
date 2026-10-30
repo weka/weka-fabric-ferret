@@ -1,0 +1,8 @@
+c1 bond0 A 198.19.1.22 bond0 declared
+c1 bond0 B 198.19.2.22 bond0 declared
+c2 bond0 A 198.19.1.22 bond0 declared
+c2 bond0 B 198.19.2.22 bond0 declared
+c3 bond0 A 198.19.1.22 bond0 declared
+c3 bond0 B 198.19.2.22 bond0 declared
+c4 ens1f0 A 198.19.1.22 ens1f0 declared
+c4 ens1f1 B 198.19.2.22 ens1f1 declared

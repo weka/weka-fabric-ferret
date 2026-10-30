@@ -1,0 +1,208 @@
+#!/opt/homebrew/bin/bash
+# fake ssh for thermals_capture.sh: runs the piped reader locally against a per-target fake sysfs and stubs.
+# The target's case comes from $FAKE_TC/case.<target> (default all). Cases:
+#   all       coretemp, k10temp, nvme, mlx5 (netdev), ice, a power-only chip; ipmitool inlet 24 / exhaust 52 (nc)
+#   nochips   hwmon dir, no temp inputs; no ipmitool        nohwmon  no hwmon dir; ipmitool can't open the device
+#   noipmi    as all, no ipmitool                           ipmislow ipmitool sleeps past the timeout
+#   sudo      not root, sudo refuses                        sudook   not root, sudo -n allowed
+#   sudopw    not root, sudo -S needs $FAKE_TC/sudopw.<target> on stdin (argv -> sudo_calls.log)
+#   sudonopw  not root, sudoers NOPASSWD: sudo -S takes nothing from stdin, the command gets it (argv -> sudo_calls.log)
+#   esc_dzdo  not root, dzdo -n works, sudo refuses        esc_doas  not root, only doas -n (works), sudo refuses
+#   esc_slow  not root, dzdo hangs (the 5 s probe timeout), sudo -n works
+#   esc_none  not root, only sudo, and it refuses          esc_both  not root, dzdo -n and sudo -n both work
+#             (escalator argv -> esc_calls.log)
+#   hot       CPU package 70 +6 per read (high 80, crit 100); inlet 39 (nc, high 38)
+#   cool      as all, Core 0 70 -6 per read (its last reading below its peak: stdout's Avg of the latest readings)
+#   hidflag   as all, hwmon Core 0 at 85 (high) while the BMC adds a normal CPU1 Temp 45: stdout's cpu cell is the BMC's, the
+#             hwmon flag rides in Flags as cpu:high/hwmon
+#   down      ssh fails (rc 255)                            hang     the whole read hangs (local timeout cuts it)
+#   refused   ssh connection refused (rc 255)               denied   ssh auth refused (rc 255): a host is there
+#   downfirst no route on the first call, then as all     nodns    the name doesn't resolve (rc 255)
+#   cmfail    "Failed to connect to new control master" (rc 255) on the first call, then as all (a fan-out refusal)
+#   downsilent  rc 255 with nothing on stderr
+#   amd       k10temp Tctl + Tccd1 (no thresholds), two nvme (crit only), bnxt_en with no net/ dir (dev = pci2)
+#   nolabel   acpitz: temp1 (no label), temp2 negative, temp3 unreadable (skipped)
+#   gpu       as all + nvidia-smi (2 GPUs, old and T.Limit formats) + an HGX-style BMC (GPU, HBM, NVMe, DIMM, NIC…)
+#   gpubmc0   as all + gpu's nvidia-smi, with all's plain BMC (no GPU sensor there: stdout's gpu cells come from nvidia-smi)
+#   gpunobmc  as all + gpu's nvidia-smi, no ipmitool (stdout's gpu cells come from nvidia-smi, Source nvidia-smi+hwmon)
+#   gpufail   as all + nvidia-smi that can't reach the driver
+#   gpunosmi  as all + an NVIDIA driver loaded (proc/driver/nvidia/gpus) but no nvidia-smi anywhere
+#   gpupci    as all + two NVIDIA 3D controllers on the PCI bus (plus an NVIDIA bridge and a NIC), no driver, no nvidia-smi
+#   gpupci_hgx  gpupci's PCI bus with gpu's HGX-style BMC (the operator's 112 GPU hosts: no nvidia-smi, GPU temps from the BMC)
+#   nic2      as all + a second mlx5 NIC (enp4s0np0, 71 C)
+#   manycores as all + 70 more coretemp cores (Core 1..70, 40.0 up to 74.5)
+#   crithot   as all, the mlx5 NIC (crit only) at 101
+# Logins: $FAKE_TC/login.<target> = the only login accepted; $FAKE_TC/pw.<target> = a password is required (not
+# under BatchMode=yes), read from SSH_ASKPASS with SSH_ASKPASS_REQUIRE=force. Any environment variable holding a
+# target's password is logged as "pwenv <target> <var>" to calls.log (the tool must never put one there).
+# Every call's argv is logged to $FAKE_TC/calls.log; -O exit (control master) just succeeds; -V prints
+# $FAKE_SSH_VERSION (default OpenSSH_9.9p2).
+FAKE_TC=${FAKE_TC:?FAKE_TC unset}
+args=("$@"); t=; i=0; login=$(id -un); batch=no
+while (( i < ${#args[@]} )); do
+    a=${args[i]}
+    case $a in
+        -V) echo "${FAKE_SSH_VERSION:-OpenSSH_9.9p2, LibreSSL 3.3.6}" >&2; exit 0 ;;
+        -O) echo "exit $*" >> "$FAKE_TC/calls.log"; exit 0 ;;
+        -l) login=${args[i+1]}; i=$(( i + 2 )); continue ;;
+        -o) [[ ${args[i+1]} == BatchMode=* && $batch == no && -z $bseen ]] && { batch=${args[i+1]#BatchMode=}; bseen=1; }; i=$(( i + 2 )); continue ;;
+        -*) i=$(( i + 1 )); continue ;;
+    esac
+    t=$a; break
+done
+rest=("${args[@]:i+1}")
+echo "call $* " >> "$FAKE_TC/calls.log"
+c=all; [[ -r $FAKE_TC/case.$t ]] && c=$(cat "$FAKE_TC/case.$t")
+deny() { echo "$login@$t: Permission denied (publickey,password)." >&2; exit 255; }
+[[ -r $FAKE_TC/login.$t && $(cat "$FAKE_TC/login.$t") != "$login" ]] && c=deniedlogin
+if [[ -r $FAKE_TC/pw.$t && $c != deniedlogin ]]; then
+    pwv=$(cat "$FAKE_TC/pw.$t"); for v in $(compgen -e); do [[ ${!v} == "$pwv" ]] && echo "pwenv $t $v" >> "$FAKE_TC/calls.log"; done
+    [[ $batch == yes ]] && deny
+    if [[ $SSH_ASKPASS_REQUIRE == force && -x $SSH_ASKPASS ]]; then got=$("$SSH_ASKPASS" "$login@$t's password: "); echo "askpass $t" >> "$FAKE_TC/calls.log"
+    else got=; fi
+    [[ $got == "$(cat "$FAKE_TC/pw.$t")" ]] || deny
+fi
+case $c in
+    deniedlogin) deny ;;
+    down) printf 'ssh: connect to host %s port 22: Connection timed out\r\n' "$t" >&2; exit 255 ;;   # real ssh: \r\n
+    refused) echo "ssh: connect to host $t port 22: Connection refused" >&2; exit 255 ;;
+    nodns) printf 'ssh: Could not resolve hostname %s: Name or service not known\r\n' "$t" >&2; exit 255 ;;
+    denied) echo "root@$t: Permission denied (publickey,password)." >&2; exit 255 ;;
+    hang) sleep 300; exit 0 ;;
+    downfirst) [[ -e $FAKE_TC/up.$t ]] || { : > "$FAKE_TC/up.$t"; echo "ssh: connect to host $t port 22: No route to host" >&2; exit 255; } ;;
+    cmfail) [[ -e $FAKE_TC/up.$t ]] || { : > "$FAKE_TC/up.$t"; echo "Failed to connect to new control master" >&2; exit 255; } ;;   # refused under load, then up
+    downsilent) exit 255 ;;   # rc 255 with nothing on stderr
+esac
+T=$FAKE_TC/sys.$t; B=$FAKE_TC/bin.$t
+if [[ ! -d $T ]]; then
+    mkdir -p $T/class/hwmon $T/devices/pci0/net/enp5s0np0 $T/devices/pci1/net/ens1f0 $T/devices/pci2 $T/devices/pci3/net/enp4s0np0 $T/devices/nvme0 $T/devices/nvme1 $T/devices/coretemp.0 $T/devices/k10 $B
+    mk() { local d=$T/class/hwmon/$1; mkdir -p $d; echo "$2" > $d/name; ln -s ../../../devices/$3 $d/device; }
+    sv() { echo "$3" > $T/class/hwmon/$1/$2; }
+    case $c in
+    nochips) mk hwmon0 acpi_power_meter k10; sv hwmon0 power1_input 1 ;;
+    nohwmon) rmdir $T/class/hwmon ;;
+    amd) mk hwmon0 k10temp k10; sv hwmon0 temp1_label Tctl; sv hwmon0 temp1_input 65000; sv hwmon0 temp3_label Tccd1; sv hwmon0 temp3_input 60500
+         mk hwmon1 nvme nvme0; sv hwmon1 temp1_label Composite; sv hwmon1 temp1_input 40850; sv hwmon1 temp1_crit 84850
+         mk hwmon2 nvme nvme1; sv hwmon2 temp1_label Composite; sv hwmon2 temp1_input 41850; sv hwmon2 temp1_crit 84850
+         mk hwmon3 bnxt_en pci2; sv hwmon3 temp1_input 70000 ;;
+    nolabel) mk hwmon0 acpitz k10; sv hwmon0 temp1_input 45000; sv hwmon0 temp2_input -5000; sv hwmon0 temp3_input 30000; chmod 000 $T/class/hwmon/hwmon0/temp3_input ;;
+    *)  mk hwmon0 coretemp coretemp.0; sv hwmon0 temp1_label 'Package id 0'; sv hwmon0 temp1_input 60000; sv hwmon0 temp1_max 80000; sv hwmon0 temp1_crit 100000
+        sv hwmon0 temp2_label 'Core 0'; sv hwmon0 temp2_input 58000; sv hwmon0 temp2_max 80000; sv hwmon0 temp2_crit 100000
+        mk hwmon1 k10temp k10; sv hwmon1 temp1_label Tctl; sv hwmon1 temp1_input 55125
+        mk hwmon2 nvme nvme0; sv hwmon2 temp1_label Composite; sv hwmon2 temp1_input 44850; sv hwmon2 temp1_max 84850; sv hwmon2 temp1_crit 84850
+        mk hwmon3 mlx5 pci0; sv hwmon3 temp1_input 62000; sv hwmon3 temp1_crit 105000
+        mk hwmon4 ice pci1; sv hwmon4 temp1_input 58000; sv hwmon4 temp1_max 96000; sv hwmon4 temp1_crit 102000
+        mk hwmon5 acpi_power_meter k10; sv hwmon5 power1_input 350000000
+        # manycores: 70 more cores on socket 0, Core 1..70 (a wide CPU table; Core 70 the hottest at 74.5)
+        [[ $c == manycores ]] && for k in $(seq 3 72); do sv hwmon0 temp${k}_label "Core $(( k - 2 ))"; sv hwmon0 temp${k}_input $(( 40000 + (k - 3) * 500 )); sv hwmon0 temp${k}_crit 100000; done
+        # nic2: one more mlx5 NIC, enp4s0np0, which sorts before enp5s0np0 (another host's NIC set differs)
+        # and its enp5s0np0 crit is 100, not 105 as on other hosts (a column whose crit differs by host)
+        [[ $c == nic2 ]] && { mk hwmon6 mlx5 pci3; sv hwmon6 temp1_input 71000; sv hwmon6 temp1_crit 105000; sv hwmon3 temp1_crit 100000; }
+        # crithot: the mlx5 (crit 105, no max) at 101, the ice (max 96, crit 102) at 58: high = 95% of crit = 99.75
+        [[ $c == crithot ]] && sv hwmon3 temp1_input 101000
+        [[ $c == hidflag ]] && sv hwmon0 temp2_input 85000 ;;
+    esac
+    for x in timeout cat tr readlink head cut awk grep; do ln -s "$(command -v $x)" $B/$x; done
+    printf '#!/bin/bash\n[ "$1" = -s ] && echo %s\n' "$(case $t in *.*.*.*) echo "n${t##*.}" ;; *) echo "$t" ;; esac)" > $B/hostname
+    case $c in sudo|sudook|sudopw|sudonopw|esc_*) echo 'echo 1000' ;; *) echo 'echo 0' ;; esac | { echo '#!/bin/bash'; cat; }> $B/id
+    # esc_* escalators: each logs its argv; "ok" runs the command (after its no-prompt flag), "no" refuses, "hang" sleeps
+    esc() { local x=$2 n=$1; printf '#!/opt/homebrew/bin/bash\necho "%s $*" >> %s/esc_calls.log\n' "$n" "$FAKE_TC" > $B/$n
+            case $x in ok) printf 'case $1 in -n|-e) shift ;; esac; exec "$@"\n' ;; no) printf 'echo "%s: a password is required" >&2; exit 1\n' "$n" ;; hang) printf 'exec sleep 30\n' ;; esac >> $B/$n; }
+    case $c in
+        esc_dzdo) esc dzdo ok; esc sudo no ;;
+        esc_doas) esc doas ok; esc sudo no ;;
+        esc_slow) esc dzdo hang; esc sudo ok ;;
+        esc_none) esc sudo no ;;
+        esc_both) esc dzdo ok; esc sudo ok ;;
+    esac
+    case $c in
+        sudo) printf '#!/bin/bash\necho "sudo: a password is required" >&2; exit 1\n' > $B/sudo ;;
+        sudook) printf '#!/bin/bash\n[ "$1" = -n ] && shift; exec "$@"\n' > $B/sudo ;;
+        # sudoers NOPASSWD: sudo -S asks nothing and takes nothing from stdin; the command gets stdin as it came
+        sudonopw) printf '#!/opt/homebrew/bin/bash\necho "sudo $*" >> %s/sudo_calls.log\nwhile [ "$1" = -S ] || [ "$1" = -k ] || [ "$1" = -n ]; do shift; done; [ "$1" = -p ] && shift 2; exec "$@"\n' "$FAKE_TC" > $B/sudo ;;
+        sudopw) cp "$FAKE_TC/sudopw.$t" $B/sudo_pw
+                printf '#!/opt/homebrew/bin/bash\necho "sudo $*" >> %s/sudo_calls.log\n[ -n "${TC_PW+x}" ] && echo "pwenv sudo %s" >> %s/calls.log\nif [ "$1" = -S ]; then shift; [ "$1" = -p ] && shift 2; IFS= read -r p\n  [ "$p" = "$(cat %s/sudo_pw)" ] && exec "$@"; echo "Sorry, try again."; echo "sudo: 1 incorrect password attempt" >&2; exit 1; fi\necho "sudo: a password is required" >&2; exit 1\n' "$FAKE_TC" "$t" "$FAKE_TC" "$B" > $B/sudo ;;
+    esac
+    case $c in
+    nochips|noipmi|gpunobmc) ;;
+    nohwmon) printf '#!/bin/bash\necho "Could not open device at /dev/ipmi0 or /dev/ipmi/0 or /dev/ipmidev/0: No such file or directory" >&2; exit 1\n' > $B/ipmitool ;;
+    ipmislow) printf "#!/bin/bash\nexec sleep 30\n" > $B/ipmitool ;;
+    gpu|gpupci_hgx) cat > $B/ipmitool <<'IPMI'
+#!/bin/bash
+cat <<'OUT'
+Inlet Temp       | 23.000     | degrees C  | ok    | na        | na        | na        | na        | 42.000    | na
+CPU1 VRMIN Temp  | 41.000     | degrees C  | ok    | na        | na        | na        | na        | 100.000   | na
+P1 DIMMA~D Temp  | 29.000     | degrees C  | ok    | na        | na        | na        | na        | 85.000    | na
+AOC NIC1 Temp    | 46.000     | degrees C  | ok    | na        | na        | na        | na        | 100.000   | na
+NVMe SSDA Temp   | 29.000     | degrees C  | ok    | na        | na        | na        | na        | 76.000    | na
+M2SSD Temp       | 50.000     | degrees C  | ok    | na        | na        | na        | na        | 75.000    | na
+HGX GPU Temp     | 38.000     | degrees C  | ok    | na        | na        | na        | 82.000    | 89.000    | na
+HGX HBM Temp     | 40.000     | degrees C  | ok    | na        | na        | na        | 98.000    | 105.000   | na
+PLX1 Temp        | 35.000     | degrees C  | ok    | na        | na        | na        | na        | 110.000   | na
+OUT
+IPMI
+        ;;
+    *)  inlet='24.000     | degrees C  | ok   '; [[ $c == hot ]] && inlet='39.000     | degrees C  | nc   '
+        cpu1=; [[ $c == hidflag ]] && cpu1='CPU1 Temp        | 45.000     | degrees C  | ok    | na        | na        | na        | 85.000    | 90.000    | na
+'
+        cat > $B/ipmitool <<IPMI
+#!/bin/bash
+cat <<'OUT'
+Inlet Temp       | $inlet | na        | -7.000    | -2.000    | 38.000    | 42.000    | na
+${cpu1}Exhaust Temp     | 52.000     | degrees C  | nc    | na        | 3.000     | 8.000     | 50.000    | 55.000    | na
+Fan1             | 8400.000   | RPM        | ok    | na        | 600.000   | 840.000   | na        | na        | na
+Temp             | na         | degrees C  | na    | na        | na        | na        | 85.000    | 90.000    | na
+OUT
+IPMI
+        ;;
+    esac
+    case $c in   # nvidia-smi: GPU 0 in the older absolute format, GPU 1 in the newer T.Limit one (relative, skipped)
+    gpu|gpubmc0|gpunobmc) cat > $B/nvidia-smi <<'NV'
+#!/bin/bash
+[ "$*" = "-q -d TEMPERATURE" ] || { echo "fake nvidia-smi: unexpected $*" >&2; exit 2; }
+cat <<'OUT'
+
+==============NVSMI LOG==============
+
+Attached GPUs                             : 2
+GPU 00000000:18:00.0
+    Temperature
+        GPU Current Temp                  : 38 C
+        GPU Shutdown Temp                 : 92 C
+        GPU Slowdown Temp                 : 89 C
+        GPU Max Operating Temp            : 85 C
+        GPU Target Temperature            : N/A
+        Memory Current Temp               : 40 C
+        Memory Max Operating Temp         : 95 C
+
+GPU 00000000:2A:00.0
+    Temperature
+        GPU Current Temp                  : 84 C
+        GPU T.Limit Temp                  : 3 C
+        GPU Shutdown T.Limit Temp         : -5 C
+        GPU Slowdown T.Limit Temp         : -2 C
+        GPU Max Operating T.Limit Temp    : 0 C
+        GPU Target Temperature            : N/A
+        Memory Current Temp               : N/A
+        Memory Max Operating T.Limit Temp : 0 C
+OUT
+NV
+        ;;
+    gpufail) printf '#!/bin/bash\necho "NVIDIA-SMI has failed because it could not communicate with the NVIDIA driver."\nexit 9\n' > $B/nvidia-smi ;;
+    gpunosmi) mkdir -p $T/proc/driver/nvidia/gpus/0000:18:00.0 ;;   # the driver is loaded, nvidia-smi nowhere
+    gpupci|gpupci_hgx) for b in 0000:18:00.0 0000:2a:00.0; do mkdir -p $T/bus/pci/devices/$b; echo 0x10de > $T/bus/pci/devices/$b/vendor; echo 0x030200 > $T/bus/pci/devices/$b/class; done
+            mkdir -p $T/bus/pci/devices/0000:00:1f.0; echo 0x10de > $T/bus/pci/devices/0000:00:1f.0/vendor; echo 0x068000 > $T/bus/pci/devices/0000:00:1f.0/class   # an NVIDIA bridge: not a GPU
+            mkdir -p $T/bus/pci/devices/0000:3b:00.0; echo 0x15b3 > $T/bus/pci/devices/0000:3b:00.0/vendor; echo 0x020700 > $T/bus/pci/devices/0000:3b:00.0/class ;;   # a Mellanox NIC
+    esac
+    for x in hostname id sudo ipmitool nvidia-smi dzdo doas; do [[ -f $B/$x ]] && chmod +x $B/$x; done
+fi
+if [[ $c == hot ]]; then   # 70, 76, 82 ... one step per read
+    n=$(cat "$FAKE_TC/cnt.$t" 2>&1); [[ $n =~ ^[0-9]+$ ]] || n=0; echo $(( n + 1 )) > "$FAKE_TC/cnt.$t"
+    echo $(( 70000 + n * 6000 )) > $T/class/hwmon/hwmon0/temp1_input
+fi
+if [[ $c == cool ]]; then   # Core 0: 70, 64, 58 ... one step down per read
+    n=$(cat "$FAKE_TC/cnt.$t" 2>&1); [[ $n =~ ^[0-9]+$ ]] || n=0; echo $(( n + 1 )) > "$FAKE_TC/cnt.$t"
+    echo $(( 70000 - n * 6000 )) > $T/class/hwmon/hwmon0/temp2_input
+fi
+[[ ${rest[0]} == bash && ${rest[1]} == -s ]] || { echo "fake ssh: unexpected command: ${rest[*]}" >&2; exit 99; }
+exec env -i PATH=$B:/usr/bin:/bin FF_SYSFS=$T FF_PROCFS=$T/proc /opt/homebrew/bin/bash "${rest[@]:1}"
