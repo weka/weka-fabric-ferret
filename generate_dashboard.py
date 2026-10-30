@@ -296,7 +296,8 @@ def generate_html(data, output_path):
         else:
             for r in rows:
                 host_nics[host].append({**r, 'avg_gbps': avg, 'members': [], 'bond': None})
-    has_bonds = any(n['members'] for ns in host_nics.values() for n in ns)
+    all_nics = [n for ns in host_nics.values() for n in ns]   # clients too: the map pops client hosts from host_nics below
+    has_bonds = any(n['members'] for n in all_nics)
     hlevel = 3 if has_bonds else 2   # bonds sit between the leaves (1) and the hosts
 
     def nic_line(n, status=''):
@@ -671,7 +672,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 
     # Where to look first, above the tabs: the findings of every kind, worst first (the _w_* functions)
     slow, hot = _slow(nic_rows), _hot(data)
-    leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else 'no switch seen') for ns in host_nics.values() for n in ns}
+    leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else 'no switch seen') for n in all_nics}
     ipr_ = data.get('ip_rail', {})
     xr = [r for r in data['iperf_results'] if ipr_.get(r['src']) and ipr_.get(r['dst']) and _cross(r, ipr_)]
     xs = [r for r in xr if r['gbps'] < tpath(r, 'F')]
@@ -688,7 +689,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
     drops_ip = {d['ip']: d['rx_drop'] + d['tx_drop'] + d['rx_oob'] for d in data['packet_drops']}
     members_ip = {n['ip']: [{'nic': m['nic'], 'leaf': m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen',
                              'down': m['nic'] in n['bond']['down']} for m in n['members']]
-                  for ns in host_nics.values() for n in ns if n['members']}
+                  for n in all_nics if n['members']}
     runs_ip = defaultdict(list)
     for r in data['iperf_results']:
         for me, peer, way in ((r['src'], r['dst'], '→'), (r['dst'], r['src'], '←')):
