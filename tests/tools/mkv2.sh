@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # A synthetic old-format (pre-ferret fabric_sleuth) archive of a 253-host site for the parser groups that used to read a
 # real one (10, 23, 26; step b, 10-29). One awk writes the members, tar packs them. Deterministic from the host index.
-# usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new
+# usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new|rates
 #   v2    the v2 member set (host_list, iperf3_results, lldp_neighbors, nic_diagnostics, driver_info, down_ips, metadata,
 #         raw_per_host/ for two hosts): 253 hosts on rails A/B (tools/mksite.sh's addressing, racks and leaves), one
 #         iteration of two phases (phase 1 per rail between neighbours, phase 2 across rails), 380 Gbps runs on 400G
@@ -18,7 +18,7 @@
 #         below the old one (a counter reset), s010 enp5s0np0 with 3 link down events, and s012's rail B newly down;
 #         every other value identical, so the compare lists only the plants
 [ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "mkv2.sh: bash 4+ needed" >&2; exit 2; }
-OUT=${1:?usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new}; M=${2:?usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new}
+OUT=${1:?usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new|rates}; M=${2:?usage: tools/mkv2.sh <out.tar.gz> v2|v1|zero|new|rates}
 case $M in v2|v1|zero|new|rates) ;; *) echo "mkv2.sh: mode v2, v1, zero, new or rates" >&2; exit 2 ;; esac
 T=$(mktemp -d) || exit 2; D=$T/dp_validation_synth; mkdir -p "$D/raw_per_host" || exit 2
 awk -v D="$D" -v M="$M" 'function ipa(i) { return "198.19." (1 + 2 * ((i - 1) % 4)) "." (int((i - 1) / 4) + 1) }
