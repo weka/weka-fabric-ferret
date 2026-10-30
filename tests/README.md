@@ -14,7 +14,9 @@ runner: `/opt/homebrew/bin/bash tests/ff/14_uplinks.sh fabric_ferret.sh generate
 - Every group states `# checks: N` in its header; the runner FAILs a group whose PASS+FAIL lines differ from N, so a
   check that went silent shows. `# secs: N` (its seconds alone) sets the launch order, longest first. `# tier: fast`
   puts it in the fast tier.
-- A run cut off by its `timeout` makes every later check report `TIMEOUT after N s`, never a wrong count.
+- A run cut off by its `timeout` makes every later check report `TIMEOUT after N s`, never a wrong count. A cut-off is
+  2x the run's time under `-j 8` beside the heavy groups (xrun prints `# run <name>: N s` into the group's output), floor
+  30 s: a hang is reported at twice the expected, not at an arbitrary multiple (10-29: 16 and 30 had been raised to 3-10x).
 - A shell or awk error in a group's output is a FAIL even when its checks passed.
 - `# needs: <word> ...` names what a group cannot run without: a command on PATH, `site-data` (a real cluster's sample,
   never in the repo: FFT_SITE_DATA names it) or `lab-runs` (FFT_LAB_RUNS). Unmet, the group is SKIPPED by name,

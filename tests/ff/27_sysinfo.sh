@@ -3,8 +3,7 @@
 # flags and the dashboard card. Faults come from the fake: FAKE_RING FAKE_PCIE FAKE_GOV FAKE_SOFTNET_DROP FAKE_KLOG
 # FAKE_RCVCPU FAKE_NOTOOLS FAKE_BUF_DISCARD.
 # checks: 12
-# needs: site-data
-# secs: 17
+# secs: 38
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tgz() { ls $W/$1/fabric_ferret_*.tgz | head -n1; }
 member() { tar -xzOf $(tgz $1) --include="*/$2" 2>&1; }
@@ -13,11 +12,13 @@ rx() { member $1 host_rx.txt | awk -v h=$2 -v c="$3" 'NR == 1 {for (i = 1; i <= 
 # the "bad" run's checks moved to 50_golden_B.sh and the clean run's to 52_golden_C.sh (clean backends) and 50 (sysinfo
 # items, host_counters labels, cpu:S/R), 10-26
 chk "iperf3 runs with -V (CPU line)" "grep -q -e '-f g -Z -V' $C"
-mkdir -p $W/old && tar -czf $W/old/old.tgz -C $SITE/base $(basename $d) && python3 $P $W/old/old.tgz $W/old.html > $W/po.out 2>&1; rc=$?
+# (the stored pre-ferret v2 archive has no sysinfo; step b, 10-29: was a real site's sample under FFT_SITE_DATA)
+python3 $P $S/fixtures/bundles/12_old_v2_allAtoB.tar.gz $W/old.html > $W/po.out 2>&1; rc=$?
 chk "parser: a bundle without system info says 'Not captured'" "[ -s $W/old.html ] && grep -q 'Not captured: this bundle is from a fabric_ferret without system info capture' $W/old.html" "rc=$rc $(tail -n 2 $W/po.out)"
 
 # bounded capture: a stalled host is cut at FF_SYSINFO_TIMEOUT and kept; a timed-out item is named; a silent counter read is "-", not 0
-xrun slow FF_HOSTS=198.18.0.1-5 FF_ITER=1 FF_SYSINFO_TIMEOUT=3 FAKE_SYSINFO_SLOW=h2 FAKE_ITEM_TIMEOUT=h3 FAKE_HOSTCTR_EMPTY=h4 FAKE_RCVCPU=1500.0 timeout 120 $B $C 1 > $W/slow.out
+# (cut-off 2x the run's 24 s under -j 8, 10-29 21:25)
+xrun slow FF_HOSTS=198.18.0.1-5 FF_ITER=1 FF_SYSINFO_TIMEOUT=3 FAKE_SYSINFO_SLOW=h2 FAKE_ITEM_TIMEOUT=h3 FAKE_HOSTCTR_EMPTY=h4 FAKE_RCVCPU=1500.0 timeout 50 $B $C 1 > $W/slow.out
 chk "slow: run goes on past a stalled host" "grep -q '^RESULT coverage=' $W/slow.out" "$(tail -n 2 $W/slow.out)"
 chk "slow: stalled host cut with a WARNING" "grep -q 'WARNING: h2: system info cut off after 3s (FF_SYSINFO_TIMEOUT); the partial capture is kept' $W/slow.out"
 chk "slow: partial capture kept" "member slow sysinfo/h2/epoch | grep -q -E '^[0-9]+\$' && ! tar -tzf \$(tgz slow) | grep -q sysinfo/h2/lspci"

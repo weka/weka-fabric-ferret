@@ -1,4 +1,4 @@
-Stored parser archives (10-26):the dashboard checks of 11, 12, 13 and 14 parse these instead of running FF.
+Stored parser archives (10-26): the dashboard checks of 11, 12, 13 and 14 parse these instead of running FF.
 golden-B (50) and golden-C (52) keep the fresh FF -> parser wiring in --full.
 
 Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the fresh golden-B bundle: member names

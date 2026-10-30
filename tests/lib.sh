@@ -42,7 +42,7 @@ finish() { echo "---- $pass passed, $fail failed  (work dir $W$( [[ -z $RUN_DIR 
            [[ -z $RUN_DIR && $fail = 0 ]] && { cd "$S" && rm -rf "${W:?}"; }; [ $fail = 0 ]; exit; }
 
 # run the collector (or $O) in $W/<dir> on the fake rails: xrun <dir> VAR=... cmd...
-xrun() { fresh; mkdir -p $W/$1; ( cd $W/$1 && rm -f fabric_ferret_*; shift; env PATH=$S/fake:$PATH FF_RAILS='198.19.1.0/24;198.19.2.0/24' "$@" 2>&1 ); local rc=$?; tnote $rc "$@"; return $rc; }
+xrun() { fresh; mkdir -p $W/$1; local t0=$SECONDS; ( cd $W/$1 && rm -f fabric_ferret_*; shift; env PATH=$S/fake:$PATH FF_RAILS='198.19.1.0/24;198.19.2.0/24' "$@" 2>&1 ); local rc=$?; tnote $rc "$@"; echo "# run $1: $(( SECONDS - t0 )) s" >&2; return $rc; }   # the note sizes a run's timeout: 2x its time under -j 8
 hrows() { node $H/rows.js "$1" 2>&1; }
 # the collector at ec6addf (before worst-of Status and two-way phase 2): positive control, as $O
 # $O predates FF_RAILS 'a;b': every run of $O passes FF_RAILS=a,b itself

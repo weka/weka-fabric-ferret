@@ -6,7 +6,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 R3='198.19.1.0/24;198.19.2.0/24;198.19.3.0/24'
 
 # FF_ITER=all, 3 hosts: n(n-1) x (N + N(N-1)) = 6 x (3 + 6) = 54 directed paths
-out=$(xrun all3 FAKE_RAILS=3 FF_RAILS="$R3" FF_HOSTS=198.18.0.21-23 FF_ITER=all timeout 900 $B $C 1); rc=$?
+# cut-offs = 2x each run's time under -j 8 beside the heavy groups (10-29 21:14 and 21:17, the larger: all3 122 s, lg2 1 s,
+# nic3 6 s; floor 30 s)
+out=$(xrun all3 FAKE_RAILS=3 FF_RAILS="$R3" FF_HOSTS=198.18.0.21-23 FF_ITER=all timeout 250 $B $C 1); rc=$?
 chk "three rails: COMPLETE rc=0, cross_rail=on" "[ $rc = 0 ] && grep -qE '^RESULT coverage=COMPLETE .*cross_rail=on' <<<\"\$out\"" "rc=$rc $(grep -E '^RESULT|ERROR' <<<"$out" | head -n 2)"
 meta=$(bfile all3 metadata.txt)
 chk "three rails: metadata rail_count=3, rail_c, line_rate_c_gbps" "grep -qx 'rail_count=3' <<<\"\$meta\" && grep -qx 'rail_c=198.19.3.0/24' <<<\"\$meta\" && grep -q '^line_rate_c_gbps=' <<<\"\$meta\"" "$(grep -E '^(rail|line_rate)' <<<"$meta" | tr '\n' ' ')"
@@ -27,10 +29,10 @@ chk "three rails: dashboard renders (rc 0 or 3) and carries rail C (its rail lis
 chk "three rails: phase 1 and phase 2 markers" "bfile all3 iperf3_results.txt | grep -q '^### iteration:1 phase:1' && bfile all3 iperf3_results.txt | grep -q '^### iteration:1 phase:2'" "$(bfile all3 iperf3_results.txt | grep -c '^### ') markers"
 
 # FF_LINE_GBPS: one value or one per rail
-out=$(xrun lg2 FAKE_RAILS=3 FF_RAILS="$R3" FF_LINE_GBPS=400,400 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 timeout 60 $B $C 1); rc=$?
+out=$(xrun lg2 FAKE_RAILS=3 FF_RAILS="$R3" FF_LINE_GBPS=400,400 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 timeout 30 $B $C 1); rc=$?
 chk "three rails: FF_LINE_GBPS with 2 values stops" "[ $rc = 2 ] && grep -q 'RESULT coverage=STOPPED' <<<\"\$out\" && grep -q 'FF_LINE_GBPS' <<<\"\$out\"" "rc=$rc $(grep ERROR <<<"$out")"
 # three NIC names, with FF_LINE_GBPS per rail (one run for both; was runs lg3 and nic3)
-out=$(xrun nic3 FAKE_RAILS=3 FF_RAILS= FF_NICS=enp5s0np0,enp196s0np0,enp65s0np0 FF_LINE_GBPS=400,400,200 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 timeout 120 $B $C 1); rc=$?
+out=$(xrun nic3 FAKE_RAILS=3 FF_RAILS= FF_NICS=enp5s0np0,enp196s0np0,enp65s0np0 FF_LINE_GBPS=400,400,200 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 timeout 30 $B $C 1); rc=$?
 chk "three rails: FF_LINE_GBPS per rail sets line_rate_c_gbps=200" "bfile nic3 metadata.txt | grep -qx 'line_rate_c_gbps=200'" "rc=$rc $(bfile nic3 metadata.txt | grep line_rate | tr '\n' ' ')"
 chk "FF_NICS three names: rail_mode=nic rail_count=3" "bfile nic3 metadata.txt | grep -qx 'rail_count=3' && bfile nic3 metadata.txt | grep -qx 'rail_mode=nic'" "rc=$rc $(grep -E '^RESULT|ERROR' <<<"$out" | head -n 2)"
 finish

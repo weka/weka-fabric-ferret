@@ -29,7 +29,7 @@ class DataSet { constructor(a) { this.items = Array.isArray(a) ? a.map(x => Obje
   getIds() { return this.items.map(x => x.id); } update(u) { (Array.isArray(u) ? u : [u]).forEach(c => { const x = this.items.find(y => y.id === c.id); if (x) Object.assign(x, c); }); }
   add(u) { (Array.isArray(u) ? u : [u]).forEach(c => this.items.push(Object.assign({}, c))); } remove() {} forEach(f) { this.items.forEach(f); } map(f) { return this.items.map(f); } get length() { return this.items.length; } }
 // bootstrap.Tab records every .show(): an IP click that switches tabs shows up here (criterion 4: it must not)
-const tabShows = []; class Tab { constructor(e) { this.e = e; } show() { tabShows.push(this.e && this.e.id ? this.e.id : String(this.e)); } static getOrCreateInstance(e) { return new Tab(e); } static getInstance(e) { return new Tab(e); } }
+const tabShows = [], tabHides = []; class Tab { constructor(e) { this.e = e; } show() { tabShows.push(this.e && this.e.id ? this.e.id : String(this.e)); } hide() { tabHides.push(this.e && this.e.id ? this.e.id : String(this.e)); } static getOrCreateInstance(e) { return new Tab(e); } static getInstance(e) { return new Tab(e); } }
 const bootstrapStub = new Proxy({ Tab }, { get: (t, p) => (p in t) ? t[p] : anything() });
 const sandbox = { document, $, jQuery: $, vis: { DataSet, Network: anything() }, Plotly: anything(), bootstrap: bootstrapStub, console: { log() {}, warn() {}, error() {} },
   setTimeout: (f) => 0, clearTimeout() {}, requestAnimationFrame: () => 0, navigator: {}, location: { hash: '', href: '' }, performance: { now: () => 0 },
@@ -43,7 +43,7 @@ const ctx = vm.createContext(sandbox);
 const script = m[1] + (process.argv[3] === 'planted' ? '\n$(function () { new bootstrap.Tab({ id: "planted-tab" }).show(); });\n$(function () { nosuchfn_planted(); });\n' : '');
 try { vm.runInContext(script, ctx, { filename: 'inline', timeout: 10000 }); } catch (e) { errors.push(e); }
 const names = ['topoOpen', 'topoSetLayout', 'topoSetLabels', 'resetTopo', 'topoFit', 'topoNicPanel', 'topoShowPanel'];
-console.log(JSON.stringify({ errors: errors.map(e => String(e && e.message || e).slice(0, 160)), fns: Object.fromEntries(names.map(n => [n, typeof sandbox[n]])), tab_shows: tabShows.length }));
+console.log(JSON.stringify({ errors: errors.map(e => String(e && e.message || e).slice(0, 160)), fns: Object.fromEntries(names.map(n => [n, typeof sandbox[n]])), tab_shows: tabShows.length, tab_hides: tabHides.length }));
 // "ring" as the second argument: the hot-host ring (hot: true, border #ff7a1a, borderWidth 4) counted in the page's node
 // DataSet at load, after window.resetTopo() and after topoSetLayout('force'): the map's own calls must not strip it
 if (process.argv[3] === 'ring') {
