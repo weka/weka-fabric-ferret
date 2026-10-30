@@ -79,8 +79,8 @@ chk "Needs Repair (44_bd, A4): 0 NICs need repair: header '<b class=\"stat-good\
 chk "control: a host with no bond (h23) gets two plain links and no bond node or marker; the run's log counted 3 bonds" \
     "[ \$(edges $W/bd.html | jq '[.[] | select(.from == \"h23\")] | length') = 2 ] && [ \$(nodes $W/bd.html | jq '[.[] | select((.group == \"bond\" or .group == \"stub\") and .host == \"h23\")] | length') = 0 ] && grep -q 'Diagnostics: .* driver lines, 3 bonds' <<<\"\$out\"" "$(grep 'Diagnostics:' <<<"$out")"
 # a client bond's leaf = its members' leaves joined "+"; "no switch seen" only when no member saw one (10-29 23:05).
-# Seven critical NICs give a big fleet's grouped Where line (4 groups, all it shows): c1 on cleaf1+cleaf2, c2 one
-# member dark, c3 both dark; controls c4's plain NICs and the backends' rail A (the clients' 10 Gbps runs are theirs too)
+# Seven critical NICs, four Where groups (all it shows): c1 on cleaf1+cleaf2, c2 one member dark, c3 both dark;
+# controls: c4's plain NICs, the backends' rail A
 out=$(xrun cb FF_HOSTS=198.18.0.21-22 FF_CLIENTS=198.18.1.1-4 FF_CLIENT_NETS=$NETS FAKE_BOND_LLDP=c1,c2,c3 FAKE_BOND_LEAF2=c1 FAKE_BOND_DARK=c2 FAKE_NO_LLDP=c3 FAKE_SLOW_IP=198.19.10.1,198.19.10.2,198.19.10.3,198.19.10.4,198.19.11.4 FF_ITER=1 timeout 40 $B $C 1); rc=$?
 render cb; prc=$?
 where() { grep -o '<ul class="where-list mb-0">.*' "$1" | head -n 1 | sed 's#</ul>.*##' | sed 's#<li#\n<li#g' | grep '^<li'; }
