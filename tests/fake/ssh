@@ -219,9 +219,11 @@ case $script in
             case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac
             pt=$(( 40 + n )); [[ $nic == ens1f1 ]] && pt=$(( 50 + n ))
             if inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == bond0 ]]; then   # a listed client: bond0's two members ens1f0/ens1f1 see the leaf, both up
+                sw2=$sw; inlist "$h" "$FAKE_BOND_LEAF2" && [[ $sw != unknown ]] && sw2=cleaf2.example   # FAKE_BOND_LEAF2=c: its ens1f1 sees a second leaf (an MLAG pair)
+                inlist "$h" "$FAKE_BOND_DARK" && sw2=unknown   # FAKE_BOND_DARK=c: its ens1f1 sees no switch (one member dark)
                 echo "@@LLDP $h $nic $ip unknown unknown unknown unknown"
                 echo "@@LLDP $h ens1f0 $ip $sw swp$pt FE_port_c${n}_ens1f0 Cumulus_Linux"
-                echo "@@LLDP $h ens1f1 $ip $sw swp$(( pt + 10 )) FE_port_c${n}_ens1f1 Cumulus_Linux"
+                echo "@@LLDP $h ens1f1 $ip $sw2 swp$(( pt + 10 )) FE_port_c${n}_ens1f1 Cumulus_Linux"
                 echo "@@BOND $h $nic 2 2 none"
             else echo "@@LLDP $h $nic $ip $sw swp$pt FE_port_c${n}_$nic Cumulus_Linux"; fi
             echo "@@DRV $h $nic $ip mlx5_core 24.10 28.47.1088 (DEL0000000051) 0000:21:00.0"
@@ -440,6 +442,7 @@ case $script in
     rr=$(( RANDOM % 50 )); [[ $1 == "$FAKE_RETR_SRC" ]] && rr=${FAKE_RETR_N:-1000000}   # FAKE_RETR_SRC=ip: its runs retransmit FAKE_RETR_N
     if [[ $1 == 198.19.1[01].* || $2 == 198.19.1[01].* ]]; then   # a client run: c4's 100G NICs ~92, the 200G bonds ~185
         g=185; [[ $1 == 198.19.1[01].4 || $2 == 198.19.1[01].4 ]] && g=92; g=${FAKE_CLIENT_SPEED:-$g}
+        { inlist "$1" "$FAKE_SLOW_IP" || inlist "$2" "$FAKE_SLOW_IP"; } && g=10   # FAKE_SLOW_IP=ip,..: every run of that NIC at 10 Gbps (CRITICAL)
         echo "[SUM]   0.00-${5}.00  sec  ${g}0 GBytes  $g Gbits/sec                  receiver retransmits:$rr cpu:$(( 20 + RANDOM % 20 )).5/${FAKE_RCVCPU:-$(( 40 + RANDOM % 30 )).0}"
         exit 0
     fi
@@ -447,6 +450,7 @@ case $script in
     # FAKE_XSPEED: cross-rail runs (src and dst on different rails) report it; FAKE_BSPEED: B->B runs report it
     [[ -n $FAKE_XSPEED && ${1%.*} != "${2%.*}" ]] && g=$FAKE_XSPEED
     [[ -n $FAKE_BSPEED && ${1%.*} == 198.19.2 && ${2%.*} == 198.19.2 ]] && g=$FAKE_BSPEED
+    { inlist "$1" "$FAKE_SLOW_IP" || inlist "$2" "$FAKE_SLOW_IP"; } && g=10   # FAKE_SLOW_IP: backend NICs too
     echo "[SUM]   0.00-${5}.00  sec  ${g}0 GBytes  $g Gbits/sec                  receiver retransmits:$rr cpu:$(( 20 + RANDOM % 20 )).5/${FAKE_RCVCPU:-$(( 40 + RANDOM % 30 )).0}" ;;
 *) echo "fake ssh: unknown script" >&2; exit 1 ;;
 esac

@@ -85,4 +85,16 @@ if (process.argv[3] === 'panels') {
     add(n.panel.kind, h, n.panel.kind === 'leaf' ? { paths: /Runs to the other leaves|No backend runs/.test(h) ? 1 : 0, declared: /Declared/.test(h) ? 1 : 0, grid: /NIC.*IP.*Rail.*Leaf.*Worst run.*Drops/.test(h) ? 1 : 0 } : n.panel.kind === 'spine' ? { linkrows: /link/i.test(h) ? 1 : 0 } : {}); }   // linkrows: the spine's uplink rows, not IP links
   console.log(JSON.stringify({ panels: out, panel_errors: errors.length }));
 }
+// "spines" as the second argument: the Radial placement (window.resetTopo()) read back from the node DataSet: the spine
+// count, the smallest distance between two spines, the spines' and the leaves' ring radii (px). The group asserts
+if (process.argv[3] === 'spines') {
+  try { sandbox.resetTopo(); } catch (e) { errors.push(e); }
+  const ds = dataSets.find(d => d.items.some(x => x.group === 'spine'));
+  const sp = ds ? ds.items.filter(x => x.group === 'spine' && typeof x.x === 'number' && typeof x.y === 'number') : [];
+  const lf = ds ? ds.items.filter(x => x.group === 'switch' && typeof x.x === 'number') : [];
+  const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+  let min = Infinity; for (let i = 0; i < sp.length; i++) for (let j = i + 1; j < sp.length; j++) min = Math.min(min, dist(sp[i], sp[j]));
+  const r = (xs) => xs.length ? Math.round(Math.max(...xs.map(n => Math.hypot(n.x, n.y)))) : -1;
+  console.log(JSON.stringify({ spines: sp.length, spines_placed: sp.length, min_spine_px: sp.length > 1 ? Math.round(min * 10) / 10 : -1, spine_r: r(sp), leaf_r: r(lf), spine_errors: errors.length }));
+}
 console.log('END errors=' + errors.length);
