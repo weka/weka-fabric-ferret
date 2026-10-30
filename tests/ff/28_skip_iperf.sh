@@ -2,7 +2,7 @@
 # FF_SKIP_IPERF=1 runs every check but the bandwidth runs (a cluster whose WEKA I/O can't stop):
 # no iperf3 started or killed, busy hosts and hosts without iperf3 allowed, every planned path checked,
 # counters over one no-load window, system info kept, and the parser treats no throughput as by design.
-# checks: 14
+# checks: 16
 # secs: 29
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tgz() { ls $W/$1/fabric_ferret_*.tgz | head -n1; }
@@ -24,6 +24,14 @@ xrun clean FF_HOSTS=198.18.0.21-26 FF_ITER=all FF_SKIP_IPERF=1 timeout 120 $B $C
 chk "clean: FF_ITER=all COMPLETE rc=0" "[ $rc = 0 ] && grep -q '^RESULT coverage=COMPLETE hosts=6/6 paths=120/120 .*iperf=skipped' $W/clean.out" "rc=$rc $(grep '^RESULT' $W/clean.out)"
 python3 $P $(tgz clean) $W/clean.html > $W/pc.out 2>&1; prc=$?
 chk "parser: no-load bundle renders rc=0 with a note, no throughput problem" "[ $prc = 0 ] && grep -q 'NOTE: Bandwidth not tested (FF_SKIP_IPERF=1' $W/pc.out && ! grep -q 'PROBLEM' $W/pc.out" "rc=$prc $(grep -E 'PROBLEM|NOTE|Error' $W/pc.out | head -n 3)"
+
+# FF_SKIP_IPERF=1 with no duration given: the observation window defaults to 1 s, not the load run's 120 (a no-load run
+# has nothing to wait 120 s for); an explicit duration still wins: the positional 2 here (FF_DURATION=2 by env is the
+# same path). Cut-offs: the runs take ~4 s, so the 30 s floor (2x their time in a full `tests/run --full all` once measured)
+xrun nodur FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 30 $B $C > $W/nodur.out
+chk "no-load run without a duration: 'Observation window: 1s with no test load' (control: the same run with a positional 2 below says 2s)" "grep -q 'Observation window: 1s with no test load' $W/nodur.out" "$(grep -o 'Observation window: [0-9]*s' $W/nodur.out | head -n 1)"
+xrun dur2 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 30 $B $C 2 > $W/dur2.out
+chk "no-load run with a positional 2: 'Observation window: 2s with no test load' (an explicit duration wins the 1 s default)" "grep -q 'Observation window: 2s with no test load' $W/dur2.out" "$(grep -o 'Observation window: [0-9]*s' $W/dur2.out | head -n 1)"
 
 out=$(cd $W && FF_HOSTS=198.18.0.1 FF_SKIP_IPERF=1 FF_UDP=1 $B $C 2>&1); chk "FF_UDP=1 with FF_SKIP_IPERF=1 stops" "grep -q 'FF_UDP=1 is a load test; FF_SKIP_IPERF=1 sends no load' <<<\"\$out\"" "$out"
 out=$(cd $W && FF_HOSTS=198.18.0.1 FF_SKIP_IPERF=yes $B $C 2>&1); chk "FF_SKIP_IPERF must be 0 or 1" "grep -q \"FF_SKIP_IPERF must be 0 or 1, got 'yes'\" <<<\"\$out\"" "$out"
