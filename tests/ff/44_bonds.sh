@@ -5,7 +5,7 @@
 # down but still reports its switch: the red dashed edge to leaf1. The map draws a bond node per bond, a trunk from
 # the host, one edge per member (the member NIC as the label); every title starts with the host's own names, the
 # switch side sits in each edge's panel; the LLDP table shows the port id and the description
-# secs: 80
+# secs: 45
 # checks: 23
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 NETS=198.19.10.0/24,198.19.11.0/24
@@ -81,7 +81,7 @@ chk "control: a host with no bond (h23) gets two plain links and no bond node or
 # a client bond's leaf = its members' leaves joined "+"; "no switch seen" only when no member saw one (10-29 23:05).
 # Seven critical NICs, four Where groups (all it shows): c1 on cleaf1+cleaf2, c2 one member dark, c3 both dark;
 # controls: c4's plain NICs, the backends' one rail
-out=$(xrun cb FAKE_RAILS=1 FF_RAILS=198.19.1.0/24 FF_HOSTS=198.18.0.21-22 FF_CLIENTS=198.18.1.1-4 FF_CLIENT_NETS=$NETS FAKE_BOND_LLDP=c1,c2,c3 FAKE_BOND_LEAF2=c1 FAKE_BOND_DARK=c2 FAKE_NO_LLDP=c3 FAKE_SLOW_IP=198.19.10.1,198.19.10.2,198.19.10.3,198.19.10.4,198.19.11.4 FF_ITER=1 timeout 40 $B $C 1); rc=$?
+out=$(xrun cb FAKE_RAILS=1 FF_RAILS=198.19.1.0/24 FF_HOSTS=198.18.0.21-22 FF_CLIENTS=198.18.1.1-4 FF_CLIENT_NETS=$NETS FAKE_BOND_LLDP=c1,c2,c3 FAKE_BOND_LEAF2=c1 FAKE_BOND_DARK=c2 FAKE_NO_LLDP=c3 FAKE_SLOW_IP=198.19.10.1,198.19.10.2,198.19.10.3,198.19.10.4,198.19.11.4 FF_ITER=1 timeout 100 $B $C 1); rc=$?   # 100: 2x bd's full-run ratio (2.7) on cb's 17 s alone, until a full run measures cb
 render cb; prc=$?
 where() { grep -o '<ul class="where-list mb-0">.*' "$1" | head -n 1 | sed 's#</ul>.*##' | sed 's#<li#\n<li#g' | grep '^<li'; }
 nicdata() { grep '^    var topoNicData = ' "$1" | sed 's/^    var topoNicData = //; s/, topoLeafData = .*$//; s/;$//'; }
