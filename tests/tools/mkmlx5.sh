@@ -71,7 +71,7 @@ raw)
         echo "=== ethtool -S enp5s0np0 ==="; stats 11 | grep -E "rx_|tx_|link_down|pcs_symbol|prio|pause" | grep -v "ch[0-9]"
         echo "=== lldpcli enp5s0np0 ==="; lldp enp5s0np0 leaf-r01-a swp2s1
         echo "=== ethtool enp196s0np0 ==="; settings enp196s0np0 400000 DAC
-        echo "=== ethtool -i enp196s0np0 ==="; drvinfo 0000:c4:00.0
+        echo "=== ethtool -i enp196s0np0 ==="; drvinfo 0000:c3:00.0
         echo "=== ethtool -m enp196s0np0 ==="; dac
         echo "=== ethtool -S enp196s0np0 ==="; stats 13 | grep -E "rx_|tx_|link_down|pcs_symbol|prio|pause" | grep -v "ch[0-9]"
         echo "=== lldpcli enp196s0np0 ==="; lldp enp196s0np0 leaf-r01-b swp2s1

@@ -1,18 +1,19 @@
 #!/opt/homebrew/bin/bash
-# unit drivers on real text: diag parsing (mawk vs gawk), prio filter, DAC/optic temps, RDMA sysfs reader
+# unit drivers on mlx5-shaped text (tools/mkmlx5.sh; step b, 10-29: was a real host's under FFT_SITE_DATA): diag parsing
+# (mawk vs gawk), prio filter, DAC/optic temps, RDMA sysfs reader
 # tier: fast
 # checks: 15
-# needs: site-data
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
+mkdir -p $W/mlx5 && $B $S/tools/mkmlx5.sh raw $W/mlx5/s001.txt s001 && $B $S/tools/mkmlx5.sh dump $W/mlx5/dump.txt && $B $S/tools/mkmlx5.sh ethtool $W/mlx5/ethtool_S.txt || exit 2
 
-# --- diag parsing on real mlx5 text, mawk vs gawk ---
-a=$(PATH=$S/awkbin/mawk:$PATH $B $S/test_diag.sh $d/raw_per_host/$SITE_RAW_HOST ${SITE_RAIL_NICS//,/ } 2>&1)
-g=$(PATH=$S/awkbin/gawk:$PATH $B $S/test_diag.sh $d/raw_per_host/$SITE_RAW_HOST ${SITE_RAIL_NICS//,/ } 2>&1)
-chk "diag mawk == gawk" "[ \"\$a\" = \"\$g\" ] && [ -n \"\$a\" ]"
-chk "diag PortID: the site host's leaf and port read from its LLDP text (control: SITE_LEAF_PORTID set)" "[ -n \"\$SITE_LEAF_PORTID\" ] && grep -qF \"\$SITE_LEAF_PORTID\" <<<\"\$a\""
-out=$($B $H/test_prio_real.sh $C 2>&1); chk "real mlx5 ethtool -S: 54 prio/pause/ECN/discard counters, no per-ring rxN_/txN_" "[ \$(wc -l <<<\"\$out\") -eq 54 ] && ! grep -q -E '^[rt]x[0-9]+_' <<<\"\$out\" && grep -q -x rx_ecn_mark <<<\"\$out\" && grep -q -x rx_discards_phy <<<\"\$out\" && grep -q -x rx_out_of_buffer <<<\"\$out\"" "$(wc -l <<<"$out")"
-out=$($B $H/test_hwdump.sh $C $SITE_HWDUMP DIAG_SCRIPT ens800f0np0 2>&1 | grep '^@@NIC'); chk "real mlx5 DAC (no DDM): temp n/a, not 0.00" "[ \"\${out##* }\" = n/a ]" "$out"
-out=$(FF_C=$C $B $S/test_diag.sh $d/raw_per_host/$SITE_RAW_HOST ${SITE_RAIL_NICS%%,*} 2>&1 | grep '^@@NIC'); chk "site optic: its temperature still read (control: SITE_OPTIC_TEMP set)" "[ -n \"\$SITE_OPTIC_TEMP\" ] && [ \"\${out##* }\" = \"\$SITE_OPTIC_TEMP\" ]" "$out"
+# --- diag parsing on mlx5 text, mawk vs gawk ---
+a=$(PATH=$S/awkbin/mawk:$PATH $B $S/test_diag.sh $W/mlx5/s001.txt enp5s0np0 enp196s0np0 2>&1)
+g=$(PATH=$S/awkbin/gawk:$PATH $B $S/test_diag.sh $W/mlx5/s001.txt enp5s0np0 enp196s0np0 2>&1)
+chk "diag mawk == gawk (6 @@ lines)" "[ \"\$a\" = \"\$g\" ] && [ \$(grep -c '' <<<\"\$a\") = 6 ]" "$(grep -c '' <<<"$a") lines"
+chk "diag @@LLDP: the leaf and port read from the lldpcli text (leaf-r01-a swp2s1 on enp5s0np0, leaf-r01-b on enp196s0np0)" "grep -q '^@@LLDP s001 enp5s0np0 198.19.1.1 leaf-r01-a swp2s1 ' <<<\"\$a\" && grep -q '^@@LLDP s001 enp196s0np0 198.19.2.1 leaf-r01-b swp2s1 ' <<<\"\$a\"" "$(grep '^@@LLDP' <<<"$a" | tr '\n' '|')"
+out=$($B $H/test_prio_real.sh $C $W/mlx5/ethtool_S.txt 2>&1); chk "mlx5 ethtool -S: 54 prio/pause/ECN/discard counters, no per-ring rxN_/txN_" "[ \$(wc -l <<<\"\$out\") -eq 54 ] && ! grep -q -E '^[rt]x[0-9]+_' <<<\"\$out\" && grep -q -x rx_ecn_mark <<<\"\$out\" && grep -q -x rx_discards_phy <<<\"\$out\" && grep -q -x rx_out_of_buffer <<<\"\$out\"" "$(wc -l <<<"$out")"
+out=$($B $H/test_hwdump.sh $C $W/mlx5/dump.txt DIAG_SCRIPT ens800f0np0 2>&1 | grep '^@@NIC'); chk "mlx5 DAC (no DDM): temp n/a, not 0.00" "[ \"\${out##* }\" = n/a ]" "$out"
+out=$(FF_C=$C $B $S/test_diag.sh $W/mlx5/s001.txt enp5s0np0 2>&1 | grep '^@@NIC'); chk "optic: its module temperature read (47.25) and four rx power channels (control: the DAC NIC reads n/a above)" "[ \"\${out##* }\" = 47.25 ] && grep -q ' -0.91 -0.92 -0.93 -0.94 47.25\$' <<<\"\$out\"" "$out"
 out=$($B $H/test_rdma.sh $C $W 2>&1); chk "RDMA reader: VLAN maps to parent, bond and traffic counters skipped" "[ \"\$out\" = \"\$(cat $H/test_rdma.expected)\" ]" "$out"
 out=$($B $H/test_txctr.sh $C $W 2>&1); chk "sender TX reader: bond and VLAN-over-bond sum their ports, a member without a port counter gives na" "[ \"\$out\" = \"\$(cat $H/test_txctr.expected)\" ]" "$out"
 # --- DIAG_SCRIPT on a bond (10-27 fleet: 7 bonds at 400G of 2x400G): the kernel's bonding report read
