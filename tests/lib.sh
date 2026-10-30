@@ -7,13 +7,10 @@ S=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)   # this tests/ dir: fake/, fixt
 B=/opt/homebrew/bin/bash
 H=$S
 G=$(basename "$0" .sh)
-# Site data (a real cluster's sample, never in the repo): the groups that read it say "# needs: site-data" and take it from
-# FFT_SITE_DATA; absent, they are SKIPPED by name (never silently green). Other "# needs:" words are commands on PATH.
-SITE=${FFT_SITE_DATA:-$HOME/claude/fsLab/harness_ferret}
-# the site's names, subnets, file names and counts live in its own site_vars.sh (exported: the unit drivers read them too)
-if [[ -r $SITE/site_vars.sh ]]; then set -a; source "$SITE/site_vars.sh"; set +a; fi
+# "# needs: <command> ...": a group that needs a command PATH lacks is SKIPPED by name (never silently green). Every
+# fixture is synthetic and made at run time by tests/tools (step b, 10-29: the site-data and lab-runs needs are gone)
 for need in $(sed -n 's/^# needs: //p' "$0"); do
-    case $need in site-data) [[ -d $SITE/base ]] ;; lab-runs) [[ -d ${FFT_LAB_RUNS:-$HOME/claude/fsLab/runs} ]] ;; *) [[ -n $(command -v "$need") ]] ;; esac || { echo "SKIPPED $G: needs $need"; exit 0; }
+    [[ -n $(command -v "$need") ]] || { echo "SKIPPED $G: needs $need"; exit 0; }
 done
 # awkbin/<name>/awk: the three awks by one name each, made here when the awk exists (not tracked)
 for a in bsd:/usr/bin/awk mawk:"$(command -v mawk)" gawk:"$(command -v gawk)"; do
@@ -24,7 +21,6 @@ done
 if [[ -n $RUN_DIR ]]; then W=$(mktemp -d "$RUN_DIR/${G%%_*}.XXXX"); else W=$(mktemp -d "$S/regress.${G%%_*}.XXXX"); fi || exit 2
 export FAKE_STATE=$W/fake; mkdir -p "$FAKE_STATE" || exit 2
 cd "$W" || exit 2
-d=$(ls -d $SITE/base/dp_validation_* 2>&1 | head -n 1)   # the site sample's extracted dir (site-data groups only)
 pass=0; fail=0
 ok()  { echo "PASS  $1"; pass=$((pass+1)); }
 bad() { echo "FAIL  $1: $2"; fail=$((fail+1)); }

@@ -18,9 +18,10 @@ runner: `/opt/homebrew/bin/bash tests/ff/14_uplinks.sh fabric_ferret.sh generate
   2x the run's time under `-j 8` beside the heavy groups (xrun prints `# run <name>: N s` into the group's output), floor
   30 s: a hang is reported at twice the expected, not at an arbitrary multiple (10-29: 16 and 30 had been raised to 3-10x).
 - A shell or awk error in a group's output is a FAIL even when its checks passed.
-- `# needs: <word> ...` names what a group cannot run without: a command on PATH, `site-data` (a real cluster's sample,
-  never in the repo: FFT_SITE_DATA names it) or `lab-runs` (FFT_LAB_RUNS). Unmet, the group is SKIPPED by name,
-  counted apart in result.txt (`X passed, Y failed, Z skipped (names)`), never as passed.
+- `# needs: <command> ...` names a command a group cannot run without. Unmet, the group is SKIPPED by name, counted
+  apart in result.txt (`X passed, Y failed, Z skipped (names)`), never as passed. Every fixture is synthetic: the fakes,
+  the stored archives in fixtures/, and the site-sized inputs tests/tools make at run time (mksite.sh: a 253-host site's
+  discovery and LLDP; mkmlx5.sh: mlx5 text; mkv2.sh: old-format archives). Nothing from a real cluster enters the tree.
 - One suite at a time on a machine: every runner takes `$HOME/.cache/fabric_ferret/suite.lock` (FFT_SUITE_LOCK overrides);
   a second suite is refused naming the holder; a lock whose pid is gone is taken over, with a note.
 - Results: `tests/regress.XXXX` (ff) and `tests/thermals/regress.XXXX` (tc): `result.txt`, `<group>.out`, `<group>.rc`
