@@ -1549,19 +1549,27 @@ $(document).ready(function() {{
     var topoRingIds = [], topoRadialLabels = {{}};   // the labels Radial hid, by node id, for the other layouts
     var topoRadialHome = {{}};   // each node's last ring place, by id: where "Put back" and a double click return it
     var R_HOST = 680, RING = 46, MINGAP = 22, LABELW = 90, GAP = 0.04;   // px: host ring, between rings, between hosts, a label; rad between groups
+    var SPINE_GAP = 104, SPINE_MAXR = 260;   // px: between neighbouring spines (a 40 px diamond each side, a label under), the spine ring's cap (leaves at 340)
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
         var leavesOf = {{}};   // a host's leaves: its links' leaves, and through a bond node its members' leaves
         topoEdgesData.forEach(function(e) {{ if (!e.uplink && !e.bondtrunk) (leavesOf[e.from] = leavesOf[e.from] || {{}})[e.to] = 1; }});
         topoEdgesData.forEach(function(e) {{ if (e.bondtrunk) Object.keys(leavesOf[e.to] || {{}}).forEach(function(l) {{ (leavesOf[e.from] = leavesOf[e.from] || {{}})[l] = 1; }}); }});
         var sp = byGroup(['spine']), lf = byGroup(['switch']), hs = byGroup(['host', 'client']), bonds = byGroup(['bond']);
-        var angleOf = {{}}, ringOf = {{}}, placed = [];   // one DataSet update at the end: thousands of single updates stall the page
+        var angleOf = {{}}, ringOf = {{}}, placed = [], relabel = [];   // one DataSet update at the end: thousands of single updates stall the page
         // placed, not fixed: physics is off, so a node stays where it is put and can still be dragged (dragEnd pins it)
         var pin = function(n, r, a) {{ placed.push({{ id: n.id, x: r * Math.cos(a), y: r * Math.sin(a), fixed: false }});
                                       var p = placed[placed.length - 1]; topoRadialHome[n.id] = {{ x: p.x, y: p.y }};
                                       topoRingIds.push(n.id); angleOf[n.id] = a; }};
         topoRingIds = []; topoRadialHome = {{}};
-        sp.forEach(function(n, i) {{ pin(n, sp.length > 1 ? 90 : 0, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length); }});
+        // spines: neighbours SPINE_GAP apart (a diamond and its label), the ring at least 90 and inside the leaves;
+        // past the cap the labels go when neighbours sit closer than 100
+        var spR = sp.length > 1 ? Math.min(SPINE_MAXR, Math.max(90, SPINE_GAP / 2 / Math.sin(Math.PI / sp.length))) : 0;
+        var spLabels = sp.length < 2 || 2 * spR * Math.sin(Math.PI / sp.length) >= 100;
+        sp.forEach(function(n, i) {{
+            pin(n, spR, -Math.PI / 2 + Math.PI / sp.length + 2 * Math.PI * i / sp.length);
+            if (!spLabels && !(n.id in topoRadialLabels)) {{ topoRadialLabels[n.id] = n.label; relabel.push({{ id: n.id, label: '' }}); }}
+        }});
         var leafAngle = {{}};
         lf.forEach(function(n, i) {{ leafAngle[n.id] = -Math.PI / 2 + 2 * Math.PI * i / lf.length; pin(n, 340, leafAngle[n.id]); }});
         var groups = {{}};
@@ -1600,7 +1608,6 @@ $(document).ready(function() {{
             }}
             if (!moved) break;
         }}
-        var relabel = [];
         gl.forEach(function(g) {{
             var per = Math.max(1, Math.floor(g.arc * R_HOST / MINGAP)), rings = Math.ceil(g.hosts.length / per), m = Math.ceil(g.hosts.length / rings);
             var labels = g.arc * R_HOST / m >= LABELW;
