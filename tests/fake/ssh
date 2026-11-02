@@ -210,10 +210,12 @@ case $script in
     fi ;;
 *"@@NIC_DIAG"*)
     # FAKE_LLDPWHY=1: an unknown @@LLDP row is followed by its @@LLDPWHY reason, picked as the diag does (bond master
-    # $bm first); off, the hosts report no reasons (bundles from before 11-02)
+    # $bm first); off, the hosts report no reasons (bundles from before 11-02). lt: the script's own FF_LLDP=1 line
+    # (DIAG_SCRIPT's comments name FF_LLDP=1 too)
+    lt=; [[ $'\n'$script == *$'\n'FF_LLDP=1$'\n'* ]] && lt=1
     lrow() { echo "@@LLDP $*"; [[ $FAKE_LLDPWHY == 1 && $4 == unknown ]] || return 0; local w=no_neighbour
              if [[ $2 == "$bm" ]]; then w=bond; elif inlist "$1" "$FAKE_NO_LLDPCLI"; then
-                 w=no_lldpcli; [[ $script == *"FF_LLDP=1"* ]] && { w=no_frame; inlist "$1" "$FAKE_NO_TCPDUMP" && w=tcpdump_absent; }; fi
+                 w=no_lldpcli; [[ $lt == 1 ]] && { w=no_frame; inlist "$1" "$FAKE_NO_TCPDUMP" && w=tcpdump_absent; }; fi
              echo "@@LLDPWHY $1 $2 $w"; }
     for nic in "$@"; do
         [[ $nic == - ]] && continue; bm=
@@ -254,7 +256,7 @@ case $script in
         echo "=== ethtool $nic ==="; echo "	Speed: $sp"
     done
     # FAKE_NO_TCPDUMP=h1,h2: under FF_LLDP=1 those hosts' capture reports no tcpdump
-    [[ $script == *"FF_LLDP=1"* ]] && inlist "$h" "$FAKE_NO_TCPDUMP" && { echo "=== lldp - (tcpdump) ==="; echo "reason: tcpdump_absent (tcpdump not installed)"; }
+    [[ $lt == 1 ]] && inlist "$h" "$FAKE_NO_TCPDUMP" && { echo "=== lldp - (tcpdump) ==="; echo "reason: tcpdump_absent (tcpdump not installed)"; }
     echo "=== hostname ==="; echo "$h" ;;
 *"@@HWMON"*)
     # FAKE_HOT=h: its CPU package climbs 6C per read from 70 (high 80, crit 100); FAKE_NO_HWMON=h: no hwmon sensors;
