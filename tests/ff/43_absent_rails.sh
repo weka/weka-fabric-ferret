@@ -3,7 +3,7 @@
 # fleet: 112 GPU hosts with bond0 only made 224 rail rows and 113 "Rails not usable" lines): one counted line per
 # rail and state in the log, no per-NIC row for it (table and dashboard); rails.txt keeps every host's row; any
 # other bad rail (h4's B is link DOWN in the fake) keeps its full line and its row
-# checks: 35
+# checks: 36
 # secs: 215
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tbl() { grep -E '^ +(Role|backend|client) ' <<<"$1"; }
@@ -121,6 +121,10 @@ render nl; prc=$?
 chk "no LLDP, nothing declared: the log says 4 of 4 rail NICs have no LLDP neighbour and 4 runs are left out; the dashboard note says the same (control: the run above printed no such line)" \
     "grep -qx '  Uplinks: 4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' <<<\"\$out\" && grep -q '4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' $W/nl.html && [ $prc = 0 ]" "rc=$rc prc=$prc $(grep -i 'lldp' <<<"$out" | tr '\n' '|')"
 # h21 has no lldpcli (its tools sweep): the log offers the opt-in capture once, by name (11-02)
-chk "no lldpcli on 1 host: the log names FF_LLDP_CAPTURE once, in 'lldpcli not installed on 1 host' (control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
-    "[ \$(grep -c FF_LLDP_CAPTURE <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 host.*FF_LLDP_CAPTURE=1' <<<\"\$out\" && [ \$(grep -c FF_LLDP_CAPTURE $W/xs.log) = 0 ]" "$(grep -c FF_LLDP_CAPTURE <<<"$out") lines: $(grep FF_LLDP_CAPTURE <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP_CAPTURE $W/xs.log)"
+chk "no lldpcli on 1 host: the log names FF_LLDP_CAPTURE once, in 'lldpcli not installed on 1 hosts; FF_LLDP_CAPTURE=1 captures LLDP with tcpdump' (control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
+    "[ \$(grep -c FF_LLDP_CAPTURE <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 hosts; FF_LLDP_CAPTURE=1 captures LLDP with tcpdump' <<<\"\$out\" && [ \$(grep -c FF_LLDP_CAPTURE $W/xs.log) = 0 ]" "$(grep -c FF_LLDP_CAPTURE <<<"$out") lines: $(grep FF_LLDP_CAPTURE <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP_CAPTURE $W/xs.log)"
+# the capture on: h21 and h22 lack lldpcli, h21 also tcpdump; only h21 is counted (11-02)
+out=$(xrun lt FF_LLDP_CAPTURE=1 FAKE_NO_LLDPCLI=h21,h22 FAKE_NO_TCPDUMP=h21 FF_HOSTS=198.18.0.21-22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 60 $B $C 1); rc=$?
+chk "FF_LLDP_CAPTURE=1, no lldpcli on 2 hosts, no tcpdump on 1 of them: 'lldpcli not installed on 2 hosts; FF_LLDP_CAPTURE=1: capturing' once and 'tcpdump not installed on 1 hosts; LLDP capture skipped there' once (control: h22, tcpdump present, not counted)" \
+    "[ \$(grep -c 'lldpcli not installed on 2 hosts; FF_LLDP_CAPTURE=1: capturing LLDP with tcpdump' <<<\"\$out\") = 1 ] && [ \$(grep -c 'tcpdump not installed on' <<<\"\$out\") = 1 ] && grep -q 'tcpdump not installed on 1 hosts; LLDP capture skipped there' <<<\"\$out\"" "rc=$rc $(grep -E 'not installed on' <<<"$out" | tr '\n' '|')"
 finish

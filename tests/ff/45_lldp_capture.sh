@@ -3,13 +3,14 @@
 # one tcpdump frame fills the @@LLDP row, the LLDP group MAC is added and removed around
 # it, never promiscuous; a NIC whose firmware LLDP agent eats the frames is not captured
 # tier: fast
-# checks: 11
+# checks: 12
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
-# diag <name> "<extra tools>" [VAR=value ...]: DIAG_SCRIPT on p0, PATH = the fakes + /usr/bin:/bin (no lldpcli, tcpdump,
+# diag <name> "<extra tools>"|-tcpdump [VAR=value ...]: DIAG_SCRIPT on p0, PATH = the fakes + /usr/bin:/bin (no lldpcli, tcpdump,
 # ip there on macOS); output $W/<name>.out, argv log $W/<name>.argv. FAKE_AWK picks the awk (bsd)
-diag() { local n=$1 t; mkdir -p $W/bin.$n; for t in ip ethtool tcpdump timeout hostname $2; do ln -s $S/fake/lldp/tool $W/bin.$n/$t; done
+diag() { local n=$1 t tools="ip ethtool tcpdump timeout hostname $2"; [[ $2 == -tcpdump ]] && tools="ip ethtool timeout hostname"
+         mkdir -p $W/bin.$n; for t in $tools; do ln -s $S/fake/lldp/tool $W/bin.$n/$t; done
          shift 2; : > $W/$n.argv
-         env FAKE_LLDP_LOG=$W/$n.argv "$@" $B -c 'source "$1"; PATH=$2; shift 2; eval "$DIAG_SCRIPT"' diag $C "$W/bin.$n:$S/awkbin/${FAKE_AWK:-bsd}:/usr/bin:/bin" p0 > $W/$n.out 2>&1; }
+         timeout 30 env FAKE_LLDP_LOG=$W/$n.argv "$@" $B -c 'source "$1"; PATH=$2; shift 2; eval "$DIAG_SCRIPT"' diag $C "$W/bin.$n:$S/awkbin/${FAKE_AWK:-bsd}:/usr/bin:/bin" p0 > $W/$n.out 2>&1; }
 row() { grep '^@@LLDP hx p0 ' $W/$1.out | cut -d' ' -f5-; }   # chassis portid portdesc sysdesc
 calls() { grep -c "^$2" $W/$1.argv; }   # calls <name> <tool argv prefix>
 seq_of() { awk '/^ip .*maddr show/ {s = s "show "} /^ip .*maddr add/ {s = s "add "} /^tcpdump / {s = s "tcpdump "} /^ip .*maddr del/ {s = s "del "} END {print s}' $W/$1.argv; }
@@ -32,13 +33,17 @@ chk "capture fails (tcpdump rc 1): the group MAC is still removed and p0's @@LLD
 diag fw1 "" FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_PRIV='fw-lldp-agent          : on'
 diag fw2 "" FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_PRIV='disable-fw-lldp        : off'
 diag fw3 mlxconfig FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_DRV=mlx5_core FAKE_MLX=on
-diag fwoff mlxconfig FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_DRV=mlx5_core FAKE_PRIV='fw-lldp-agent          : off'
+diag fwoff mlxconfig FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_DRV=mlx5_core
+diag fwoffi "" FF_LLDP_CAPTURE=1 FAKE_TCPDUMP=frame FAKE_PRIV=$'fw-lldp-agent          : off\ndisable-fw-lldp        : on'
 for n in fw1 fw2 fw3; do
-    chk "firmware LLDP agent on ($(case $n in fw1) echo 'ethtool fw-lldp-agent: on' ;; fw2) echo 'ethtool disable-fw-lldp: off' ;; *) echo 'mlxconfig LLDP_NB_* non-zero' ;; esac)): 0 tcpdump calls, p0 unknown, reason fw_lldp_on in the raw text (control: the flags-off run makes 1 call)" \
-        "[ \$(calls $n tcpdump) = 0 ] && [ \"\$(row $n)\" = 'unknown unknown unknown unknown' ] && grep -qw fw_lldp_on $W/$n.out && [ \$(calls fwoff tcpdump) = 1 ]" "tcpdump $(calls $n tcpdump), fwoff $(calls fwoff tcpdump); $(row $n); fw_lldp_on lines $(grep -cw fw_lldp_on $W/$n.out)"
+    chk "firmware LLDP agent on ($(case $n in fw1) echo 'ethtool fw-lldp-agent: on' ;; fw2) echo 'ethtool disable-fw-lldp: off' ;; *) echo 'mlxconfig LLDP_NB_* non-zero' ;; esac)): 0 tcpdump calls, p0 unknown, reason fw_lldp_on in the raw text (control: the flags-off runs make 1 call each)" \
+        "[ \$(calls $n tcpdump) = 0 ] && [ \"\$(row $n)\" = 'unknown unknown unknown unknown' ] && grep -qw fw_lldp_on $W/$n.out && [ \$(calls fwoff tcpdump) = 1 ] && [ \$(calls fwoffi tcpdump) = 1 ]" "tcpdump $(calls $n tcpdump), fwoff $(calls fwoff tcpdump), fwoffi $(calls fwoffi tcpdump); $(row $n); fw_lldp_on lines $(grep -cw fw_lldp_on $W/$n.out)"
 done
-chk "control: fw-lldp-agent off and mlxconfig LLDP_NB_* all zero: 1 tcpdump call, p0's row filled, no fw_lldp_on" \
-    "[ \$(calls fwoff tcpdump) = 1 ] && [ \"\$(row fwoff)\" = \"\$want\" ] && ! grep -qw fw_lldp_on $W/fwoff.out" "tcpdump $(calls fwoff tcpdump) | $(row fwoff) | fw_lldp_on lines $(grep -cw fw_lldp_on $W/fwoff.out)"
+chk "control: the agent off (ice: fw-lldp-agent off, disable-fw-lldp on; mlx5: LLDP_NB_* all zero): 1 tcpdump call each, p0's row filled, no fw_lldp_on" \
+    "( for n in fwoff fwoffi; do [ \$(calls \$n tcpdump) = 1 ] && [ \"\$(row \$n)\" = \"\$want\" ] && ! grep -qw fw_lldp_on $W/\$n.out || exit 1; done )" "$(for n in fwoff fwoffi; do echo "$n: tcpdump $(calls $n tcpdump) | $(row $n) | fw_lldp_on lines $(grep -cw fw_lldp_on $W/$n.out);"; done)"
+diag notd -tcpdump FF_LLDP_CAPTURE=1
+chk "FF_LLDP_CAPTURE=1, no tcpdump on the host: 0 ip maddr calls, p0 unknown, reason tcpdump_absent in the raw text (control: the capture runs above make the maddr calls)" \
+    "[ \$(calls notd 'ip maddr') = 0 ] && [ \"\$(row notd)\" = 'unknown unknown unknown unknown' ] && grep -qw tcpdump_absent $W/notd.out && [ \$(calls cap.bsd 'ip maddr') -ge 1 ]" "maddr $(calls notd 'ip maddr') | $(row notd) | tcpdump_absent lines $(grep -cw tcpdump_absent $W/notd.out)"
 
 # --- off by default, and lldpcli wins when installed ---
 diag off "" FAKE_TCPDUMP=frame

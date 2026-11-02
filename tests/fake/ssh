@@ -247,6 +247,8 @@ case $script in
         [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && { echo "@@BOND $h $nic 1 2 $ds"; echo "=== bonding $nic ==="; echo "Slave Interface: $ds"; echo "MII Status: down"; }
         echo "=== ethtool $nic ==="; echo "	Speed: $sp"
     done
+    # FAKE_NO_TCPDUMP=h1,h2: under FF_LLDP_CAPTURE=1 those hosts' capture reports no tcpdump
+    [[ $script == *"FF_LLDP_CAPTURE=1"* ]] && inlist "$h" "$FAKE_NO_TCPDUMP" && { echo "=== lldp - (tcpdump) ==="; echo "reason: tcpdump_absent (tcpdump not installed)"; }
     echo "=== hostname ==="; echo "$h" ;;
 *"@@HWMON"*)
     # FAKE_HOT=h: its CPU package climbs 6C per read from 70 (high 80, crit 100); FAKE_NO_HWMON=h: no hwmon sensors;
