@@ -78,7 +78,7 @@ read -r -d '' DIAG_SCRIPT <<'EOF'
 h=$(hostname -s)
 have() { [ -n "$(command -v "$1")" ]; }
 ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; }
-# LLDP without lldpcli (FF_LLDP_CAPTURE=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
+# LLDP without lldpcli (FF_LLDP=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
 # reported, never turned off; the group MAC joins the NIC's filter only while we listen (never promiscuous)
 lldp_tcpdump() {
     local p=$1 pf inf drv bus mx added=""
@@ -104,7 +104,7 @@ lldp_tcpdump() {
     [ -n "$added" ] && ip maddr del 01:80:c2:00:00:0e dev "$p"
 }
 LT=""
-if [ "$FF_LLDP_CAPTURE" = 1 ] && ! have lldpcli; then
+if [ "$FF_LLDP" = 1 ] && ! have lldpcli; then
     LT=$(mktemp -d) || LT=""
     [ -n "$LT" ] && for nic in "$@"; do
         [ "$nic" = - ] && continue

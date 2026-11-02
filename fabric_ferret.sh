@@ -82,7 +82,7 @@ Optional (default)
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
                    window (1 s unless set) of the cluster's own traffic. The busy check reports but doesn't stop the run.
-  FF_LLDP_CAPTURE  1 = where lldpcli is missing, read each NIC's LLDP with tcpdump instead (0): one 70 s
+  FF_LLDP          1 = where lldpcli is missing, read each NIC's LLDP with tcpdump instead (0): one 70 s
                    capture per host, all NICs at once, never promiscuous (the LLDP group MAC joins the
                    NIC's filter for the capture only). A NIC whose firmware LLDP agent takes the frames
                    is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
@@ -317,7 +317,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP_CAPTURE FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -636,7 +636,7 @@ read -r -d '' DIAG_SCRIPT <<'EOF'
 h=$(hostname -s)
 have() { [ -n "$(command -v "$1")" ]; }
 ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; }
-# LLDP without lldpcli (FF_LLDP_CAPTURE=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
+# LLDP without lldpcli (FF_LLDP=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
 # reported, never turned off; the group MAC joins the NIC's filter only while we listen (never promiscuous)
 lldp_tcpdump() {
     local p=$1 pf inf drv bus mx added=""
@@ -662,7 +662,7 @@ lldp_tcpdump() {
     [ -n "$added" ] && ip maddr del 01:80:c2:00:00:0e dev "$p"
 }
 LT=""
-if [ "$FF_LLDP_CAPTURE" = 1 ] && ! have lldpcli; then
+if [ "$FF_LLDP" = 1 ] && ! have lldpcli; then
     LT=$(mktemp -d) || LT=""
     [ -n "$LT" ] && for nic in "$@"; do
         [ "$nic" = - ] && continue
@@ -3492,7 +3492,7 @@ main() {
     [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
     (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
-    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP_CAPTURE:=0}"
+    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}"
     [[ -n $FF_DURATION ]] || { [[ $FF_SKIP_IPERF == 1 ]] && FF_DURATION=1 || FF_DURATION=120; }   # no load: a 1 s counter window
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
@@ -3524,7 +3524,7 @@ main() {
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
-    [[ $FF_LLDP_CAPTURE == 0 || $FF_LLDP_CAPTURE == 1 ]] || die "FF_LLDP_CAPTURE must be 0 or 1, got '$FF_LLDP_CAPTURE'"
+    [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
     (( FF_SKIP_IPERF && FF_UDP == 1 )) && die "FF_UDP=1 is a load test; FF_SKIP_IPERF=1 sends no load: set one of them"
     [[ -z $FF_CROSS_RAIL || $FF_CROSS_RAIL == 0 || $FF_CROSS_RAIL == 1 ]] || die "FF_CROSS_RAIL must be 0 or 1, got '$FF_CROSS_RAIL'"
     [[ -z $FF_CROSS_RAIL ]] && FF_CROSS_RAIL=1
@@ -3874,14 +3874,14 @@ main() {
     local BOND_DATA=$COLLECT_DIR/bonds.txt   # "host nic slaves_up slaves_total down_slaves" per bond NIC (raw_per_host has the kernel's report)
     : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"; : > "$BOND_DATA"
     local nl=0; for k in "${ELIG[@]}" "${CLI[@]}"; do section "${DISC[$k]}" tools | grep -q '^lldpcli /' || nl=$((nl + 1)); done
-    if (( nl )) && [[ $FF_LLDP_CAPTURE == 1 ]]; then
-        log "lldpcli not installed on $nl hosts; FF_LLDP_CAPTURE=1: capturing LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
+    if (( nl )) && [[ $FF_LLDP == 1 ]]; then
+        log "lldpcli not installed on $nl hosts; FF_LLDP=1: capturing LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
     elif (( nl )); then
-        log "lldpcli not installed on $nl hosts; FF_LLDP_CAPTURE=1 captures LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
+        log "lldpcli not installed on $nl hosts; FF_LLDP=1 captures LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
     fi
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"FF_LLDP_CAPTURE=$FF_LLDP_CAPTURE"$'\n'"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
+        rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"FF_LLDP=$FF_LLDP"$'\n'"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
     done
     wait
     for k in "${ELIG[@]}" "${CLI[@]}"; do
@@ -3891,7 +3891,7 @@ main() {
         grep '^@@BOND ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$BOND_DATA"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
-    if (( nl )) && [[ $FF_LLDP_CAPTURE == 1 ]]; then
+    if (( nl )) && [[ $FF_LLDP == 1 ]]; then
         local nt=0; for k in "${ELIG[@]}" "${CLI[@]}"; do grep -q '^reason: tcpdump_absent' "$WORK/diag.$k" && nt=$((nt + 1)); done
         (( nt )) && log "tcpdump not installed on $nt hosts; LLDP capture skipped there"
     fi

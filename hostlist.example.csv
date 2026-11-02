@@ -84,7 +84,7 @@ backend,*,svc-fabric
 #   capture per host, all NICs at once, never promiscuous (the LLDP group MAC joins the
 #   NIC's filter for the capture only). A NIC whose firmware LLDP agent takes the frames
 #   is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
-# FF_LLDP_CAPTURE=0
+# FF_LLDP=0
 #
 #   after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
 #   (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into sender
