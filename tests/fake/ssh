@@ -200,8 +200,8 @@ case $script in
     fi
     fi
     echo "=== tools ==="
-    # FAKE_NO_IPERF=h: no iperf3 installed on h
-    for c in iperf3 ethtool lldpcli ibstat ss timeout; do if [[ $c == iperf3 && $h == "$FAKE_NO_IPERF" ]]; then echo "iperf3 -"; else echo "$c /usr/bin/$c"; fi; done
+    # FAKE_NO_IPERF=h: no iperf3 installed on h; FAKE_NO_LLDPCLI=h1,h2: no lldpcli on those hosts
+    for c in iperf3 ethtool lldpcli ibstat ss timeout; do if [[ $c == iperf3 && $h == "$FAKE_NO_IPERF" ]] || { [[ $c == lldpcli ]] && inlist "$h" "$FAKE_NO_LLDPCLI"; }; then echo "$c -"; else echo "$c /usr/bin/$c"; fi; done
     v=3.16.0; [[ $h == h3 ]] && v=3.9; echo "=== iperf3 ==="; echo "iperf $v (cJSON 1.7.15)"
     r=16777216; [[ $h == h4 ]] && r=212992; echo "=== sysctl ==="; echo "rmem_max $r"; echo "wmem_max 16777216"
     if [[ $script == *"BUSY_CHECK="* && $script != *"BUSY_CHECK=''"* ]]; then

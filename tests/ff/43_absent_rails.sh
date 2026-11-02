@@ -3,7 +3,7 @@
 # fleet: 112 GPU hosts with bond0 only made 224 rail rows and 113 "Rails not usable" lines): one counted line per
 # rail and state in the log, no per-NIC row for it (table and dashboard); rails.txt keeps every host's row; any
 # other bad rail (h4's B is link DOWN in the fake) keeps its full line and its row
-# checks: 34
+# checks: 35
 # secs: 215
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tbl() { grep -E '^ +(Role|backend|client) ' <<<"$1"; }
@@ -116,8 +116,11 @@ chk "cross-group without load (FF_SKIP_IPERF=1): 30 of 30 path checks OK (22 of 
     "[ $rc = 3 ] && grep -q 'Path checks (route, ping, MTU no-fragment): 30 of 30 planned OK' <<<\"\$out\" && grep -qx 'paths_ok=30' <<<\"\$meta\" && grep -qx 'paths_planned=30' <<<\"\$meta\" && grep -qx 'cross_group=on' <<<\"\$meta\" && [ \$(bfile xs iperf3_results.txt | grep -c 'exp:\|Gbits') = 0 ]" "rc=$rc $(grep -E 'paths|cross_group' <<<"$meta" | tr '\n' ' ')"
 
 # no LLDP anywhere and no uplinks declared (the 10-27 field run): the NICs left out are still said, in the log and the dashboard
-out=$(xrun nl FAKE_NO_LLDP=all FF_HOSTS=198.18.0.21-22 FF_ITER=1 timeout 60 $B $C 1); rc=$?
+out=$(xrun nl FAKE_NO_LLDP=all FAKE_NO_LLDPCLI=h21 FF_HOSTS=198.18.0.21-22 FF_ITER=1 timeout 60 $B $C 1); rc=$?
 render nl; prc=$?
 chk "no LLDP, nothing declared: the log says 4 of 4 rail NICs have no LLDP neighbour and 4 runs are left out; the dashboard note says the same (control: the run above printed no such line)" \
     "grep -qx '  Uplinks: 4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' <<<\"\$out\" && grep -q '4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' $W/nl.html && [ $prc = 0 ]" "rc=$rc prc=$prc $(grep -i 'lldp' <<<"$out" | tr '\n' '|')"
+# h21 has no lldpcli (its tools sweep): the log offers the opt-in capture once, by name (11-02)
+chk "no lldpcli on 1 host: the log names FF_LLDP_CAPTURE once, in 'lldpcli not installed on 1 host' (control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
+    "[ \$(grep -c FF_LLDP_CAPTURE <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 host.*FF_LLDP_CAPTURE=1' <<<\"\$out\" && [ \$(grep -c FF_LLDP_CAPTURE $W/xs.log) = 0 ]" "$(grep -c FF_LLDP_CAPTURE <<<"$out") lines: $(grep FF_LLDP_CAPTURE <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP_CAPTURE $W/xs.log)"
 finish

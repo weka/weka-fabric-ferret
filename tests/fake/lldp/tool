@@ -1,0 +1,39 @@
+#!/opt/homebrew/bin/bash
+# fake host tools for DIAG_SCRIPT's LLDP capture (ff/45), one file linked as ip, ethtool, mlxconfig, tcpdump, timeout,
+# hostname, lldpcli; argv -> $FAKE_LLDP_LOG. Knobs: FAKE_PRIV, FAKE_DRV (ice), FAKE_MLX=on, FAKE_MADDR_HAS=1, FAKE_TCPDUMP=frame|fail
+t=${0##*/}
+echo "$t $*" >> "${FAKE_LLDP_LOG:?}"
+port=${!#}
+case $t in
+hostname) echo hx ;;
+timeout) shift; exec "$@" ;;   # the duration is logged above; the fake never waits
+ip) case " $* " in
+        *" maddr show "*) printf '2:\t%s\n\tlink  33:33:00:00:00:01\n\tlink  01:00:5e:00:00:01\n' "$port"
+                          [[ $FAKE_MADDR_HAS == 1 ]] && printf '\tlink  01:80:c2:00:00:0e\n'
+                          printf '\tinet  224.0.0.1\n' ;;
+        *" maddr "*) ;;
+        *" addr show dev "*) echo "6: $port    inet 192.0.2.1/24 brd 192.0.2.255 scope global $port" ;;
+        *) echo "p0               UP             192.0.2.1/24" ;;
+    esac ;;
+ethtool) case $1 in
+        --show-priv-flags) echo "Private flags for $port:"; echo "link-down-on-close     : off"
+                           [[ -n $FAKE_PRIV ]] && echo "$FAKE_PRIV" ;;   # e.g. "fw-lldp-agent          : on"
+        -i) printf 'driver: %s\nversion' "${FAKE_DRV:-ice}"; printf ': 6.6.0\nfirmware-version: 4.40\nbus-info: 0000:3b:00.0\n' ;;
+        -m) echo "Cannot get module EEPROM information: Operation not supported" ;;
+        -S) printf 'NIC statistics:\n     rx_packets: 1\n' ;;
+        *) printf 'Settings for %s:\n\tSpeed: 100000Mb/s\n\tLink detected: yes\n' "$port" ;;
+    esac ;;
+mlxconfig) v1='False(0)' v2='OFF(0)'; [[ $FAKE_MLX == on ]] && v1='True(1)' v2='ALL(2)'
+    printf 'Device #1:\n----------\n\nDevice type:        ConnectX7\nPCI device:         0000:3b:00.0\n\nConfigurations:                              Next Boot\n'
+    for p in 1 2; do printf '        LLDP_NB_DCBX_P%s                     %s\n        LLDP_NB_RX_MODE_P%s                  %s\n' $p "$v1" $p "$v2"; done ;;
+tcpdump) i=; for a; do [[ $p == -i ]] && i=$a; p=$a; done
+    echo "tcpdump: listening on $i, link-type EN10MB (Ethernet), snapshot length 1500 bytes" >&2
+    [[ $FAKE_TCPDUMP == fail ]] && { echo "tcpdump: $i: You don't have permission to perform this capture on that device" >&2; exit 1; }
+    printf '12:00:01.000000 LLDP, length 96\n\tChassis ID TLV (1), length 7\n\t  Subtype MAC address (4): 00:00:5e:00:53:01\n'
+    printf '\tPort ID TLV (2), length 5\n\t  Subtype Interface Name (5): swp7\n\tTime to Live TLV (3), length 2: TTL 120s\n'
+    printf '\tPort Description TLV (4), length 12: uplink to hx\n\tSystem Name TLV (5), length 13: leaf1.example\n'
+    printf '\tSystem Description TLV (6), length 15\n\t  Example NOS 1.0\n\tEnd TLV (0), length 0\n'
+    printf '1 packet captured\n1 packet received by filter\n0 packets dropped by kernel\n' >&2 ;;
+lldpcli) printf 'Interface:    %s, via: LLDP, RID: 1, Time: 0 day, 01:00:00\n  Chassis:\n    SysName:      leaf2.example\n' "$port"
+    printf '    SysDescr:     Example NOS 2.0\n  Port:\n    PortID:       ifname swp9\n    PortDescr:    uplink to hx\n' ;;
+esac
