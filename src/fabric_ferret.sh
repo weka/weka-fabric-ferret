@@ -735,6 +735,10 @@ main() {
         grep '^@@BOND ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$BOND_DATA"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
+    if (( nl )) && [[ $FF_LLDP_CAPTURE == 1 ]]; then
+        local nt=0; for k in "${ELIG[@]}" "${CLI[@]}"; do grep -q '^reason: tcpdump_absent' "$WORK/diag.$k" && nt=$((nt + 1)); done
+        (( nt )) && log "tcpdump not installed on $nt hosts; LLDP capture skipped there"
+    fi
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
     lldp_rail_check "$LLDP_DATA"
 

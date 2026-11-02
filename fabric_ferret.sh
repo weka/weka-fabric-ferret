@@ -641,8 +641,8 @@ ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; 
 lldp_tcpdump() {
     local p=$1 pf inf drv bus mx added=""
     [ -r "${FF_SYSFS:-/sys}/class/net/$p/bonding/slaves" ] && { echo "reason: bond (its members are captured)"; return; }
-    have tcpdump || { echo "reason: tcpdump not installed"; return; }
-    have timeout || { echo "reason: timeout not installed"; return; }
+    have tcpdump || { echo "reason: tcpdump_absent (tcpdump not installed)"; return; }
+    have timeout || { echo "reason: timeout_absent (timeout not installed)"; return; }
     if have ethtool; then
         pf=$(ethtool --show-priv-flags "$p" 2>&1)
         if echo "$pf" | awk '($1 == "fw-lldp-agent" && $NF == "on") || ($1 == "disable-fw-lldp" && $NF == "off") {f = 1} END {exit !f}'; then
@@ -3891,6 +3891,10 @@ main() {
         grep '^@@BOND ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$BOND_DATA"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
+    if (( nl )) && [[ $FF_LLDP_CAPTURE == 1 ]]; then
+        local nt=0; for k in "${ELIG[@]}" "${CLI[@]}"; do grep -q '^reason: tcpdump_absent' "$WORK/diag.$k" && nt=$((nt + 1)); done
+        (( nt )) && log "tcpdump not installed on $nt hosts; LLDP capture skipped there"
+    fi
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
     lldp_rail_check "$LLDP_DATA"
 

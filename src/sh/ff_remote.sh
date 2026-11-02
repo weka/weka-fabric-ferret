@@ -83,8 +83,8 @@ ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; 
 lldp_tcpdump() {
     local p=$1 pf inf drv bus mx added=""
     [ -r "${FF_SYSFS:-/sys}/class/net/$p/bonding/slaves" ] && { echo "reason: bond (its members are captured)"; return; }
-    have tcpdump || { echo "reason: tcpdump not installed"; return; }
-    have timeout || { echo "reason: timeout not installed"; return; }
+    have tcpdump || { echo "reason: tcpdump_absent (tcpdump not installed)"; return; }
+    have timeout || { echo "reason: timeout_absent (timeout not installed)"; return; }
     if have ethtool; then
         pf=$(ethtool --show-priv-flags "$p" 2>&1)
         if echo "$pf" | awk '($1 == "fw-lldp-agent" && $NF == "on") || ($1 == "disable-fw-lldp" && $NF == "off") {f = 1} END {exit !f}'; then
