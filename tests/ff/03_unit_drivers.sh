@@ -2,7 +2,7 @@
 # unit drivers on mlx5-shaped text (tools/mkmlx5.sh; step b, 10-29: was a real host's under FFT_SITE_DATA): diag parsing
 # (mawk vs gawk), prio filter, DAC/optic temps, RDMA sysfs reader
 # tier: fast
-# checks: 15
+# checks: 16
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/mlx5 && $B $S/tools/mkmlx5.sh raw $W/mlx5/s001.txt s001 && $B $S/tools/mkmlx5.sh dump $W/mlx5/dump.txt && $B $S/tools/mkmlx5.sh ethtool $W/mlx5/ethtool_S.txt || exit 2
 
@@ -28,9 +28,13 @@ chk "control: no bonding report readable -> no @@BOND line, no bonding section, 
 # names its leaf from the dump's lldpcli section, ens1np1 (no section) is unknown; the bond's own row stays unknown
 out=$(FF_SYSFS=$U/sysfs FF_PROCNET=$U/procnet $B $H/test_hwdump.sh $C $U/hw_dump_bond.txt DIAG_SCRIPT bond0 2>&1)
 chk "bond: @@LLDP rows for the bond (unknown) and each member on the bond's IP; ens1np0 names leaf-003-compute swp5s1" \
-    "[ \"\$(grep '^@@LLDP' <<<\"\$out\" | cut -d' ' -f2-6 | tr '\n' '|')\" = 'hx bond0 192.0.2.1 unknown unknown|hx ens1np0 192.0.2.1 leaf-003-compute swp5s1|hx ens1np1 192.0.2.1 unknown unknown|' ] && grep -qx '=== lldpcli ens1np0 ===' <<<\"\$out\"" "$(grep '^@@LLDP' <<<"$out" | tr '\n' '|')"
+    "[ \"\$(grep '^@@LLDP ' <<<\"\$out\" | cut -d' ' -f2-6 | tr '\n' '|')\" = 'hx bond0 192.0.2.1 unknown unknown|hx ens1np0 192.0.2.1 leaf-003-compute swp5s1|hx ens1np1 192.0.2.1 unknown unknown|' ] && grep -qx '=== lldpcli ens1np0 ===' <<<\"\$out\"" "$(grep '^@@LLDP ' <<<"$out" | tr '\n' '|')"
+ob=$out
 out=$(FF_PROCNET=$U/procnet $B $H/test_hwdump.sh $C $U/hw_dump_bond.txt DIAG_SCRIPT bond0 2>&1)
-chk "control: no sysfs slaves readable -> one @@LLDP row (the bond, unknown), no member rows" "[ \$(grep -c '^@@LLDP' <<<\"\$out\") = 1 ] && grep -q '^@@LLDP hx bond0 192.0.2.1 unknown' <<<\"\$out\"" "$(grep '^@@LLDP' <<<"$out" | tr '\n' '|')"
+chk "control: no sysfs slaves readable -> one @@LLDP row (the bond, unknown), no member rows" "[ \$(grep -c '^@@LLDP ' <<<\"\$out\") = 1 ] && grep -q '^@@LLDP hx bond0 192.0.2.1 unknown' <<<\"\$out\"" "$(grep '^@@LLDP ' <<<"$out" | tr '\n' '|')"
+# the reason rows (11-02): the bond is 'bond', the member lldpcli saw nothing 'no_neighbour', the seen member none
+chk "bond reasons: the bond run prints 2 @@LLDPWHY rows, 'hx bond0 bond' and 'hx ens1np1 no_neighbour' (none for ens1np0, which names its leaf); the run without sysfs slaves prints 1, 'hx bond0 no_neighbour' (no members known, so not a bond there)" \
+    "[ \"\$(grep '^@@LLDPWHY ' <<<\"\$ob\" | cut -d' ' -f2- | paste -sd '|' -)\" = 'hx bond0 bond|hx ens1np1 no_neighbour' ] && [ \"\$(grep '^@@LLDPWHY ' <<<\"\$out\" | cut -d' ' -f2- | paste -sd '|' -)\" = 'hx bond0 no_neighbour' ]" "bond: $(grep '^@@LLDPWHY ' <<<"$ob" | paste -sd '|' -); control: $(grep '^@@LLDPWHY ' <<<"$out" | paste -sd '|' -)"
 
 # --- err_hist (src/fabric_ferret.sh): the ERROR rows of a results file grouped by iperf3's reason, under every awk;
 # the fixture has column -t spacing, three reasons (one without iperf3's prefix), a result row to ignore ---

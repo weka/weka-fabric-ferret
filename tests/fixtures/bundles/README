@@ -7,7 +7,8 @@ Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the f
 11-14 on them, then swap them in and update the commit below.
 
 11_routed32.tgz, 11_xcrit.tgz, 12_slowcross.tgz, 12_bslow.tgz, 14_ua.tgz, 14_ub.tgz, 14_un.tgz, 14_ul.tgz, 14_ux.tgz
-    made by tools/mkbundles.sh with weka-fabric-ferret at 191a333, 10-29 18:51 (same format as the d43c628 set; remade
+    made by tools/mkbundles.sh with weka-fabric-ferret at 8dd07bc, 11-02 23:45Z (lldp_reasons.txt joined the bundle,
+    empty here: the fake reports no reasons unless FAKE_LLDPWHY=1); before that at 191a333, 10-29 18:51 (same format as the d43c628 set; remade
     with the fake's tx counter read fixed, so ssh_errors.log is empty, and rails.txt aligned to the 198.18/15 addresses);
     before that at d43c628, 10-29 15:52 (temps_summary.txt gained Min_C as column 13
     and thermals' seven types; the reader runs as the login); before that: 14_* at c3a2aa6's bundle format (the first
@@ -17,7 +18,7 @@ Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the f
     Remake them (into a new directory, then swap) when the bundle format changes; update this commit.
 14_where.tgz, 14_clean.tgz
     14's "Where to look" edges (10-29): a hot host with CRITICAL B NICs on five hosts and four slow clients, h4 without
-    LLDP (14_where); two hosts with nothing wrong (14_clean). Made with the nine above (191a333, 10-29 18:51).
+    LLDP (14_where); two hosts with nothing wrong (14_clean). Made with the nine above (8dd07bc, 11-02 23:45Z).
 14_ub_oldtypes.tar.gz
     the 14_ub.tgz made at c3a2aa6's format (above), kept as it was before the 10-29 regeneration: a 12-column
     temps_summary.txt with BMC rows typed bmc, the shape every bundle before 83d55e4 has. 14 renders it for the
