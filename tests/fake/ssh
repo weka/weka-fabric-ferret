@@ -209,8 +209,14 @@ case $script in
         echo "=== busy ==="; echo "rc=$rc"; echo "fake check output for $h"
     fi ;;
 *"@@NIC_DIAG"*)
+    # FAKE_LLDPWHY=1: an unknown @@LLDP row is followed by its @@LLDPWHY reason, picked as the diag does (bond master
+    # $bm first); off, the hosts report no reasons (bundles from before 11-02)
+    lrow() { echo "@@LLDP $*"; [[ $FAKE_LLDPWHY == 1 && $4 == unknown ]] || return 0; local w=no_neighbour
+             if [[ $2 == "$bm" ]]; then w=bond; elif inlist "$1" "$FAKE_NO_LLDPCLI"; then
+                 w=no_lldpcli; [[ $script == *"FF_LLDP=1"* ]] && { w=no_frame; inlist "$1" "$FAKE_NO_TCPDUMP" && w=tcpdump_absent; }; fi
+             echo "@@LLDPWHY $1 $2 $w"; }
     for nic in "$@"; do
-        [[ $nic == - ]] && continue
+        [[ $nic == - ]] && continue; bm=
         if [[ $kind == c ]]; then
             read -r _ ip sp <<<"$(cnic "$nic")"; [[ -n $ip ]] || { ip=none; sp=unknown; }
             case " ${FAKE_CLIENT_NOSPEED//,/ } " in *" $h "*) sp=Unknown! ;; esac   # FAKE_CLIENT_NOSPEED: these clients report no ethtool speed
@@ -221,11 +227,11 @@ case $script in
             if inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == bond0 ]]; then   # a listed client: bond0's two members ens1f0/ens1f1 see the leaf, both up
                 sw2=$sw; inlist "$h" "$FAKE_BOND_LEAF2" && [[ $sw != unknown ]] && sw2=cleaf2.example   # FAKE_BOND_LEAF2=c: its ens1f1 sees a second leaf (an MLAG pair)
                 inlist "$h" "$FAKE_BOND_DARK" && sw2=unknown   # FAKE_BOND_DARK=c: its ens1f1 sees no switch (one member dark)
-                echo "@@LLDP $h $nic $ip unknown unknown unknown unknown"
-                echo "@@LLDP $h ens1f0 $ip $sw swp$pt FE_port_c${n}_ens1f0 Cumulus_Linux"
-                echo "@@LLDP $h ens1f1 $ip $sw2 swp$(( pt + 10 )) FE_port_c${n}_ens1f1 Cumulus_Linux"
+                bm=$nic; lrow $h $nic $ip unknown unknown unknown unknown
+                lrow $h ens1f0 $ip $sw swp$pt FE_port_c${n}_ens1f0 Cumulus_Linux
+                lrow $h ens1f1 $ip $sw2 swp$(( pt + 10 )) FE_port_c${n}_ens1f1 Cumulus_Linux
                 echo "@@BOND $h $nic 2 2 none"
-            else echo "@@LLDP $h $nic $ip $sw swp$pt FE_port_c${n}_$nic Cumulus_Linux"; fi
+            else lrow $h $nic $ip $sw swp$pt FE_port_c${n}_$nic Cumulus_Linux; fi
             echo "@@DRV $h $nic $ip mlx5_core 24.10 28.47.1088 (DEL0000000051) 0000:21:00.0"
             echo "=== ethtool $nic ==="; echo "	Speed: $sp"
             continue
@@ -237,11 +243,11 @@ case $script in
         echo "@@NIC_DIAG $h $nic 198.19.$r.$n $sp 12345 1 2 3 4 0 0 -1.2 -1.5 n/a n/a 48.5"
         sw=leaf$r.example; case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac   # FAKE_NO_LLDP: these hosts (or all) see no LLDP neighbour
         if inlist "$h" "$FAKE_BOND_LLDP" && [[ $r == 1 ]]; then   # FAKE_BOND_LLDP=h,c: a host's rail A NIC (a client's bond0) is a bond: no neighbour of its own, its two members see the leaf
-            echo "@@LLDP $h $nic 198.19.$r.$n unknown unknown unknown unknown"
-            echo "@@LLDP $h ens1np0 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux"
-            if [[ $h == "$FAKE_BOND_DOWN" ]]; then echo "@@LLDP $h ens3np0 198.19.$r.$n unknown unknown unknown unknown"   # a down port sends no LLDP
-            else echo "@@LLDP $h ens3np0 198.19.$r.$n $sw swp$(( n + 100 )) FE_port_$(( n + 100 )) Cumulus_Linux"; fi
-        else echo "@@LLDP $h $nic 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux"; fi
+            bm=$nic; lrow $h $nic 198.19.$r.$n unknown unknown unknown unknown
+            lrow $h ens1np0 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux
+            if [[ $h == "$FAKE_BOND_DOWN" ]]; then lrow $h ens3np0 198.19.$r.$n unknown unknown unknown unknown   # a down port sends no LLDP
+            else lrow $h ens3np0 198.19.$r.$n $sw swp$(( n + 100 )) FE_port_$(( n + 100 )) Cumulus_Linux; fi
+        else lrow $h $nic 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux; fi
         echo "@@DRV $h $nic 198.19.$r.$n mlx5_core 24.10 28.47.1088 (DEL0000000051) 0000:05:00.0"
         ds=${nic%np0}np1; inlist "$h" "$FAKE_BOND_LLDP" && ds=ens3np0   # with FAKE_BOND_LLDP the down slave is a member the LLDP rows name
         [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && { echo "@@BOND $h $nic 1 2 $ds"; echo "=== bonding $nic ==="; echo "Slave Interface: $ds"; echo "MII Status: down"; }

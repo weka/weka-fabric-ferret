@@ -3,7 +3,7 @@
 # fleet: 112 GPU hosts with bond0 only made 224 rail rows and 113 "Rails not usable" lines): one counted line per
 # rail and state in the log, no per-NIC row for it (table and dashboard); rails.txt keeps every host's row; any
 # other bad rail (h4's B is link DOWN in the fake) keeps its full line and its row
-# checks: 36
+# checks: 37
 # secs: 215
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tbl() { grep -E '^ +(Role|backend|client) ' <<<"$1"; }
@@ -110,19 +110,23 @@ meta=$(bfile xu metadata.txt); render xu; prc=$?
 chk "cross-group unrouted: the WARNING names all 22 checks, cross_group=unrouted beside cross_rail=unrouted, the 22 phase-3 skips in paths_excluded.txt (of 24), the dashboard's problem line" \
     "[ $rc = 3 ] && grep -q '^# WARNING: the rail groups are not routed to each other (all 22 cross-group path checks failed on routing, no same-rail one did): either separate fabrics by design (rerun with FF_CROSS_RAIL=0) or routing between the groups missing on every host. The skips count until you say which.$' <<<\"\$out\" && grep -qx 'cross_group=unrouted' <<<\"\$meta\" && grep -qx 'cross_rail=unrouted' <<<\"\$meta\" && [ \$(bfile xu paths_excluded.txt | awk '\$2 == 3' | wc -l) = 22 ] && [ \$(bfile xu paths_excluded.txt | wc -l) = 24 ] && [ $prc = 3 ] && grep -q 'Rail groups not routed to each other: every cross-group path check failed on routing, no same-rail one did\.' $W/xu.html" "rc=$rc prc=$prc $(grep -E 'cross_|^RESULT' <<<"$meta $out" | tr '\n' '|')"
 # FF_SKIP_IPERF=1: the phase-3 path checks count as paths (30 = 8 in the groups + 22 across), nothing judged, no exp: token
-out=$(xrun xs env $XG FF_ITER=1 FF_SKIP_IPERF=1 timeout 120 $B $C 1); rc=$?
+out=$(xrun xs env $XG FAKE_LLDPWHY=1 FF_ITER=1 FF_SKIP_IPERF=1 timeout 120 $B $C 1); rc=$?
 meta=$(bfile xs metadata.txt)
 chk "cross-group without load (FF_SKIP_IPERF=1): 30 of 30 path checks OK (22 of them phase 3), paths_ok=30, cross_group=on, no exp: token and no result row anywhere" \
     "[ $rc = 3 ] && grep -q 'Path checks (route, ping, MTU no-fragment): 30 of 30 planned OK' <<<\"\$out\" && grep -qx 'paths_ok=30' <<<\"\$meta\" && grep -qx 'paths_planned=30' <<<\"\$meta\" && grep -qx 'cross_group=on' <<<\"\$meta\" && [ \$(bfile xs iperf3_results.txt | grep -c 'exp:\|Gbits') = 0 ]" "rc=$rc $(grep -E 'paths|cross_group' <<<"$meta" | tr '\n' ' ')"
 
 # no LLDP anywhere and no uplinks declared (the 10-27 field run): the NICs left out are still said, in the log and the dashboard
-out=$(xrun nl FAKE_NO_LLDP=all FAKE_NO_LLDPCLI=h21 FF_HOSTS=198.18.0.21-22 FF_ITER=1 timeout 60 $B $C 1); rc=$?
+out=$(xrun nl FAKE_NO_LLDP=all FAKE_NO_LLDPCLI=h21 FAKE_LLDPWHY=1 FF_HOSTS=198.18.0.21-22 FF_ITER=1 timeout 60 $B $C 1); rc=$?
 render nl; prc=$?
 chk "no LLDP, nothing declared: the log says 4 of 4 rail NICs have no LLDP neighbour and 4 runs are left out; the dashboard note says the same (control: the run above printed no such line)" \
     "grep -qx '  Uplinks: 4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' <<<\"\$out\" && grep -q '4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' $W/nl.html && [ $prc = 0 ]" "rc=$rc prc=$prc $(grep -i 'lldp' <<<"$out" | tr '\n' '|')"
 # h21 has no lldpcli (its tools sweep): the log offers the opt-in capture once, by name (11-02)
 chk "no lldpcli on 1 host: the log names FF_LLDP once, in 'lldpcli not installed on 1 hosts; FF_LLDP=1 captures LLDP with tcpdump' (control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
     "[ \$(grep -c FF_LLDP <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 hosts; FF_LLDP=1 captures LLDP with tcpdump' <<<\"\$out\" && [ \$(grep -c FF_LLDP $W/xs.log) = 0 ]" "$(grep -c FF_LLDP <<<"$out") lines: $(grep FF_LLDP <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP $W/xs.log)"
+# the reasons (FAKE_LLDPWHY=1, 11-02): h21 has no lldpcli, h22's lldpcli sees nothing; lldp_reasons.txt and one log line
+chk "no-neighbour reasons: lldp_reasons.txt holds h21's 2 ports as no_lldpcli and h22's 2 as no_neighbour, and the log says '# LLDP: 4 ports name no neighbour (no_lldpcli 2, no_neighbour 2; lldp_reasons.txt)' once (control: the cross-group run above, every port seen, has the file empty and no such line)" \
+    "[ \"\$(bfile nl lldp_reasons.txt | sort | paste -sd '|' -)\" = 'h21 enp196s0np0 no_lldpcli|h21 enp5s0np0 no_lldpcli|h22 enp196s0np0 no_neighbour|h22 enp5s0np0 no_neighbour' ] && [ \$(grep -cx '# LLDP: 4 ports name no neighbour (no_lldpcli 2, no_neighbour 2; lldp_reasons.txt)' <<<\"\$out\") = 1 ] && tar -tzf \$(bundle xs) | grep -q '/lldp_reasons.txt\$' && [ \$(bfile xs lldp_reasons.txt | grep -c .) = 0 ] && [ \$(grep -c '^# LLDP: ' $W/xs.log) = 0 ]" \
+    "nl file: $(bfile nl lldp_reasons.txt | sort | paste -sd '|' -); nl lines: $(grep '^# LLDP: ' <<<"$out" | tr '\n' '|'); xs file in bundle $(tar -tzf $(bundle xs) | grep -c '/lldp_reasons.txt$'), rows $(bfile xs lldp_reasons.txt | grep -c .), lines $(grep -c '^# LLDP: ' $W/xs.log)"
 # the capture on: h21 and h22 lack lldpcli, h21 also tcpdump; only h21 is counted (11-02)
 out=$(xrun lt FF_LLDP=1 FAKE_NO_LLDPCLI=h21,h22 FAKE_NO_TCPDUMP=h21 FF_HOSTS=198.18.0.21-22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 60 $B $C 1); rc=$?
 chk "FF_LLDP=1, no lldpcli on 2 hosts, no tcpdump on 1 of them: 'lldpcli not installed on 2 hosts; FF_LLDP=1: capturing' once and 'tcpdump not installed on 1 hosts; LLDP capture skipped there' once (control: h22, tcpdump present, not counted)" \
