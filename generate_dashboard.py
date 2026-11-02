@@ -41,6 +41,16 @@ if os.path.abspath(OUTPUT_FILE) == os.path.abspath(INPUT_FILE):   # never write 
 FEC_LIMIT_BER = 2.4e-4
 FEC_WATCH_BER = 1e-5
 TOPO_DEFAULT_LAYOUT = 'radial'   # the topology map's opening layout: 'radial', 'hierarchical' or 'force' (10-29)
+# lldp_reasons.txt: why a port names no LLDP neighbour, shown where a NIC would read "no switch seen"
+LLDP_WHY = {'fw_lldp_on': 'firmware LLDP agent holds the frames (fw_lldp_on)', 'tcpdump_absent': 'no tcpdump on host',
+            'timeout_absent': 'no timeout command on host', 'no_lldpcli': 'no lldpcli; FF_LLDP=1 captures',
+            'no_frame': 'no LLDP frame in 70 s', 'no_neighbour': 'no switch seen', 'bond': 'bond: see members'}
+UNSEEN_TEXT = {'no switch seen', *LLDP_WHY.values()}
+
+
+def _unseen(l):
+    """What a NIC or member with no LLDP neighbour reads: its reason when the run recorded one, else "no switch seen"."""
+    return l.get('why', 'no switch seen')
 
 
 def generate_html(data, output_path):
@@ -291,8 +301,10 @@ def generate_html(data, output_path):
         if bond and len(rows) > 1:
             members = [r for r in rows if r is not bond and r['nic'] != bond['nic']]
             b = data['bonds'].get((host, bond['nic']), {'up': len(members), 'total': len(members), 'down': []})
+            why = {_unseen(m) for m in members}   # no member names a leaf: their shared reason, else the bond's own
             host_nics[host].append({**bond, 'avg_gbps': avg, 'members': members, 'bond': b,
-                                    'switch': '+'.join(sorted({m['switch'] for m in members if m['switch'] not in ('unknown', '')})) or 'no switch seen'})
+                                    'switch': '+'.join(sorted({m['switch'] for m in members if m['switch'] not in ('unknown', '')}))
+                                              or (why.pop() if len(why) == 1 else _unseen(bond))})
         else:
             for r in rows:
                 host_nics[host].append({**r, 'avg_gbps': avg, 'members': [], 'bond': None})
@@ -302,12 +314,12 @@ def generate_html(data, output_path):
 
     def nic_line(n, status=''):
         """A NIC in a node's tooltip (plain text, vis shows tags literally): host names, the leaf from LLDP, members."""
-        leaf = n['switch'] if n['switch'] not in ('unknown', '') else 'no LLDP neighbour'
+        leaf = n['switch'] if n['switch'] not in ('unknown', '') else n.get('why', 'no LLDP neighbour')
         s = f"\n{n['nic']}: {n['ip']} → {leaf} @ {n['avg_gbps']} Gbps{status}"
         if n['members']:
             b = n['bond']
             s += f" (bond, {b['up']} of {b['total']} members up)" + ''.join(
-                f"\n  {m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen'}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members'])
+                f"\n  {m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else _unseen(m)}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members'])
         return s
 
     def panel(kind, host, role, n, l, **extra):
@@ -332,7 +344,7 @@ def generate_html(data, output_path):
         topo_nodes[bid] = {
             'id': bid, 'label': f"{n['nic']} {n['ip']}", 'group': 'bond', 'level': 2, 'host': host, 'panel': bpanel,
             'title': f"{host} {n['nic']} {n['ip']}: {b['up']} of {b['total']} members up" + ''.join(
-                f"\n{m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen'}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members']),
+                f"\n{m['nic']} → {m['switch'] if m['switch'] not in ('unknown', '') else _unseen(m)}{' (down)' if m['nic'] in b['down'] else ''}" for m in n['members']),
         }
         topo_edges.append({'from': host, 'to': bid, 'color': {'color': color, 'highlight': '#ffffff'}, 'dashes': dashes, 'bondtrunk': True,
                            'title': f"{host} {n['nic']} {n['ip']} → {n['switch']} — {n['avg_gbps']} Gbps (bond, {b['up']} of {b['total']} members up)",
@@ -340,21 +352,22 @@ def generate_html(data, output_path):
         for m in n['members']:
             mdown = m['nic'] in b['down']
             seen = m['switch'] in topo_nodes and m['switch'] != 'unknown'
-            mpanel = {**panel('member', host, role, {**n, 'nic': m['nic']}, m), 'member_of': n['nic'], 'member_down': mdown, 'no_switch': not seen}
+            mpanel = {**panel('member', host, role, {**n, 'nic': m['nic']}, m), 'member_of': n['nic'], 'member_down': mdown, 'no_switch': not seen,
+                      **({'why': m['why']} if 'why' in m and not seen else {})}
             if not seen:
                 # no switch seen (a down port sends no LLDP): a short stub to a marker that floats beside the bond,
                 # never a link to a leaf nobody saw and no guess at one (a miscabled server lands where it lands)
                 sid = f"{host}|{m['nic']}"
                 topo_nodes[sid] = {'id': sid, 'label': f"✕ {m['nic']}", 'group': 'stub', 'level': 2, 'host': host, 'bond': bid, 'panel': mpanel,
-                                   'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']}: {'down' if mdown else 'up'}, no switch seen"}
+                                   'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']}: {'down' if mdown else 'up'}, {_unseen(m)}"}
             topo_edges.append({'from': bid, 'to': m['switch'] if seen else sid, 'label': m['nic'], 'font': {'size': 10, 'color': '#8899aa', 'strokeWidth': 0},
                                'color': {'color': '#e94560' if mdown else '#8899aa', 'highlight': '#ffffff'}, 'dashes': [4, 4] if mdown else False,   # by member state; the trunk carries the run's colour
-                               'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']} → {m['switch'] if seen else 'no switch seen'}{' — member down' if mdown else ''}",
+                               'title': f"{host} {m['nic']} (member of {n['nic']}) {n['ip']} → {m['switch'] if seen else _unseen(m)}{' — member down' if mdown else ''}",
                                'width': max(1, n['avg_gbps'] / (L / 4)), 'name': f"{host} {m['nic']}", 'ip': n['ip'], 'gbps': n['avg_gbps'], 'stub': not seen,
-                               'panel': mpanel})
+                               'panel': mpanel, **({'why': m['why']} if 'why' in m and not seen else {})})
 
     def leaf_of(l):
-        return l['switch'] if l['switch'] not in ('unknown', '') else 'no switch seen'
+        return l['switch'] if l['switch'] not in ('unknown', '') else _unseen(l)
 
     def temps_of(host):
         """A host's heat for its panel: the hottest reading per sensor type, and every flagged sensor."""
@@ -672,7 +685,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 
     # Where to look first, above the tabs: the findings of every kind, worst first (the _w_* functions)
     slow, hot = _slow(nic_rows), _hot(data)
-    leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else 'no switch seen') for n in all_nics}
+    leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else _unseen(n)) for n in all_nics}
     ipr_ = data.get('ip_rail', {})
     xr = [r for r in data['iperf_results'] if ipr_.get(r['src']) and ipr_.get(r['dst']) and _cross(r, ipr_)]
     xs = [r for r in xr if r['gbps'] < tpath(r, 'F')]
@@ -687,7 +700,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
     # the drawer's NIC and leaf panels, built here so the page needs no second copy of a rule: per NIC its runs
     # (slowest 8 and a count of the rest), drops, columns and host heat; per leaf its rails and runs to the other leaves
     drops_ip = {d['ip']: d['rx_drop'] + d['tx_drop'] + d['rx_oob'] for d in data['packet_drops']}
-    members_ip = {n['ip']: [{'nic': m['nic'], 'leaf': m['switch'] if m['switch'] not in ('unknown', '') else 'no switch seen',
+    members_ip = {n['ip']: [{'nic': m['nic'], 'leaf': m['switch'] if m['switch'] not in ('unknown', '') else _unseen(m),
                              'down': m['nic'] in n['bond']['down']} for m in n['members']]
                   for n in all_nics if n['members']}
     runs_ip = defaultdict(list)
@@ -741,16 +754,16 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
                f'{escape(x["ip"])}</a>') if x['ip'] not in ('-', '') else '-'
         return (f"<tr><td>{escape(x['host'])}</td><td>{escape(x['nic'])}</td><td>{ipl}</td><td>{escape(leaf_ip.get(x['ip'], '-'))}</td>"
                 f"<td>{escape(wc)}</td><td>{escape(x['status'])}</td></tr>")
-    unseen = lambda x: leaf_ip.get(x['ip'], '-') in ('-', 'no switch seen')
-    groups = defaultdict(list)
+    unseen = lambda x: leaf_ip.get(x['ip'], '-') in ('-', *UNSEEN_TEXT)
+    groups = defaultdict(list)   # by role, reason (lldp_reasons.txt; else "no switch seen") and status
     for x in repair:
         if unseen(x):
-            groups[x['role'], x['status']].append(x)
+            groups[x['role'], leaf_ip.get(x['ip'], '-') if leaf_ip.get(x['ip'], '-') != '-' else 'no switch seen', x['status']].append(x)
     head = '<tr><th>Host</th><th>NIC</th><th>IP</th><th>Leaf</th><th>Worst column</th><th>Status</th></tr>'
-    grows = ''.join(f'<tr><td colspan="6"><details><summary>{len(xs)} {escape(role)} NICs: no switch seen, {escape(st.lower())}'
+    grows = ''.join(f'<tr><td colspan="6"><details><summary>{len(xs)} {escape(role)} NICs: {escape(why)}, {escape(st.lower())}'
                     f'{" (not cabled or not in use?)" if st == "DOWN" else ""}</summary><table class="table table-sm mb-0"><thead>{head}</thead>'
                     f'<tbody>{"".join(repair_row(x) for x in xs)}</tbody></table></details></td></tr>'
-                    for (role, st), xs in sorted(groups.items(), key=lambda kv: -len(kv[1])))
+                    for (role, why, st), xs in sorted(groups.items(), key=lambda kv: -len(kv[1])))
     repair_html = (f'<div class="card mb-3"><div class="card-header">NICs that need repair — {len(repair)} (down, or CRITICAL: a run under the repair '
                    f'cut-off; worst first; "(retr)": its retransmits were over the limit too). SLOW NICs that need no repair are in Connection Health</div><div class="card-body" style="max-height:420px; overflow-y:auto;">'
                    + (f'<table class="table table-sm table-striped"><thead>{head}</thead>'
@@ -923,7 +936,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <table class="table table-sm table-striped table-hover" id="lldpTable">
                 <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th></tr></thead>
                 <tbody>
-                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l['switch']}</td><td>{l['port_id']}</td><td>{l['port_desc']}</td><td>{l['sys_desc']}</td></tr>" for l in data['lldp_info'])}
+                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l.get('why', l['switch'])}</td><td>{l['port_id']}</td><td>{l['port_desc']}</td><td>{l['sys_desc']}</td></tr>" for l in data['lldp_info'])}
                 </tbody></table>
             </div></div>
         </div>
@@ -1832,7 +1845,7 @@ $(document).ready(function() {{
         hostRows.push(row('Worst run', d.gbps + ' Gbps' + (d.down ? ' (down)' : '')));
         if (topoNicData[d.ip]) hostRows.push(rowH('NIC panel', ipLink(d.ip)));   // runs, drops, heat for this NIC
         var swRows = d.kind === 'bond' ? [row('Switch side', 'see the member links')] :
-            d.no_switch ? [row('Switch', 'no switch seen')] :
+            d.no_switch ? [row('Switch', d.why || 'no switch seen')] :
             [row('Switch', d.leaf), row('Switch port', d.port_id), row('Port description', d.port_desc), row('System', d.sys_desc)];
         return tbl('Host side', hostRows) + tbl('Switch side', swRows);
     }}
@@ -1878,7 +1891,7 @@ $(document).ready(function() {{
             if (!e.uplink && !e.bondtrunk && e.title) {{
                 var o = document.createElement('option');
                 o.value = i;
-                o.textContent = e.name + ' — ' + e.ip + ' → ' + (e.stub ? 'no switch seen' : e.to);
+                o.textContent = e.name + ' — ' + e.ip + ' → ' + (e.stub ? e.why || 'no switch seen' : e.to);
                 linkSel.appendChild(o);
             }}
         }});
@@ -2423,7 +2436,9 @@ def _w_uplinks(busy):
 def _w_slow(slow, hot, leaf, colname):
     cool = [x for x in slow if x['host'] not in hot]
     if len(cool) > 5:   # more than 5: one line by role and leaf, the worst 3 named; Needs Repair lists them all
-        by = Counter(f"{x['role']} NICs on {leaf.get(x['ip'], 'no switch seen')}" for x in cool)
+        lf = lambda x: leaf.get(x['ip'], 'no switch seen')   # a leaf, "no switch seen" or a reason (lldp_reasons.txt)
+        on = lambda t: ': ' if t in UNSEEN_TEXT and t != 'no switch seen' else ' on '
+        by = Counter(f"{x['role']} NICs{on(lf(x))}{lf(x)}" for x in cool)
         top = sorted(by.items(), key=lambda kv: -kv[1])
         worst = sorted(cool, key=lambda x: x['lo'])[:3]
         return [{'sev': 1, 'kind': 'slowmany', 'go': {'tab': 'tab-slow'},
@@ -3252,7 +3267,9 @@ def parse_tar_archive(filepath):
             data['bonds'][(parts[0], parts[1])] = {'up': int(parts[2]), 'total': int(parts[3]),
                                                    'down': [] if parts[4] == 'none' else parts[4].split(',')}
 
-    # LLDP
+    # LLDP; a row naming no neighbour carries its reason's text (lldp_reasons.txt: host port reason) as 'why'
+    why = {(p[0], p[1]): LLDP_WHY[p[2]] for p in (line.split() for line in read_file('lldp_reasons.txt').splitlines())
+           if len(p) == 3 and p[2] in LLDP_WHY}
     for line in read_file('lldp_neighbors.txt').splitlines():
         parts = line.split()
         if len(parts) >= 6:
@@ -3261,6 +3278,7 @@ def parse_tar_archive(filepath):
                 'switch': parts[3], 'port_id': parts[4] if len(parts) > 4 else '',
                 'port_desc': parts[5].replace('_', ' ') if len(parts) > 5 else '',
                 'sys_desc': ' '.join(parts[6:]).replace('_', ' ') if len(parts) > 6 else '',
+                **({'why': why[parts[0], parts[1]]} if parts[3] in ('unknown', '') and (parts[0], parts[1]) in why else {}),
             })
 
     # Packet drops
@@ -3478,6 +3496,10 @@ def parse_tar_archive(filepath):
         notes.append(f"Drop counters read on {reads} of {meta.get('drop_nics_expected')} rail NICs in at least one iteration.")
     if data['lldp_info'] and all(l['switch'] == 'unknown' for l in data['lldp_info']):
         notes.append('No LLDP neighbours seen (lldpd not running, or the switches do not send LLDP): the switch view is empty.')
+    bad = [l for l in read_file('lldp_reasons.txt').splitlines() if len(l.split()) != 3 or l.split()[2] not in LLDP_WHY]
+    if bad:
+        notes.append(f'lldp_reasons.txt: {len(bad)} rows not read (not "host port reason" with a known reason; first: {bad[0][:60]}): '
+                     'those NICs read "no switch seen".')
     flaps = [l.split() for l in read_file('link_flaps.txt').splitlines() if len(l.split()) >= 4]
     if flaps:
         problems.append('Rail links went down during the run (their runs measured a flap, not the fabric): '

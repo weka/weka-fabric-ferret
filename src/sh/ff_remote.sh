@@ -161,6 +161,14 @@ for nic in "$@"; do
         portdesc=$(echo "$lldp" | awk -F': *' '/PortDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         sysdesc=$(echo "$lldp" | awk -F': *' '/SysDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         echo "@@LLDP $h $port ${ip:-none} ${chassis:-unknown} ${portid:-unknown} ${portdesc:-unknown} ${sysdesc:-unknown}"
+        # no neighbour: why, from the strings its raw section prints (lldp_reasons.txt); a bond's members carry its LLDP
+        if [ -z "$chassis" ]; then
+            if [ "$port" = "$nic" ] && [ -n "$members" ]; then why=bond
+            elif have lldpcli; then why=no_neighbour
+            elif [ -n "$LT" ]; then why=$(echo "$lr" | awk '/^reason: /{print $2; exit}'); why=${why:-no_frame}
+            else why=no_lldpcli; fi
+            echo "@@LLDPWHY $h $port $why"
+        fi
         if [ "$port" = "$nic" ]; then lh0=$lh; lr0=$lr; else echo "=== $lh ==="; echo "$lr"; fi
     done
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"

@@ -719,6 +719,14 @@ for nic in "$@"; do
         portdesc=$(echo "$lldp" | awk -F': *' '/PortDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         sysdesc=$(echo "$lldp" | awk -F': *' '/SysDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         echo "@@LLDP $h $port ${ip:-none} ${chassis:-unknown} ${portid:-unknown} ${portdesc:-unknown} ${sysdesc:-unknown}"
+        # no neighbour: why, from the strings its raw section prints (lldp_reasons.txt); a bond's members carry its LLDP
+        if [ -z "$chassis" ]; then
+            if [ "$port" = "$nic" ] && [ -n "$members" ]; then why=bond
+            elif have lldpcli; then why=no_neighbour
+            elif [ -n "$LT" ]; then why=$(echo "$lr" | awk '/^reason: /{print $2; exit}'); why=${why:-no_frame}
+            else why=no_lldpcli; fi
+            echo "@@LLDPWHY $h $port $why"
+        fi
         if [ "$port" = "$nic" ]; then lh0=$lh; lr0=$lr; else echo "=== $lh ==="; echo "$lr"; fi
     done
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"
@@ -3872,7 +3880,8 @@ main() {
     log "Collecting NIC diagnostics..."
     local NIC_DIAG=$COLLECT_DIR/nic_diagnostics.txt LLDP_DATA=$COLLECT_DIR/lldp_neighbors.txt DRV_DATA=$COLLECT_DIR/driver_info.txt
     local BOND_DATA=$COLLECT_DIR/bonds.txt   # "host nic slaves_up slaves_total down_slaves" per bond NIC (raw_per_host has the kernel's report)
-    : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"; : > "$BOND_DATA"
+    local LLDP_WHY=$COLLECT_DIR/lldp_reasons.txt   # "host port reason" per port whose LLDP row names no neighbour
+    : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"; : > "$BOND_DATA"; : > "$LLDP_WHY"
     local nl=0; for k in "${ELIG[@]}" "${CLI[@]}"; do section "${DISC[$k]}" tools | grep -q '^lldpcli /' || nl=$((nl + 1)); done
     if (( nl )) && [[ $FF_LLDP == 1 ]]; then
         log "lldpcli not installed on $nl hosts; FF_LLDP=1: capturing LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
@@ -3889,6 +3898,7 @@ main() {
         grep '^@@LLDP ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$LLDP_DATA"
         grep '^@@DRV ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$DRV_DATA"
         grep '^@@BOND ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$BOND_DATA"
+        grep '^@@LLDPWHY ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$LLDP_WHY"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
     if (( nl )) && [[ $FF_LLDP == 1 ]]; then
@@ -3896,6 +3906,9 @@ main() {
         (( nt )) && log "tcpdump not installed on $nt hosts; LLDP capture skipped there"
     fi
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
+    # ports with no neighbour by reason, most first; a bond's own row is left out (its members are counted)
+    local why; why=$(awk '$3 != "bond" {print $3}' "$LLDP_WHY" | sort | uniq -c | sort -k1,1nr -k2,2 | awk '{n += $1; s = s (s == "" ? "" : ", ") $2 " " $1} END {if (n) print n " " s}')
+    [[ -n $why ]] && log "LLDP: ${why%% *} ports name no neighbour (${why#* }; lldp_reasons.txt)"
     lldp_rail_check "$LLDP_DATA"
 
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common
