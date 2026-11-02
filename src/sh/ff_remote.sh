@@ -78,6 +78,42 @@ read -r -d '' DIAG_SCRIPT <<'EOF'
 h=$(hostname -s)
 have() { [ -n "$(command -v "$1")" ]; }
 ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; }
+# LLDP without lldpcli (FF_LLDP_CAPTURE=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
+# reported, never turned off; the group MAC joins the NIC's filter only while we listen (never promiscuous)
+lldp_tcpdump() {
+    local p=$1 pf inf drv bus mx added=""
+    [ -r "${FF_SYSFS:-/sys}/class/net/$p/bonding/slaves" ] && { echo "reason: bond (its members are captured)"; return; }
+    have tcpdump || { echo "reason: tcpdump not installed"; return; }
+    have timeout || { echo "reason: timeout not installed"; return; }
+    if have ethtool; then
+        pf=$(ethtool --show-priv-flags "$p" 2>&1)
+        if echo "$pf" | awk '($1 == "fw-lldp-agent" && $NF == "on") || ($1 == "disable-fw-lldp" && $NF == "off") {f = 1} END {exit !f}'; then
+            echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; ethtool --show-priv-flags)"; echo "$pf"; return
+        fi
+        inf=$(ethtool -i "$p" 2>&1)
+        drv=$(echo "$inf" | awk -F': ' '$1 == "driver" {print $2; exit}'); bus=$(echo "$inf" | awk -F': ' '$1 == "bus-info" {print $2; exit}')
+        if [ "$drv" = mlx5_core ] && have mlxconfig; then
+            mx=$(mlxconfig -d "$bus" q 2>&1)
+            if echo "$mx" | awk '$1 ~ /^LLDP_NB_(DCBX|RX_MODE)_P[0-9]+$/ {v = $NF; if (match(v, /\([0-9]+\)/)) v = substr(v, RSTART + 1, RLENGTH - 2); if (v != "0" && v != "False") f = 1} END {exit !f}'; then
+                echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; mlxconfig -d $bus q)"; echo "$mx" | grep LLDP_NB_; return
+            fi
+        elif [ "$drv" = mlx5_core ]; then echo "note: mlxconfig_absent (the firmware LLDP agent was not checked)"; fi
+    fi
+    ip maddr show dev "$p" | grep -qi 01:80:c2:00:00:0e || { ip maddr add 01:80:c2:00:00:0e dev "$p" && added=1; }
+    timeout 70 tcpdump -p -i "$p" -c 1 -vv -s 1500 ether proto 0x88cc 2>&1; echo "tcpdump rc=$?"
+    [ -n "$added" ] && ip maddr del 01:80:c2:00:00:0e dev "$p"
+}
+LT=""
+if [ "$FF_LLDP_CAPTURE" = 1 ] && ! have lldpcli; then
+    LT=$(mktemp -d) || LT=""
+    [ -n "$LT" ] && for nic in "$@"; do
+        [ "$nic" = - ] && continue
+        for port in $nic $([ -r "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" ] && cat "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" 2>&1); do
+            lldp_tcpdump "$port" > "$LT/$port" 2>&1 &
+        done
+    done
+    wait
+fi
 for nic in "$@"; do
     [ "$nic" = - ] && continue
     ip=$(ip -o -4 addr show dev "$nic" 2>&1 | awk '{split($4,a,"/"); print a[1]; exit}')
@@ -108,15 +144,25 @@ for nic in "$@"; do
     # FF_SYSFS (default /sys) is a test hook.
     members=""; [ "$drv" = bonding ] && [ -r "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" ] && members=$(cat "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" 2>&1)
     for port in $nic $members; do
-        if have lldpcli; then lldp=$(lldpcli show neighbors ports "$port" 2>&1); else lldp=""; fi
+        lh="lldpcli $port"
+        if have lldpcli; then lldp=$(lldpcli show neighbors ports "$port" 2>&1); lr=${lldp:-lldpcli not installed}
+        elif [ -n "$LT" ]; then
+            # tcpdump's -vv TLV lines, rewritten as the lldpcli lines read below
+            lh="lldp $port (tcpdump)"; lr=$(cat "$LT/$port" 2>&1)
+            lldp=$(echo "$lr" | awk 'function trim(s) {sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s}
+                w != "" {v = trim($0); if (w == "PortID") sub(/^.*\): /, "", v); if (!(w in f)) f[w] = v; w = ""; next}
+                /System Name TLV|Port ID TLV|Port Description TLV|System Description TLV/ {
+                    k = /System Name/ ? "SysName" : /Port ID/ ? "PortID" : /Port Description/ ? "PortDescr" : "SysDescr"
+                    if (k != "PortID" && match($0, /length [0-9]+: /)) {if (!(k in f)) f[k] = trim(substr($0, RSTART + RLENGTH))} else w = k}
+                END {for (k in f) print k ": " f[k]}')
+        else lldp=""; lr="lldpcli not installed"; fi
         chassis=$(echo "$lldp" | awk -F': *' '/SysName:/{gsub(/ /,"_",$2); print $2; exit}')
         portid=$(echo "$lldp" | awk '/PortID:/{print $NF; exit}')
         portdesc=$(echo "$lldp" | awk -F': *' '/PortDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         sysdesc=$(echo "$lldp" | awk -F': *' '/SysDescr:/{gsub(/ /,"_",$2); print $2; exit}')
         echo "@@LLDP $h $port ${ip:-none} ${chassis:-unknown} ${portid:-unknown} ${portdesc:-unknown} ${sysdesc:-unknown}"
-        if [ "$port" = "$nic" ]; then lldp0=$lldp; else echo "=== lldpcli $port ==="; echo "${lldp:-lldpcli not installed}"; fi
+        if [ "$port" = "$nic" ]; then lh0=$lh; lr0=$lr; else echo "=== $lh ==="; echo "$lr"; fi
     done
-    lldp=$lldp0
     echo "@@DRV $h $nic ${ip:-none} ${drv:-unknown} ${ver:-unknown} ${fw:-unknown} ${bus:-unknown}"
     # a bond: its slaves' MII state as "@@BOND host nic up total down_slaves" (none = all up) and the kernel's
     # whole report, so a bond at half speed names the member without link. FF_PROCNET (default /proc/net) is a test hook.
@@ -131,8 +177,9 @@ for nic in "$@"; do
     echo "=== ethtool -i $nic ==="; echo "$inf"
     echo "=== ethtool -m $nic ==="; echo "$mod"
     echo "=== ethtool -S $nic ==="; echo "$st" | grep -E "rx_|tx_|link_down|pcs_symbol|prio|pause" | grep -v "ch[0-9]"
-    echo "=== lldpcli $nic ==="; echo "${lldp:-lldpcli not installed}"
+    echo "=== $lh0 ==="; echo "$lr0"
 done
+[ -n "$LT" ] && rm -rf -- "${LT:?}"
 echo "=== hostname ==="; echo "$h"
 echo "=== ip -br -4 a ==="; ip -br -4 a
 if have ibstat; then echo "=== ibstat ==="; ibstat 2>&1; fi
