@@ -142,6 +142,27 @@ if [[ $script == "IFS= read -r TC_PW"$'\n'* ]]; then
     if [[ -r $FSTATE/pw.$target && $pwl == "$(< "$FSTATE/pw.$target")" ]]; then tcpw=ok; else tcpw=bad; fi
 fi
 case $script in
+# the DSCP probe (FF_RDMA=1, 11-03): RX on dst (args src dst nic port probe), TX on src (src dst port tos probe); first.
+# Receivers see FAKE_DSCP_TOS, else the run's FF_TOS, else 96; FAKE_DSCP_REWRITE=ip:tos,.. (dst IP sees tos),
+# FAKE_DSCP_IPERF_FAIL=h,.. (iperf3 probes from h reach nothing), FAKE_DSCP_DEAD=ip,..|all (no probe reaches dst)
+*"# @@DSCP_RX"*)
+    echo "$*" >> "$FSTATE/dscp_rx.log"; [[ -f $FSTATE/dscp_rx.script ]] || printf '%s\n' "$script" > "$FSTATE/dscp_rx.script"
+    inlist "$h" "$FAKE_NO_TCPDUMP" && { echo "@@DSCP_RX tcpdump_absent"; exit 0; }
+    echo "tcpdump: listening on $3, link-type EN10MB (Ethernet), snapshot length 262144 bytes"
+    tos=${FAKE_DSCP_TOS:-${FF_TOS:-96}}; for r in ${FAKE_DSCP_REWRITE//,/ }; do [[ ${r%%:*} == "$2" ]] && tos=${r#*:}; done
+    k=5; if [[ $FAKE_DSCP_DEAD == all ]] || inlist "$2" "$FAKE_DSCP_DEAD"; then k=0; fi
+    [[ $5 == iperf3 ]] && inlist "$(iphost "$1")" "$FAKE_DSCP_IPERF_FAIL" && k=0
+    pr='UDP (17)'; [[ $5 == ping ]] && pr='ICMP (1)'
+    for (( i = 0; i < k; i++ )); do
+        printf '00:00:0%d.000000 IP (tos 0x%02x, ttl 64, id 1, offset 0, flags [DF], proto %s, length 1468)\n    %s > %s: fake\n' $i "$tos" "$pr" "$1" "$2"
+    done
+    echo "$k packets captured"; echo "@@DSCP_RX rc=$(( k < 5 ? 124 : 0 ))" ;;
+*"# @@DSCP_TX"*)
+    echo "$*" >> "$FSTATE/dscp_tx.log"; [[ -f $FSTATE/dscp_tx.$5.script ]] || printf '%s\n' "$script" > "$FSTATE/dscp_tx.$5.script"
+    [[ $5 == iperf3 && $h == "$FAKE_NO_IPERF" ]] && { echo "@@DSCP_TX iperf3_absent"; exit 0; }
+    rc=0; if [[ $FAKE_DSCP_DEAD == all ]] || inlist "$2" "$FAKE_DSCP_DEAD"; then rc=1; fi
+    [[ $5 == iperf3 ]] && inlist "$h" "$FAKE_DSCP_IPERF_FAIL" && rc=1
+    echo "@@DSCP_TX rc=$rc"; (( rc )) && printf 'fake %s: no reply from %s\nfake %s: giving up\n' "$5" "$2" "$5" ;;
 *"@@CROUTE"*)
     # unsourced route from this host to each backend IP; c4 reaches rail B by ens1f1, the rest by ens1f0
     for ip in "$@"; do

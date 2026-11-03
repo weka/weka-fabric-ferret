@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/bash
 # unknown FF_* settings stop the run; the known list covers every FF_ the collector reads
 # tier: fast
-# checks: 18
+# checks: 20
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 
 out=$(FF_STREAM=4 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); chk "typo FF_STREAM stops with a hint" "grep -q 'unknown setting FF_STREAM; did you mean FF_STREAMS?' <<<\"\$out\""
@@ -21,6 +21,13 @@ chk "old FS_ITER stops with the FF_ name" "[ $rc = 2 ] && grep -q 'setting FS_IT
 out=$(FF_LLDP=2 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); rc=$?; ok1=$(FF_LLDP=1 FF_HOSTS=198.18.0.21 $B $C --list 2>&1)
 chk "FF_LLDP=2 stops: rc 2, 'ERROR: FF_LLDP must be 0 or 1, got '2'', no host listed (control: FF_LLDP=1 lists 198.18.0.21)" \
     "[ $rc = 2 ] && grep -qx \"ERROR: FF_LLDP must be 0 or 1, got '2'\" <<<\"\$out\" && ! grep -qx '198.18.0.21' <<<\"\$out\" && grep -qx '198.18.0.21' <<<\"\$ok1\"" "rc=$rc $out | control: $ok1"
+# FF_RDMA (the DSCP check, 11-03): 0 or 1; FF_TOS turns it on, so FF_RDMA=0 with FF_TOS is a contradiction
+out=$(FF_RDMA=2 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); rc=$?; ok1=$(FF_RDMA=1 FF_HOSTS=198.18.0.21 $B $C --list 2>&1)
+chk "FF_RDMA=2 stops: rc 2, 'ERROR: FF_RDMA must be 0 or 1, got '2'', no host listed (control: FF_RDMA=1 lists 198.18.0.21)" \
+    "[ $rc = 2 ] && grep -qx \"ERROR: FF_RDMA must be 0 or 1, got '2'\" <<<\"\$out\" && ! grep -qx '198.18.0.21' <<<\"\$out\" && grep -qx '198.18.0.21' <<<\"\$ok1\"" "rc=$rc $out | control: $ok1"
+out=$(FF_RDMA=0 FF_TOS=104 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); rc=$?; ok1=$(FF_TOS=104 FF_HOSTS=198.18.0.21 $B $C --list 2>&1)
+chk "FF_RDMA=0 with FF_TOS=104 stops: rc 2, 'ERROR: FF_RDMA=0 contradicts FF_TOS=104: unset one', no host listed (control: FF_TOS=104 alone lists 198.18.0.21)" \
+    "[ $rc = 2 ] && grep -qx 'ERROR: FF_RDMA=0 contradicts FF_TOS=104: unset one' <<<\"\$out\" && ! grep -qx '198.18.0.21' <<<\"\$out\" && grep -qx '198.18.0.21' <<<\"\$ok1\"" "rc=$rc $out | control: $ok1"
 # FF_FERRET (the viewer): without a terminal on stderr the run is the plain run, stream for stream; 1 vs 0 vs unset
 # diffed on stdout and stderr captured apart. python3 missing (a PATH of /bin and /usr/bin links without it): one log
 # line, then the plain run.

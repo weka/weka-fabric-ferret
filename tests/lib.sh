@@ -32,7 +32,7 @@ chk() { if (( $# > 3 )); then bad "$1" "chk got $# arguments (a joined line?): '
 # timeout N cmd...: the real timeout; a cut-off (rc 124) is noted for chk. xrun notes its own (env runs the binary).
 timeout() { rm -f "$W/timeout.note"; command timeout "$@"; local rc=$?; (( rc == 124 )) && echo "TIMEOUT after $1 s" >> "$W/timeout.note"; return $rc; }
 tnote() { local rc=$1 n=; shift; (( rc == 124 )) || return 0; while (( $# )); do [[ $1 == timeout ]] && { n=$2; break; }; shift; done; echo "TIMEOUT after ${n:-?} s" >> "$W/timeout.note"; }
-fresh() { rm -f "$W/timeout.note" $FAKE_STATE/drops.* $FAKE_STATE/carrier.* $FAKE_STATE/prio.* $FAKE_STATE/udph.* $FAKE_STATE/hostctr.* $FAKE_STATE/bufd.* $FAKE_STATE/tx.* $FAKE_STATE/temp.* $FAKE_STATE/pkill.log $FAKE_STATE/iperf_args.log $FAKE_STATE/listen.* $FAKE_STATE/iperf_refused.log; }
+fresh() { rm -f "$W/timeout.note" $FAKE_STATE/drops.* $FAKE_STATE/carrier.* $FAKE_STATE/prio.* $FAKE_STATE/udph.* $FAKE_STATE/hostctr.* $FAKE_STATE/bufd.* $FAKE_STATE/tx.* $FAKE_STATE/temp.* $FAKE_STATE/pkill.log $FAKE_STATE/iperf_args.log $FAKE_STATE/listen.* $FAKE_STATE/iperf_refused.log $FAKE_STATE/dscp_*; }
 # run alone (no run_all.sh): the work dir goes when every check passed
 finish() { echo "---- $pass passed, $fail failed  (work dir $W$( [[ -z $RUN_DIR && $fail = 0 ]] && echo ', removed'))"
            [[ -z $RUN_DIR && $fail = 0 ]] && { cd "$S" && rm -rf "${W:?}"; }; [ $fail = 0 ]; exit; }

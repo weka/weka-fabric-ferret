@@ -48,8 +48,8 @@ aheader() { tar xzOf "$1" --include="*/$2" | awk 'NF {$1 = $1; print; exit}' | a
 # members FF writes only when the run has that case: an unreachable and an excluded host (golden-B has both, the archives
 # don't), UDP (udp_*, iperf3_udp_results), the mesh (mesh_failures), clients (clients, client_*, their sysinfo NICs):
 # 14_where and 14_clean (10-29) run with UDP and the mesh off, 14_where with clients. Headers are still compared where
-# a member is in both; metadata's client_* keys are the clients' own
-COND_RX='^[<>] (excluded|unreachable|udp_[a-z_]+|iperf3_udp_results|mesh_failures|clients|client_[a-z_]+)\.txt$|^> sysinfo/\*/nic-'
+# a member is in both; metadata's client_* keys are the clients' own; the DSCP check (dscp_check, FF_TOS: golden-B only)
+COND_RX='^[<>] (excluded|unreachable|udp_[a-z_]+|iperf3_udp_results|mesh_failures|clients|client_[a-z_]+|dscp_check)\.txt$|^> sysinfo/\*/nic-'
 akeys() { tar xzOf "$1" --include='*/metadata.txt' | sed -n 's/=.*//p' | grep -v '^clients\?_' | sort -u; }   # client keys: a run with clients only
 gm=$(amembers "$t"); gk=$(akeys "$t")
 for a in $S/fixtures/bundles/*.tgz; do
