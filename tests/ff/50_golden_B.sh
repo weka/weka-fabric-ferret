@@ -4,7 +4,7 @@
 # FAKE_FLAP=h2, FAKE_MESHFAIL=198.19.2.3 and 27's host-side set. Every check that only reads a backend run reads this
 # one. Its bundle members are also the stored fixtures the unit groups read (fixtures/golden-B/): each is compared
 # with the fresh one here (FIXTURE_UPDATE=1 rewrites them instead; review the diff before committing to them).
-# checks: 104
+# checks: 105
 # secs: 40
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 FX=$S/fixtures/golden-B
@@ -24,7 +24,8 @@ chk "cross-rail on: 'Cross-rail total' printed (control for 07's zero)" "grep -q
 # --- fixture freshness: the stored members the unit groups read, sorted, timestamps out ---
 MEMBERS="iperf3_results.txt iperf3_udp_results.txt host_counters.txt prio_counters.txt packet_drops.txt udp_host_counters.txt
  udp_nic_drops.txt udp_expected.txt udp_tx.txt fec_rates.txt temps.txt temps_summary.txt host_rx.txt nic_diagnostics.txt
- lldp_neighbors.txt mesh_failures.txt link_flaps.txt rails.txt host_list.txt paths_excluded.txt rail_anomalies.txt metadata.txt"
+ lldp_neighbors.txt mesh_failures.txt link_flaps.txt rails.txt host_list.txt paths_excluded.txt rail_anomalies.txt metadata.txt
+ dscp_check.txt"
 norm() { case $1 in
     metadata.txt) grep -vE '^(timestamp|end_timestamp)=' ;;
     fec_rates.txt) awk '{$3 = "-"; if ($4 ~ /^[0-9]+$/) $4 = "-"; if ($6 ~ /^[0-9]+$/) $6 = "-"; print}' ;;   # seconds, blocks and bits scale with the wall clock

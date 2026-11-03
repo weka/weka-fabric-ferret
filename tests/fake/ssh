@@ -144,12 +144,14 @@ fi
 case $script in
 # the DSCP probe (FF_RDMA=1, 11-03): RX on dst (args src dst nic port probe), TX on src (src dst port tos probe); first.
 # Receivers see FAKE_DSCP_TOS, else the run's FF_TOS, else 96; FAKE_DSCP_REWRITE=ip:tos,.. (dst IP sees tos),
-# FAKE_DSCP_IPERF_FAIL=h,.. (iperf3 probes from h reach nothing), FAKE_DSCP_DEAD=ip,..|all (no probe reaches dst)
+# FAKE_DSCP_REWRITE_FROM=ip:tos,.. (what src IP sends arrives as tos), FAKE_DSCP_IPERF_FAIL=h,.. (iperf3 probes from h
+# reach nothing), FAKE_DSCP_DEAD=ip,..|all (no probe reaches dst)
 *"# @@DSCP_RX"*)
     echo "$*" >> "$FSTATE/dscp_rx.log"; [[ -f $FSTATE/dscp_rx.script ]] || printf '%s\n' "$script" > "$FSTATE/dscp_rx.script"
     inlist "$h" "$FAKE_NO_TCPDUMP" && { echo "@@DSCP_RX tcpdump_absent"; exit 0; }
     echo "tcpdump: listening on $3, link-type EN10MB (Ethernet), snapshot length 262144 bytes"
     tos=${FAKE_DSCP_TOS:-${FF_TOS:-96}}; for r in ${FAKE_DSCP_REWRITE//,/ }; do [[ ${r%%:*} == "$2" ]] && tos=${r#*:}; done
+    for r in ${FAKE_DSCP_REWRITE_FROM//,/ }; do [[ ${r%%:*} == "$1" ]] && tos=${r#*:}; done
     k=5; if [[ $FAKE_DSCP_DEAD == all ]] || inlist "$2" "$FAKE_DSCP_DEAD"; then k=0; fi
     [[ $5 == iperf3 ]] && inlist "$(iphost "$1")" "$FAKE_DSCP_IPERF_FAIL" && k=0
     pr='UDP (17)'; [[ $5 == ping ]] && pr='ICMP (1)'
