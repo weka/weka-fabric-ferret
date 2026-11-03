@@ -3,7 +3,7 @@
 # missing or sees nothing) read by tcpdump -p on the receiver; dscp_check.txt, the log lines, the Run checks card and
 # the Where entries. h21 -> h22 on 2 rails (4 paths), one client; the fake's DSCP knobs are in tests/fake/ssh
 # checks: 14
-# secs: 40
+# secs: 35
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 G="FF_HOSTS=198.18.0.21-22 FF_ITER=1"
 # drun <name> VAR=value ...: one run, its DSCP calls and scripts kept in $W/<name>.d (rx.log tx.log rx.script tx.<probe>.script)

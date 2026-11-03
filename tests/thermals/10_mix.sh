@@ -53,7 +53,7 @@ chk "mix: the files share one name, thermcap_<UTC>.{jsonl,html,md} (no label: 10
 if [[ -x $CHROME ]]; then
     # Not read at the foot of the nav: on screen at load, and a click opens its panel (and only it)
     f=$(ls $W/mix/out/*.html); awk '{ if ($0 == "</body>") print "<script>window.addEventListener(\"load\", function () { var b = document.querySelector(\"#nav-footer button\"), r = b.getBoundingClientRect(); b.click(); var v = Array.prototype.filter.call(document.querySelectorAll(\"section.panel\"), function (s) { return !s.hidden; }).map(function (s) { return s.id; }); document.body.setAttribute(\"data-probe\", window.innerHeight + \" \" + Math.round(r.bottom) + \" \" + v.join(\",\")); });</script>"; print }' "$f" > $W/mix/probe.html
-    read -r vh bb vis <<<"$("$CHROME" --headless=new --disable-gpu --no-first-run --user-data-dir=$W/mix/chrome --window-size=1100,700 --dump-dom "file://$W/mix/probe.html" 2> $W/mix/chrome.err | grep -o 'data-probe="[^"]*"' | cut -d'"' -f2)"
+    read -r vh bb vis <<<"$(chrome --headless=new --disable-gpu --no-first-run --user-data-dir=$W/mix/chrome --window-size=1100,700 --dump-dom "file://$W/mix/probe.html" 2> $W/mix/chrome.err | grep -o 'data-probe="[^"]*"' | cut -d'"' -f2)"
     chk "html in Chrome: the Not read button sits on screen at the foot of the nav, and a click shows its panel only" "[[ -n \$vis ]] && (( bb <= vh && bb > vh - 80 )) && [ \"\$vis\" = p-notread ]" "vh=$vh button_bottom=$bb visible=$vis"
 else bad "html in Chrome" "Chrome not found at $CHROME: the Not read button is untested"; fi
 finish

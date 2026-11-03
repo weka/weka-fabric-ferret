@@ -39,6 +39,8 @@ strip_time() { sed -E 's/"(time|start|end)":"[^"]*"/"\1":"T"/g; s/thermcap_[^ ]*
 # page an OS table and a BMC / IPMI table)
 ptab() { sed -n "/<section class=\"panel\" id=\"p-$2\">/,/<\/section>/p" <<<"$1" | awk -v g="$3" '/<h3>/ { on = index($0, g == "os" ? "<h3>OS (" : "<h3>BMC / IPMI") > 0 } on'; }
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+# chrome <args>: headless Chrome cut off at 120 s; a hang then reads TIMEOUT in the checks after it, not a stalled tier (11-03)
+chrome() { local rc; timeout 120 "$CHROME" "$@"; rc=$?; (( rc == 124 )) && echo "TIMEOUT after 120 s (headless Chrome)" >> "$W/timeout.note"; return $rc; }
 # finish: the section's total line (run_all.sh needs it); the work dir goes when every check passed
 finish() { echo "---- $pass passed, $fail failed ($TIER)  (work dir $W$( (( fail == 0 )) && echo ', removed'))"
     (( fail == 0 )) && { cd "$H" && rm -rf "${W:?}"; }; [ $fail = 0 ]; exit $?; }
