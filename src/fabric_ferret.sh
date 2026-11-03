@@ -758,7 +758,7 @@ main() {
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
     # ports with no neighbour by reason, most first; a bond's own row is left out (its members are counted)
     local why; why=$(awk '$3 != "bond" {print $3}' "$LLDP_WHY" | sort | uniq -c | sort -k1,1nr -k2,2 | awk '{n += $1; s = s (s == "" ? "" : ", ") $2 " " $1} END {if (n) print n " " s}')
-    [[ -n $why ]] && log "LLDP: ${why%% *} ports name no neighbour (${why#* }; lldp_reasons.txt)"
+    [[ -n $why ]] && log "LLDP: ${why%% *} $( [[ ${why%% *} == 1 ]] && echo "port names" || echo "ports name") no neighbour (${why#* }; lldp_reasons.txt)"
     lldp_rail_check "$LLDP_DATA"
 
     # line rate: per rail only when declared (FF_LINE_GBPS=A,B,...); otherwise the fastest rail's most common

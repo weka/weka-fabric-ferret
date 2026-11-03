@@ -2511,15 +2511,15 @@ def _w_dscp(rows, leaf, host_of, d, cips):
     g = Counter((r['src'] in cips, leaf.get(r['src'] if r['src'] in cips else r['dst'], 'no switch seen'), r['verdict'], int(r['seen']) >> 2)
                 for r in rows if r['verdict'] in ('rewritten', 'stripped'))
     out = [{'sev': 1, 'kind': 'dscp', 'go': {'tab': 'tab-checks'},
-            'text': (f"{n} client DSCP paths from {lf}: DSCP {d} " if c else f"{n} DSCP paths into {lf}: DSCP {d} ")
+            'text': (f"{n} client DSCP path{'s' if n != 1 else ''} from {lf}: DSCP {d} " if c else f"{n} DSCP path{'s' if n != 1 else ''} into {lf}: DSCP {d} ")
                     + (f'rewritten to {s}' if v == 'rewritten' else 'stripped (0)')}
            for (c, lf, v, s), n in sorted(g.items(), key=lambda kv: (-kv[1], kv[0]))]
     h = {host_of.get(r['src'], r['src']) for r in rows if r['probe'] == 'ping' and r['note'] == 'iperf3_failed'}
     if h:
-        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"iperf3 DSCP probe failed on {len(h)} hosts; ping probe used"})
+        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"iperf3 DSCP probe failed on {len(h)} host{'s' if len(h) != 1 else ''}; ping probe used"})
     u = sum(1 for r in rows if r['note'] == 'both_failed')
     if u:
-        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"{u} DSCP paths unknown: no probe got through (dscp_check.txt)"})
+        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"{u} DSCP path{'s' if u != 1 else ''} unknown: no probe got through (dscp_check.txt)"})
     return out
 
 
