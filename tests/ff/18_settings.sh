@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/bash
 # unknown FF_* settings stop the run; the known list covers every FF_ the collector reads
 # tier: fast
-# checks: 17
+# checks: 18
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 
 out=$(FF_STREAM=4 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); chk "typo FF_STREAM stops with a hint" "grep -q 'unknown setting FF_STREAM; did you mean FF_STREAMS?' <<<\"\$out\""
@@ -17,6 +17,10 @@ chk "FF_KNOWN drops FF_RAIL_A and FF_RAIL_B" "[ -n \"\$kn\" ] && [[ \" \$kn \" !
 out=$(FF_CLIENT_RATIO=2 FF_CLIENTS=198.18.1.1 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); chk "client settings pass the unknown-setting check" "! grep -q 'unknown setting' <<<\"\$out\"" "$out"
 out=$(FS_ITER=all FF_HOSTS=198.18.0.21 $B $C --list 2>&1); rc=$?
 chk "old FS_ITER stops with the FF_ name" "[ $rc = 2 ] && grep -q 'setting FS_ITER uses the old FS_ prefix; settings are now FF_ (FF_ITER)' <<<\"\$out\"" "rc=$rc $out"
+# 0/1 switches stop on any other value (11-02)
+out=$(FF_LLDP=2 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); rc=$?; ok1=$(FF_LLDP=1 FF_HOSTS=198.18.0.21 $B $C --list 2>&1)
+chk "FF_LLDP=2 stops: rc 2, 'ERROR: FF_LLDP must be 0 or 1, got '2'', no host listed (control: FF_LLDP=1 lists 198.18.0.21)" \
+    "[ $rc = 2 ] && grep -qx \"ERROR: FF_LLDP must be 0 or 1, got '2'\" <<<\"\$out\" && ! grep -qx '198.18.0.21' <<<\"\$out\" && grep -qx '198.18.0.21' <<<\"\$ok1\"" "rc=$rc $out | control: $ok1"
 # FF_FERRET (the viewer): without a terminal on stderr the run is the plain run, stream for stream; 1 vs 0 vs unset
 # diffed on stdout and stderr captured apart. python3 missing (a PATH of /bin and /usr/bin links without it): one log
 # line, then the plain run.
