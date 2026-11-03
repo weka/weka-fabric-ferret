@@ -312,6 +312,39 @@ out=$(ping -c1 -W2 -M do -s "$4" -I "$1" "$2" 2>&1) || { echo "MTU $(( $4 + 28 )
 echo OK
 EOF
 
+# DSCP check, receiver: src dst nic port probe (iperf3|ping) -> tcpdump's -v lines for the probe's packets, raw (the
+# collector reads the TOS byte). An iperf3 probe with no server on dst:port (FF_SKIP_IPERF=1) starts a one-shot one.
+read -r -d '' DSCP_RX_SCRIPT <<'EOF'
+# @@DSCP_RX
+src=$1 dst=$2 nic=$3 port=$4 probe=$5 sp=""
+[ -n "$(command -v tcpdump)" ] || { echo "@@DSCP_RX tcpdump_absent"; exit 0; }
+[ -n "$(command -v timeout)" ] || { echo "@@DSCP_RX timeout_absent"; exit 0; }
+if [ "$probe" = iperf3 ]; then
+    f="udp and src host $src and dst port $port"
+    case " $(ss -Hltn 2>&1 | awk '{print $4}' | tr '\n' ' ') " in
+        *" $dst:$port "*|*" *:$port "*|*" 0.0.0.0:$port "*) ;;
+        *) timeout 15 iperf3 -s -1 -B "$dst" -p "$port" 2>&1 & sp=$! ;;
+    esac
+else f="icmp and src host $src and icmp[icmptype] = icmp-echo"; fi
+timeout 10 tcpdump -p -nn -v -l -i "$nic" -c 5 "$f" 2>&1; echo "@@DSCP_RX rc=$?"
+if [ -n "$sp" ]; then
+    for i in $(seq 25); do [ -n "$(jobs -rp)" ] || break; sleep 0.2; done
+    [ -n "$(jobs -rp)" ] && kill "$sp"
+fi
+EOF
+
+# DSCP check, sender: src dst port tos probe -> "@@DSCP_TX rc=N" (and the tool's last lines on a failure). The
+# receiver's tcpdump judges the probe; rc is evidence only.
+read -r -d '' DSCP_TX_SCRIPT <<'EOF'
+# @@DSCP_TX
+src=$1 dst=$2 port=$3 tos=$4 probe=$5
+if [ "$probe" = iperf3 ]; then
+    [ -n "$(command -v iperf3)" ] || { echo "@@DSCP_TX iperf3_absent"; exit 0; }
+    out=$(iperf3 -u -b 1M -t 2 -S "$tos" -c "$dst" -B "$src" -p "$port" --connect-timeout 3000 2>&1)
+else out=$(ping -c 5 -i 0.2 -W 1 -Q "$tos" -I "$src" "$dst" 2>&1); fi
+rc=$?; echo "@@DSCP_TX rc=$rc"; [ "$rc" = 0 ] || echo "$out" | tail -n 2
+EOF
+
 # Servers: port count ip... (count servers per IP, on port..port+count-1: a backend NIC that serves
 # several client flows at once needs one server each); clears earlier iperf3 first (port clash)
 read -r -d '' SERVER_SCRIPT <<'EOF'

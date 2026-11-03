@@ -78,6 +78,11 @@ Optional (default)
   FF_STREAMS       iperf3 parallel streams, >=2 (16)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
+  FF_RDMA          1 = check that each planned path delivers the DSCP it was sent with (0; FF_TOS turns it
+                   on): before any load, a 2 s, 1 Mbit/s iperf3 UDP probe marked with FF_TOS, else TOS 96
+                   (DSCP 24), then ping -Q when iperf3 is missing or its probe fails; tcpdump on the receiving
+                   NIC reads the TOS byte: kept, rewritten, stripped or unknown (dscp_check.txt). Runs with
+                   FF_SKIP_IPERF=1 too. Never promiscuous. Needs tcpdump and timeout on the hosts.
   FF_SKIP_IPERF=1  no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
@@ -317,7 +322,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -868,6 +873,39 @@ case " $r " in *" dev $3 "*) ;; *) echo "ROUTE egress is not $3: $r"; exit 0 ;; 
 out=$(ping -c1 -W1 -I "$1" "$2" 2>&1) || { echo "PING no reply"; exit 0; }
 out=$(ping -c1 -W2 -M do -s "$4" -I "$1" "$2" 2>&1) || { echo "MTU $(( $4 + 28 ))B no-fragment ping failed"; exit 0; }
 echo OK
+EOF
+
+# DSCP check, receiver: src dst nic port probe (iperf3|ping) -> tcpdump's -v lines for the probe's packets, raw (the
+# collector reads the TOS byte). An iperf3 probe with no server on dst:port (FF_SKIP_IPERF=1) starts a one-shot one.
+read -r -d '' DSCP_RX_SCRIPT <<'EOF'
+# @@DSCP_RX
+src=$1 dst=$2 nic=$3 port=$4 probe=$5 sp=""
+[ -n "$(command -v tcpdump)" ] || { echo "@@DSCP_RX tcpdump_absent"; exit 0; }
+[ -n "$(command -v timeout)" ] || { echo "@@DSCP_RX timeout_absent"; exit 0; }
+if [ "$probe" = iperf3 ]; then
+    f="udp and src host $src and dst port $port"
+    case " $(ss -Hltn 2>&1 | awk '{print $4}' | tr '\n' ' ') " in
+        *" $dst:$port "*|*" *:$port "*|*" 0.0.0.0:$port "*) ;;
+        *) timeout 15 iperf3 -s -1 -B "$dst" -p "$port" 2>&1 & sp=$! ;;
+    esac
+else f="icmp and src host $src and icmp[icmptype] = icmp-echo"; fi
+timeout 10 tcpdump -p -nn -v -l -i "$nic" -c 5 "$f" 2>&1; echo "@@DSCP_RX rc=$?"
+if [ -n "$sp" ]; then
+    for i in $(seq 25); do [ -n "$(jobs -rp)" ] || break; sleep 0.2; done
+    [ -n "$(jobs -rp)" ] && kill "$sp"
+fi
+EOF
+
+# DSCP check, sender: src dst port tos probe -> "@@DSCP_TX rc=N" (and the tool's last lines on a failure). The
+# receiver's tcpdump judges the probe; rc is evidence only.
+read -r -d '' DSCP_TX_SCRIPT <<'EOF'
+# @@DSCP_TX
+src=$1 dst=$2 port=$3 tos=$4 probe=$5
+if [ "$probe" = iperf3 ]; then
+    [ -n "$(command -v iperf3)" ] || { echo "@@DSCP_TX iperf3_absent"; exit 0; }
+    out=$(iperf3 -u -b 1M -t 2 -S "$tos" -c "$dst" -B "$src" -p "$port" --connect-timeout 3000 2>&1)
+else out=$(ping -c 5 -i 0.2 -W 1 -Q "$tos" -I "$src" "$dst" 2>&1); fi
+rc=$?; echo "@@DSCP_TX rc=$rc"; [ "$rc" = 0 ] || echo "$out" | tail -n 2
 EOF
 
 # Servers: port count ip... (count servers per IP, on port..port+count-1: a backend NIC that serves
@@ -2469,6 +2507,85 @@ run_path() {
       echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}$xe" >> "$PHASE_OUT" ) &
 }
 
+# DSCP check (FF_RDMA=1): per planned backend path a TOS-marked probe (iperf3 UDP, 1 Mbit/s for 2 s; ping -Q when
+# iperf3 is missing or saw under 5 packets); tcpdump on the receiving NIC reads the byte.
+# dscp_check.txt: src dst nic probe tos_sent tos_seen verdict note
+dscp_check() {
+    local tos=${FF_TOS:-96} srcd out=$COLLECT_DIR/dscp_check.txt D=$WORK/dscp k sk sr dk dr i w nw=0 st n t
+    srcd=$([[ -n $FF_TOS ]] && echo "FF_TOS=$FF_TOS" || echo default)
+    local -a keys=() A=() B=() WAVE=(); local -A NOTE=() PROBE=() SEEN=() IP3=() seen=()
+    (( $# )) && mapfile -t keys < <(printf '%s\n' "$@" | sort -n -k1,1 -k2,2 -k3,3 -k4,4)   # args: planned paths "sk sr dk dr"
+    mkdir -p "$D/paths"; : > "$out"
+    log "DSCP check: ${#keys[@]} planned paths, DSCP $(( tos >> 2 )) ($srcd) as TOS $tos, iperf3 UDP probe (1 Mbit/s, 2 s), ping fallback"
+    local PATHS=$D/paths   # check_path writes here
+    for (( i = 0; i < ${#keys[@]}; i++ )); do read -r sk sr dk dr <<<"${keys[i]}"; throttle; check_path d$i $sk $sr $dk $dr; done
+    wait
+    for k in "${ELIG[@]}"; do section "${DISC[$k]}" tools | grep -q '^iperf3 /' && IP3[$k]=1; done
+    for (( i = 0; i < ${#keys[@]}; i++ )); do
+        read -r sk sr dk dr <<<"${keys[i]}"; st=$(cat "$PATHS/d$i" 2>&1)
+        if [[ $st == DOWN* ]]; then NOTE[$i]=rail_down
+        elif [[ $st != OK ]]; then NOTE[$i]=path_check_failed
+        elif [[ -n ${IP3[$sk]} && -n ${IP3[$dk]} ]]; then
+            A+=("$i"); w=${seen[${RIP[$dk,$dr]}]:-0}; WAVE[i]=$w; seen[${RIP[$dk,$dr]}]=$(( w + 1 )); (( w + 1 > nw )) && nw=$(( w + 1 ))
+        else NOTE[$i]=iperf3_absent; B+=("$i"); fi
+    done
+    # A: one probe per receiving IP at a time (its iperf3 server takes one test at a time)
+    (( ${#A[@]} )) && log "  ${#A[@]} iperf3 probes in $nw wave$( (( nw != 1 )) && echo s) (one per receiving IP at a time)"
+    for (( w = 0; w < nw; w++ )); do
+        for i in "${A[@]}"; do (( WAVE[i] == w )) || continue; throttle; dscp_probe "$i" iperf3 & done
+        wait
+    done
+    for i in "${A[@]}"; do
+        n=0 t=; read -r n t < "$D/$i.iperf3.res"
+        if (( ${n:-0} >= 5 )); then PROBE[$i]=iperf3; SEEN[$i]=$t
+        elif grep -q '^@@DSCP_RX \(tcpdump\|timeout\)_absent' "$D/$i.iperf3.rx"; then NOTE[$i]=$(awk '/^@@DSCP_RX /{print $2; exit}' "$D/$i.iperf3.rx")
+        else NOTE[$i]=iperf3_failed; B+=("$i"); fi
+    done
+    # B: ping needs no server, so one throttled wave
+    for i in "${B[@]}"; do throttle; dscp_probe "$i" ping & done
+    wait
+    for i in "${B[@]}"; do
+        n=0 t=; read -r n t < "$D/$i.ping.res"
+        if (( ${n:-0} >= 5 )); then PROBE[$i]=ping; SEEN[$i]=$t
+        elif grep -q '^@@DSCP_RX \(tcpdump\|timeout\)_absent' "$D/$i.ping.rx"; then NOTE[$i]=$(awk '/^@@DSCP_RX /{print $2; exit}' "$D/$i.ping.rx")
+        else NOTE[$i]=both_failed; fi
+    done
+    local K=0 R=0 S=0 U=0 v; local -a bad=(); local -A H=()   # H: sender hosts whose iperf3 probe failed and ping got through
+    for (( i = 0; i < ${#keys[@]}; i++ )); do
+        read -r sk sr dk dr <<<"${keys[i]}"
+        if [[ -n ${SEEN[$i]} ]]; then
+            if (( SEEN[$i] >> 2 == tos >> 2 )); then v=kept; K=$(( K + 1 ))
+            elif (( SEEN[$i] >> 2 == 0 )); then v=stripped; S=$(( S + 1 ))
+            else v=rewritten; R=$(( R + 1 )); fi
+            [[ $v != kept ]] && bad+=("${T_HOST[$sk]} ${RIP[$sk,$sr]} -> ${T_HOST[$dk]} ${RIP[$dk,$dr]}: DSCP $(( tos >> 2 )) $v$([[ $v == rewritten ]] && echo " to $(( SEEN[$i] >> 2 ))")")
+        else v=unknown; U=$(( U + 1 )); fi
+        [[ ${PROBE[$i]} == ping && ${NOTE[$i]} == iperf3_failed ]] && H[${T_HOST[$sk]}]=1
+        echo "${RIP[$sk,$sr]} ${RIP[$dk,$dr]} ${RNIC[$dk,$dr]} ${PROBE[$i]:-none} $tos ${SEEN[$i]:--} $v ${NOTE[$i]:--}"
+    done > "$out"
+    log "DSCP check: $K of ${#keys[@]} paths kept DSCP $(( tos >> 2 )) ($srcd); $R rewritten; $S stripped; $U unknown (dscp_check.txt)"
+    (( ${#bad[@]} )) && { log "WARNING: DSCP not kept on $(( R + S )) paths$( (( ${#bad[@]} > 10 )) && echo ", first 10"):"; printf '#   %s\n' "${bad[@]:0:10}" >&2; }
+    (( ${#H[@]} )) && log "iperf3 DSCP probe failed on ${#H[@]} hosts, ping probe used (dscp_check.txt)"
+    return 0
+}
+
+# dscp_probe i iperf3|ping: one probe of path keys[i]; the receiver's tcpdump starts first, the sender once it
+# listens (up to 8 s). Writes $D/<i>.<probe>.rx/.tx and .res: "<packets with a TOS byte> <first TOS, decimal>"
+dscp_probe() {
+    local i=$1 pr=$2 sk sr dk dr f=$D/$1.$2 rp n t
+    read -r sk sr dk dr <<<"${keys[i]}"
+    rbash -T 25 "${T_TARGET[$dk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "${RNIC[$dk,$dr]}" "$FF_PORT" "$pr" <<<"$DSCP_RX_SCRIPT" > "$f.rx" 2>&1 & rp=$!
+    for (( n = 0; n < 40; n++ )); do
+        grep -q '^tcpdump: listening on' "$f.rx" && break
+        jobs -rp | grep -qx "$rp" || break
+        sleep 0.2
+    done
+    grep -q '^tcpdump: listening on' "$f.rx" &&
+        rbash -T 20 "${T_TARGET[$sk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$tos" "$pr" <<<"$DSCP_TX_SCRIPT" > "$f.tx" 2>&1
+    wait "$rp"
+    n=$(grep -c 'IP (tos 0x' "$f.rx"); t=$(grep -m1 -o 'IP (tos 0x[0-9a-fA-F]*' "$f.rx"); t=${t##*0x}
+    echo "$n ${t:+$(( 16#$t ))}" > "$f.res"
+}
+
 # host_nics k: host k's data NICs ("-" = none on that rail): its rail NICs, or a client's data NICs
 host_nics() {
     local k=$1 r
@@ -3500,7 +3617,8 @@ main() {
     [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
     (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
-    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}"
+    local rdma_set=${FF_RDMA-}   # an explicit FF_RDMA=0 with FF_TOS is a contradiction; unset is not
+    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}" "${FF_RDMA:=0}"
     [[ -n $FF_DURATION ]] || { [[ $FF_SKIP_IPERF == 1 ]] && FF_DURATION=1 || FF_DURATION=120; }   # no load: a 1 s counter window
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
@@ -3533,6 +3651,7 @@ main() {
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
     [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
+    [[ $FF_RDMA == 0 || $FF_RDMA == 1 ]] || die "FF_RDMA must be 0 or 1, got '$FF_RDMA'"
     (( FF_SKIP_IPERF && FF_UDP == 1 )) && die "FF_UDP=1 is a load test; FF_SKIP_IPERF=1 sends no load: set one of them"
     [[ -z $FF_CROSS_RAIL || $FF_CROSS_RAIL == 0 || $FF_CROSS_RAIL == 1 ]] || die "FF_CROSS_RAIL must be 0 or 1, got '$FF_CROSS_RAIL'"
     [[ -z $FF_CROSS_RAIL ]] && FF_CROSS_RAIL=1
@@ -3565,6 +3684,10 @@ main() {
     [[ -z $FF_EXPECT_HOSTS || $FF_EXPECT_HOSTS =~ ^[1-9][0-9]*$ ]] || die "FF_EXPECT_HOSTS must be a positive integer"
     [[ -z $FF_TOS || ( $FF_TOS =~ ^[0-9]{1,3}$ && 10#$FF_TOS -le 255 ) ]] || die "FF_TOS must be 0-255 (decimal), got '$FF_TOS'"
     [[ -n $FF_TOS ]] && FF_TOS=$(( 10#$FF_TOS ))
+    if [[ -n $FF_TOS ]] && (( ! FF_RDMA )); then
+        [[ -n $rdma_set ]] && die "FF_RDMA=0 contradicts FF_TOS=$FF_TOS: unset one"
+        FF_RDMA=1; log "FF_TOS=$FF_TOS set: FF_RDMA=1 (DSCP check on)"
+    fi
 
     parse_rails; parse_clients
     if [[ -n $FF_LINE_GBPS && $FF_LINE_GBPS == *,* ]]; then
@@ -4104,6 +4227,7 @@ main() {
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
+    (( FF_RDMA )) && dscp_check "${!pl[@]}"   # before any load, every mode
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"

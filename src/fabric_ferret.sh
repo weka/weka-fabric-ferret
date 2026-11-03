@@ -77,6 +77,11 @@ Optional (default)
   FF_STREAMS       iperf3 parallel streams, >=2 (16)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
+  FF_RDMA          1 = check that each planned path delivers the DSCP it was sent with (0; FF_TOS turns it
+                   on): before any load, a 2 s, 1 Mbit/s iperf3 UDP probe marked with FF_TOS, else TOS 96
+                   (DSCP 24), then ping -Q when iperf3 is missing or its probe fails; tcpdump on the receiving
+                   NIC reads the TOS byte: kept, rewritten, stripped or unknown (dscp_check.txt). Runs with
+                   FF_SKIP_IPERF=1 too. Never promiscuous. Needs tcpdump and timeout on the hosts.
   FF_SKIP_IPERF=1  no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
@@ -236,6 +241,8 @@ log_hist() { err_hist "$@" | sed 's/^/#   /' >&2; }
 
 #@include sh/ff_paths.sh
 
+#@include sh/ff_dscp.sh
+
 #@include sh/ff_collect.sh
 
 #@include sh/ff_hostrx.sh
@@ -343,7 +350,8 @@ main() {
     [[ -z $topt ]] || (( FF_THERMALS_ONLY )) || die "$topt is for --thermals-only (thermals_capture.sh's options); this run tests the fabric"
     (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
-    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}"
+    local rdma_set=${FF_RDMA-}   # an explicit FF_RDMA=0 with FF_TOS is a contradiction; unset is not
+    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}" "${FF_RDMA:=0}"
     [[ -n $FF_DURATION ]] || { [[ $FF_SKIP_IPERF == 1 ]] && FF_DURATION=1 || FF_DURATION=120; }   # no load: a 1 s counter window
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
@@ -376,6 +384,7 @@ main() {
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
     [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
+    [[ $FF_RDMA == 0 || $FF_RDMA == 1 ]] || die "FF_RDMA must be 0 or 1, got '$FF_RDMA'"
     (( FF_SKIP_IPERF && FF_UDP == 1 )) && die "FF_UDP=1 is a load test; FF_SKIP_IPERF=1 sends no load: set one of them"
     [[ -z $FF_CROSS_RAIL || $FF_CROSS_RAIL == 0 || $FF_CROSS_RAIL == 1 ]] || die "FF_CROSS_RAIL must be 0 or 1, got '$FF_CROSS_RAIL'"
     [[ -z $FF_CROSS_RAIL ]] && FF_CROSS_RAIL=1
@@ -408,6 +417,10 @@ main() {
     [[ -z $FF_EXPECT_HOSTS || $FF_EXPECT_HOSTS =~ ^[1-9][0-9]*$ ]] || die "FF_EXPECT_HOSTS must be a positive integer"
     [[ -z $FF_TOS || ( $FF_TOS =~ ^[0-9]{1,3}$ && 10#$FF_TOS -le 255 ) ]] || die "FF_TOS must be 0-255 (decimal), got '$FF_TOS'"
     [[ -n $FF_TOS ]] && FF_TOS=$(( 10#$FF_TOS ))
+    if [[ -n $FF_TOS ]] && (( ! FF_RDMA )); then
+        [[ -n $rdma_set ]] && die "FF_RDMA=0 contradicts FF_TOS=$FF_TOS: unset one"
+        FF_RDMA=1; log "FF_TOS=$FF_TOS set: FF_RDMA=1 (DSCP check on)"
+    fi
 
     parse_rails; parse_clients
     if [[ -n $FF_LINE_GBPS && $FF_LINE_GBPS == *,* ]]; then
@@ -932,6 +945,7 @@ main() {
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
+    (( FF_RDMA )) && dscp_check "${!pl[@]}"   # before any load, every mode
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"

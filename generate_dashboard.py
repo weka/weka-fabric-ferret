@@ -675,13 +675,31 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
 <div class="card-body" style="max-height:320px; overflow-y:auto;"><table class="table table-sm table-striped">
 <thead><tr><th>Kind</th><th>What</th><th>Why</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
+    # DSCP check (FF_RDMA=1): per planned path the TOS byte sent and the one tcpdump saw on the receiving NIC
+    dscp_html, dscp_bad, dscp = '', 0, data.get('dscp')
+    tos = data['metadata'].get('tos', 'none')
+    dscp_d, dscp_src = (int(tos) if tos.isdigit() else 96) >> 2, f'FF_TOS={tos}' if tos.isdigit() else 'default'
+    if dscp is not None:
+        cnt = Counter(r['verdict'] for r in dscp)
+        dscp_bad = cnt['rewritten'] + cnt['stripped'] + cnt['unknown']
+        dv = lambda t: f'{t} (DSCP {int(t) >> 2})' if t.isdigit() else t
+        rows = ''.join(f"<tr><td>{escape(ip_to_host.get(r['src'], '-'))}</td><td>{escape(r['src'])}</td><td>{escape(ip_to_host.get(r['dst'], '-'))}</td>"
+                       f"<td>{escape(r['dst'])}</td><td>{escape(r['nic'])}</td><td>{escape(r['probe'])}</td><td>{escape(dv(r['sent']))}</td>"
+                       f"<td>{escape(dv(r['seen']))}</td><td class=\"{'stat-good' if r['verdict'] == 'kept' else 'stat-bad'}\">{escape(r['verdict'])}</td>"
+                       f"<td>{escape(r['note'])}</td></tr>" for r in dscp)
+        dscp_html = f"""<div class="card mb-3"><div class="card-header">DSCP check — {len(dscp)} paths, DSCP {dscp_d} ({dscp_src})</div>
+<div class="card-body" style="max-height:360px; overflow-y:auto;"><p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{cnt['kept']} kept, {cnt['rewritten']} rewritten, {cnt['stripped']} stripped, {cnt['unknown']} unknown.
+Each path's probe (iperf3 UDP, 1 Mbit/s for 2 s; ping when iperf3 is missing or its probe saw nothing) is marked with the TOS byte; tcpdump on the receiving NIC reads the byte that arrived. The verdict compares the DSCP (TOS &gt;&gt; 2) only. Unknown: the path check failed, a rail is down, a tool is missing, or no probe got through (Note).</p>
+<table class="table table-sm table-striped"><thead><tr><th>Src host</th><th>Src IP</th><th>Dst host</th><th>Dst IP</th><th>NIC</th><th>Probe</th><th>TOS sent</th><th>TOS seen</th><th>Verdict</th><th>Note</th></tr></thead>
+<tbody>{rows}</tbody></table></div></div>"""
+
     # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, Clients (client hosts) and
     # Run checks (compare, preflight, run errors, not tested, UDP), each only when present; Run checks counts
     # the cards with a flagged result, from their figures; none at zero
     clients_html = _clients_html(data)
     n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
-    checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html) if c]
-    n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html)
+    checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html, dscp_html) if c]
+    n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html) + (dscp_bad > 0)
 
     # Where to look first, above the tabs: the findings of every kind, worst first (the _w_* functions)
     slow, hot = _slow(nic_rows), _hot(data)
@@ -694,7 +712,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
                   ('runs with no result', len(errs), 'runs'), ('not tested', len(data['not_tested']), 'rows')]
     findings = _where([_w_heat(slow, hot), _w_uplinks(busy), _w_slow(slow, hot, leaf_ip, colname), _w_cross(xr, xs, ip_to_host),
                        _w_drops(data['packet_drops'], slow), _w_heatonly(data, slow, bool(temps_html)),
-                       _w_checks(run_checks) if checks else []])
+                       _w_checks(run_checks) if checks else [], _w_dscp(dscp, leaf_ip, ip_to_host, dscp_d)])
     where_html = _where_html(findings)
 
     # the drawer's NIC and leaf panels, built here so the page needs no second copy of a rule: per NIC its runs
@@ -2485,6 +2503,25 @@ def _w_heatonly(data, slow, has_temps_tab):
             and not t['Flag'].startswith(('nodata', 'note'))]
 
 
+def _w_dscp(rows, leaf, host_of, d):
+    """DSCP check: paths that rewrote or stripped the DSCP, by receiver leaf; hosts whose iperf3 probe failed (ping
+    used); paths no probe got through"""
+    if not rows:
+        return []
+    g = Counter((leaf.get(r['dst'], 'no switch seen'), r['verdict'], int(r['seen']) >> 2)
+                for r in rows if r['verdict'] in ('rewritten', 'stripped'))
+    out = [{'sev': 1, 'kind': 'dscp', 'go': {'tab': 'tab-checks'},
+            'text': f"{n} DSCP paths into {lf}: DSCP {d} " + (f'rewritten to {s}' if v == 'rewritten' else 'stripped (0)')}
+           for (lf, v, s), n in sorted(g.items(), key=lambda kv: (-kv[1], kv[0]))]
+    h = {host_of.get(r['src'], r['src']) for r in rows if r['probe'] == 'ping' and r['note'] == 'iperf3_failed'}
+    if h:
+        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"iperf3 DSCP probe failed on {len(h)} hosts; ping probe used"})
+    u = sum(1 for r in rows if r['note'] == 'both_failed')
+    if u:
+        out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"{u} DSCP paths unknown: no probe got through (dscp_check.txt)"})
+    return out
+
+
 def _w_checks(checks):
     return [{'sev': 1, 'kind': 'check', 'go': {'tab': 'tab-checks'}, 'text': f"Run check {name}: {n:,} {what}."}
             for name, n, what in checks if n > 0]
@@ -3266,6 +3303,11 @@ def parse_tar_archive(filepath):
         if len(parts) >= 5 and parts[2].isdigit() and parts[3].isdigit():
             data['bonds'][(parts[0], parts[1])] = {'up': int(parts[2]), 'total': int(parts[3]),
                                                    'down': [] if parts[4] == 'none' else parts[4].split(',')}
+
+    # DSCP check, only in a FF_RDMA=1 run's bundle: src dst nic probe tos_sent tos_seen verdict note
+    if os.path.exists(os.path.join(base, 'dscp_check.txt')):
+        data['dscp'] = [dict(zip(('src', 'dst', 'nic', 'probe', 'sent', 'seen', 'verdict', 'note'), l.split()))
+                        for l in read_file('dscp_check.txt').splitlines() if len(l.split()) == 8]
 
     # LLDP; a row naming no neighbour carries its reason's text (lldp_reasons.txt: host port reason) as 'why'
     why = {(p[0], p[1]): LLDP_WHY[p[2]] for p in (line.split() for line in read_file('lldp_reasons.txt').splitlines())

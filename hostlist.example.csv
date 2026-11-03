@@ -74,6 +74,13 @@ backend,*,svc-fabric
 #   + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
 # FF_TOS=
 #
+#   1 = check that each planned path delivers the DSCP it was sent with (0; FF_TOS turns it
+#   on): before any load, a 2 s, 1 Mbit/s iperf3 UDP probe marked with FF_TOS, else TOS 96
+#   (DSCP 24), then ping -Q when iperf3 is missing or its probe fails; tcpdump on the receiving
+#   NIC reads the TOS byte: kept, rewritten, stripped or unknown (dscp_check.txt). Runs with
+#   FF_SKIP_IPERF=1 too. Never promiscuous. Needs tcpdump and timeout on the hosts.
+# FF_RDMA=0
+#
 #   no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
 #   runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
 #   and drop counters, system info, host-side receive), the counters over one FF_DURATION
