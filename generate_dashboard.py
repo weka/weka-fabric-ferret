@@ -712,7 +712,7 @@ Each path's probe (iperf3 UDP, 1 Mbit/s for 2 s; ping when iperf3 is missing or 
                   ('runs with no result', len(errs), 'runs'), ('not tested', len(data['not_tested']), 'rows')]
     findings = _where([_w_heat(slow, hot), _w_uplinks(busy), _w_slow(slow, hot, leaf_ip, colname), _w_cross(xr, xs, ip_to_host),
                        _w_drops(data['packet_drops'], slow), _w_heatonly(data, slow, bool(temps_html)),
-                       _w_checks(run_checks) if checks else [], _w_dscp(dscp, leaf_ip, ip_to_host, dscp_d)])
+                       _w_checks(run_checks) if checks else [], _w_dscp(dscp, leaf_ip, ip_to_host, dscp_d, data.get('client_ips', set()))])
     where_html = _where_html(findings)
 
     # the drawer's NIC and leaf panels, built here so the page needs no second copy of a rule: per NIC its runs
@@ -2503,16 +2503,17 @@ def _w_heatonly(data, slow, has_temps_tab):
             and not t['Flag'].startswith(('nodata', 'note'))]
 
 
-def _w_dscp(rows, leaf, host_of, d):
-    """DSCP check: paths that rewrote or stripped the DSCP, by receiver leaf; hosts whose iperf3 probe failed (ping
-    used); paths no probe got through"""
+def _w_dscp(rows, leaf, host_of, d, cips):
+    """DSCP check: paths that rewrote or stripped the DSCP, by receiver leaf (a client's path by the client's leaf);
+    hosts whose iperf3 probe failed (ping used); paths no probe got through"""
     if not rows:
         return []
-    g = Counter((leaf.get(r['dst'], 'no switch seen'), r['verdict'], int(r['seen']) >> 2)
+    g = Counter((r['src'] in cips, leaf.get(r['src'] if r['src'] in cips else r['dst'], 'no switch seen'), r['verdict'], int(r['seen']) >> 2)
                 for r in rows if r['verdict'] in ('rewritten', 'stripped'))
     out = [{'sev': 1, 'kind': 'dscp', 'go': {'tab': 'tab-checks'},
-            'text': f"{n} DSCP paths into {lf}: DSCP {d} " + (f'rewritten to {s}' if v == 'rewritten' else 'stripped (0)')}
-           for (lf, v, s), n in sorted(g.items(), key=lambda kv: (-kv[1], kv[0]))]
+            'text': (f"{n} client DSCP paths from {lf}: DSCP {d} " if c else f"{n} DSCP paths into {lf}: DSCP {d} ")
+                    + (f'rewritten to {s}' if v == 'rewritten' else 'stripped (0)')}
+           for (c, lf, v, s), n in sorted(g.items(), key=lambda kv: (-kv[1], kv[0]))]
     h = {host_of.get(r['src'], r['src']) for r in rows if r['probe'] == 'ping' and r['note'] == 'iperf3_failed'}
     if h:
         out.append({'sev': 2, 'kind': 'dscp', 'go': {'tab': 'tab-checks'}, 'text': f"iperf3 DSCP probe failed on {len(h)} hosts; ping probe used"})

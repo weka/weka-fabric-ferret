@@ -79,10 +79,11 @@ Optional (default)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
   FF_RDMA          1 = check that each planned path delivers the DSCP it was sent with (0; FF_TOS turns it
-                   on): before any load, a 2 s, 1 Mbit/s iperf3 UDP probe marked with FF_TOS, else TOS 96
-                   (DSCP 24), then ping -Q when iperf3 is missing or its probe fails; tcpdump on the receiving
-                   NIC reads the TOS byte: kept, rewritten, stripped or unknown (dscp_check.txt). Runs with
-                   FF_SKIP_IPERF=1 too. Never promiscuous. Needs tcpdump and timeout on the hosts.
+                   on), backend paths and client NICs to their backends: before any load, a 2 s, 1 Mbit/s
+                   iperf3 UDP probe marked with FF_TOS, else TOS 96 (DSCP 24), then ping -Q when iperf3 is
+                   missing or its probe fails; tcpdump on the receiving NIC reads the TOS byte: kept,
+                   rewritten, stripped or unknown (dscp_check.txt). Runs with FF_SKIP_IPERF=1 too. Never
+                   promiscuous. Needs tcpdump and timeout on the hosts.
   FF_SKIP_IPERF=1  no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
@@ -2507,26 +2508,31 @@ run_path() {
       echo "${RIP[$sk,$sr]},${RIP[$dk,$dr]},${out%%$'\n'*}$xe" >> "$PHASE_OUT" ) &
 }
 
-# DSCP check (FF_RDMA=1): per planned backend path a TOS-marked probe (iperf3 UDP, 1 Mbit/s for 2 s; ping -Q when
-# iperf3 is missing or saw under 5 packets); tcpdump on the receiving NIC reads the byte.
+# DSCP check (FF_RDMA=1): per planned path (backend, and client to backend) a TOS-marked probe (iperf3 UDP, 1 Mbit/s
+# for 2 s; ping -Q when iperf3 is missing or saw under 5 packets); tcpdump on the receiving NIC reads the byte.
 # dscp_check.txt: src dst nic probe tos_sent tos_seen verdict note
 dscp_check() {
-    local tos=${FF_TOS:-96} srcd out=$COLLECT_DIR/dscp_check.txt D=$WORK/dscp k sk sr dk dr i w nw=0 st n t
+    local tos=${FF_TOS:-96} srcd out=$COLLECT_DIR/dscp_check.txt D=$WORK/dscp k i w nw=0 nc=0 st n t SK DK SIP DIP DNIC
     srcd=$([[ -n $FF_TOS ]] && echo "FF_TOS=$FF_TOS" || echo default)
     local -a keys=() A=() B=() WAVE=(); local -A NOTE=() PROBE=() SEEN=() IP3=() seen=()
-    (( $# )) && mapfile -t keys < <(printf '%s\n' "$@" | sort -n -k1,1 -k2,2 -k3,3 -k4,4)   # args: planned paths "sk sr dk dr"
+    # args: planned paths, "b sk sr dk dr" (backend) and "c ck cj b r" (client NIC to backend rail NIC)
+    (( $# )) && mapfile -t keys < <(printf '%s\n' "$@" | sort -k1,1 -k2,2n -k3,3n -k4,4n -k5,5n)
+    for (( i = 0; i < ${#keys[@]}; i++ )); do [[ ${keys[i]} == c* ]] && nc=$(( nc + 1 )); done
     mkdir -p "$D/paths"; : > "$out"
-    log "DSCP check: ${#keys[@]} planned paths, DSCP $(( tos >> 2 )) ($srcd) as TOS $tos, iperf3 UDP probe (1 Mbit/s, 2 s), ping fallback"
-    local PATHS=$D/paths   # check_path writes here
-    for (( i = 0; i < ${#keys[@]}; i++ )); do read -r sk sr dk dr <<<"${keys[i]}"; throttle; check_path d$i $sk $sr $dk $dr; done
-    wait
-    for k in "${ELIG[@]}"; do section "${DISC[$k]}" tools | grep -q '^iperf3 /' && IP3[$k]=1; done
+    log "DSCP check: ${#keys[@]} planned paths$( (( nc )) && echo " ($nc client to backend)"), DSCP $(( tos >> 2 )) ($srcd) as TOS $tos, iperf3 UDP probe (1 Mbit/s, 2 s), ping fallback"
+    local PATHS=$D/paths   # check_path and cl_check write here
     for (( i = 0; i < ${#keys[@]}; i++ )); do
-        read -r sk sr dk dr <<<"${keys[i]}"; st=$(cat "$PATHS/d$i" 2>&1)
+        throttle; set -- ${keys[i]}
+        if [[ $1 == b ]]; then check_path d$i $2 $3 $4 $5; else cl_check d$i $2 $3 $4 $5 c2b; fi
+    done
+    wait
+    for k in "${ELIG[@]}" "${CLI[@]}"; do section "${DISC[$k]}" tools | grep -q '^iperf3 /' && IP3[$k]=1; done
+    for (( i = 0; i < ${#keys[@]}; i++ )); do
+        dscp_ends "${keys[i]}"; st=$(cat "$PATHS/d$i" 2>&1)
         if [[ $st == DOWN* ]]; then NOTE[$i]=rail_down
         elif [[ $st != OK ]]; then NOTE[$i]=path_check_failed
-        elif [[ -n ${IP3[$sk]} && -n ${IP3[$dk]} ]]; then
-            A+=("$i"); w=${seen[${RIP[$dk,$dr]}]:-0}; WAVE[i]=$w; seen[${RIP[$dk,$dr]}]=$(( w + 1 )); (( w + 1 > nw )) && nw=$(( w + 1 ))
+        elif [[ -n ${IP3[$SK]} && -n ${IP3[$DK]} ]]; then
+            A+=("$i"); w=${seen[$DIP]:-0}; WAVE[i]=$w; seen[$DIP]=$(( w + 1 )); (( w + 1 > nw )) && nw=$(( w + 1 ))
         else NOTE[$i]=iperf3_absent; B+=("$i"); fi
     done
     # A: one probe per receiving IP at a time (its iperf3 server takes one test at a time)
@@ -2552,15 +2558,15 @@ dscp_check() {
     done
     local K=0 R=0 S=0 U=0 v; local -a bad=(); local -A H=()   # H: sender hosts whose iperf3 probe failed and ping got through
     for (( i = 0; i < ${#keys[@]}; i++ )); do
-        read -r sk sr dk dr <<<"${keys[i]}"
+        dscp_ends "${keys[i]}"
         if [[ -n ${SEEN[$i]} ]]; then
             if (( SEEN[$i] >> 2 == tos >> 2 )); then v=kept; K=$(( K + 1 ))
             elif (( SEEN[$i] >> 2 == 0 )); then v=stripped; S=$(( S + 1 ))
             else v=rewritten; R=$(( R + 1 )); fi
-            [[ $v != kept ]] && bad+=("${T_HOST[$sk]} ${RIP[$sk,$sr]} -> ${T_HOST[$dk]} ${RIP[$dk,$dr]}: DSCP $(( tos >> 2 )) $v$([[ $v == rewritten ]] && echo " to $(( SEEN[$i] >> 2 ))")")
+            [[ $v != kept ]] && bad+=("${T_HOST[$SK]} $SIP -> ${T_HOST[$DK]} $DIP: DSCP $(( tos >> 2 )) $v$([[ $v == rewritten ]] && echo " to $(( SEEN[$i] >> 2 ))")")
         else v=unknown; U=$(( U + 1 )); fi
-        [[ ${PROBE[$i]} == ping && ${NOTE[$i]} == iperf3_failed ]] && H[${T_HOST[$sk]}]=1
-        echo "${RIP[$sk,$sr]} ${RIP[$dk,$dr]} ${RNIC[$dk,$dr]} ${PROBE[$i]:-none} $tos ${SEEN[$i]:--} $v ${NOTE[$i]:--}"
+        [[ ${PROBE[$i]} == ping && ${NOTE[$i]} == iperf3_failed ]] && H[${T_HOST[$SK]}]=1
+        echo "$SIP $DIP $DNIC ${PROBE[$i]:-none} $tos ${SEEN[$i]:--} $v ${NOTE[$i]:--}"
     done > "$out"
     log "DSCP check: $K of ${#keys[@]} paths kept DSCP $(( tos >> 2 )) ($srcd); $R rewritten; $S stripped; $U unknown (dscp_check.txt)"
     (( ${#bad[@]} )) && { log "WARNING: DSCP not kept on $(( R + S )) paths$( (( ${#bad[@]} > 10 )) && echo ", first 10"):"; printf '#   %s\n' "${bad[@]:0:10}" >&2; }
@@ -2571,19 +2577,40 @@ dscp_check() {
 # dscp_probe i iperf3|ping: one probe of path keys[i]; the receiver's tcpdump starts first, the sender once it
 # listens (up to 8 s). Writes $D/<i>.<probe>.rx/.tx and .res: "<packets with a TOS byte> <first TOS, decimal>"
 dscp_probe() {
-    local i=$1 pr=$2 sk sr dk dr f=$D/$1.$2 rp n t
-    read -r sk sr dk dr <<<"${keys[i]}"
-    rbash -T 25 "${T_TARGET[$dk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "${RNIC[$dk,$dr]}" "$FF_PORT" "$pr" <<<"$DSCP_RX_SCRIPT" > "$f.rx" 2>&1 & rp=$!
+    local i=$1 pr=$2 f=$D/$1.$2 rp n t SK DK SIP DIP DNIC
+    dscp_ends "${keys[i]}"
+    rbash -T 25 "${T_TARGET[$DK]}" "$SIP" "$DIP" "$DNIC" "$FF_PORT" "$pr" <<<"$DSCP_RX_SCRIPT" > "$f.rx" 2>&1 & rp=$!
     for (( n = 0; n < 40; n++ )); do
         grep -q '^tcpdump: listening on' "$f.rx" && break
         jobs -rp | grep -qx "$rp" || break
         sleep 0.2
     done
     grep -q '^tcpdump: listening on' "$f.rx" &&
-        rbash -T 20 "${T_TARGET[$sk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$tos" "$pr" <<<"$DSCP_TX_SCRIPT" > "$f.tx" 2>&1
+        rbash -T 20 "${T_TARGET[$SK]}" "$SIP" "$DIP" "$FF_PORT" "$tos" "$pr" <<<"$DSCP_TX_SCRIPT" > "$f.tx" 2>&1
     wait "$rp"
     n=$(grep -c 'IP (tos 0x' "$f.rx"); t=$(grep -m1 -o 'IP (tos 0x[0-9a-fA-F]*' "$f.rx"); t=${t##*0x}
     echo "$n ${t:+$(( 16#$t ))}" > "$f.res"
+}
+
+# dscp_client_paths: "c ck cj b r" per client NIC to backend rail NIC task of iterations 1..FF_ITER (a usable
+# backend only): iteration 1 from the live plan, later ones in a subshell so the run's own plan stays as it is
+dscp_client_paths() {
+    local it
+    dscp_tasks
+    ( for (( it = 2; it <= FF_ITER; it++ )); do client_plan $it; dscp_tasks; done )
+}
+dscp_tasks() {
+    local t
+    (( CL_WAVES )) && for (( t = 0; t < ${#CT_K[@]}; t++ )); do (( CT_B[t] >= 0 )) && echo "c ${CT_K[t]} ${CT_J[t]} ${CT_B[t]} ${CT_R[t]}"; done
+    (( CL_FULL )) && for (( t = 0; t < ${#FT_K[@]}; t++ )); do (( FT_B[t] >= 0 )) && echo "c ${FT_K[t]} ${FT_J[t]} ${FT_B[t]} ${FT_R[t]}"; done
+    return 0
+}
+
+# dscp_ends key: a planned path's sender and receiver host (SK, DK), IPs (SIP, DIP) and the receiving NIC (DNIC)
+dscp_ends() {
+    local ty a b c d; read -r ty a b c d <<<"$1"
+    SK=$a DK=$c DIP=${RIP[$c,$d]} DNIC=${RNIC[$c,$d]}
+    if [[ $ty == b ]]; then SIP=${RIP[$a,$b]}; else SIP=${CIP[$a,$b]}; fi
 }
 
 # host_nics k: host k's data NICs ("-" = none on that rail): its rail NICs, or a client's data NICs
@@ -4227,7 +4254,11 @@ main() {
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
-    (( FF_RDMA )) && dscp_check "${!pl[@]}"   # before any load, every mode
+    if (( FF_RDMA )); then   # before any load, every mode: the backend paths, then each client NIC to its backends
+        local -a dpl=(); for t in "${!pl[@]}"; do dpl+=("b $t"); done
+        (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
+        dscp_check "${dpl[@]}"
+    fi
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"

@@ -78,10 +78,11 @@ Optional (default)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
   FF_RDMA          1 = check that each planned path delivers the DSCP it was sent with (0; FF_TOS turns it
-                   on): before any load, a 2 s, 1 Mbit/s iperf3 UDP probe marked with FF_TOS, else TOS 96
-                   (DSCP 24), then ping -Q when iperf3 is missing or its probe fails; tcpdump on the receiving
-                   NIC reads the TOS byte: kept, rewritten, stripped or unknown (dscp_check.txt). Runs with
-                   FF_SKIP_IPERF=1 too. Never promiscuous. Needs tcpdump and timeout on the hosts.
+                   on), backend paths and client NICs to their backends: before any load, a 2 s, 1 Mbit/s
+                   iperf3 UDP probe marked with FF_TOS, else TOS 96 (DSCP 24), then ping -Q when iperf3 is
+                   missing or its probe fails; tcpdump on the receiving NIC reads the TOS byte: kept,
+                   rewritten, stripped or unknown (dscp_check.txt). Runs with FF_SKIP_IPERF=1 too. Never
+                   promiscuous. Needs tcpdump and timeout on the hosts.
   FF_SKIP_IPERF=1  no iperf3 at all, for a cluster whose I/O can't stop (WEKA running): every other check
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
@@ -945,7 +946,11 @@ main() {
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
     (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
-    (( FF_RDMA )) && dscp_check "${!pl[@]}"   # before any load, every mode
+    if (( FF_RDMA )); then   # before any load, every mode: the backend paths, then each client NIC to its backends
+        local -a dpl=(); for t in "${!pl[@]}"; do dpl+=("b $t"); done
+        (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
+        dscp_check "${dpl[@]}"
+    fi
     : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
