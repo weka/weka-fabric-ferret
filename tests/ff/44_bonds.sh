@@ -47,8 +47,8 @@ chk "host-reported names: every non-uplink edge title starts with its host's nam
 chk "panel data: a host link panel carries host, role, nic, ip, gbps, leaf, port_id, port_desc, sys_desc (h23 enp5s0np0 on leaf1 swp23, 'FE port 23', 'Cumulus Linux'); uplink edges carry a panel of kind uplink" \
     "[ \"\$(edges $W/bd.html | jq -c '.[] | select(.name == \"h23 enp5s0np0\") | .panel | [.kind, .host, .role, .nic, .ip, .leaf, .port_id, .port_desc, .sys_desc, (.gbps | type), .down]')\" = '[\"link\",\"h23\",\"backend\",\"enp5s0np0\",\"198.19.1.23\",\"leaf1.example\",\"swp23\",\"FE port 23\",\"Cumulus Linux\",\"number\",false]' ] && [ \$(edges $W/bd.html | jq '[.[] | select(.uplink == true) | select(.panel.kind != \"uplink\")] | length') = 0 ] && [ \$(edges $W/bd.html | jq '[.[] | select(.uplink == true)] | length') -ge 1 ]" \
     "$(edges $W/bd.html | jq -c '.[] | select(.name == "h23 enp5s0np0") | .panel')"
-chk "LLDP table: the header has Switch Port then Port Description, once; c1's ens1f0 row shows swp41 then 'FE port c1 ens1f0'" \
-    "[ \$(grep -c '<th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th>' $W/bd.html) = 1 ] && grep -q '<td>c1</td><td>ens1f0</td><td>198.19.10.1</td><td>cleaf1.example</td><td>swp41</td><td>FE port c1 ens1f0</td>' $W/bd.html" \
+chk "LLDP table: the header has Switch Port then Port Description, once; c1's ens1f0 row shows swp41 then the Port Description cell nowrap with title and text 'FE port c1 ens1f0' (scope 5)" \
+    "[ \$(grep -c '<th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th>' $W/bd.html) = 1 ] && grep -q '<td>c1</td><td>ens1f0</td><td>198.19.10.1</td><td>cleaf1.example</td><td>swp41</td><td style=\"white-space:nowrap[^>]*title=\"FE port c1 ens1f0\">FE port c1 ens1f0</td>' $W/bd.html" \
     "$(grep -o '<td>c1</td><td>ens1f0</td>.\{0,120\}' $W/bd.html | head -n 1)"
 # the map's gestures (10-29 01:15-01:20, 3b 01:20-01:38): a tap on a link opens its panel, a tap on blank space
 # closes it; one double-click handler (puts a node back), no hold handler; nothing reads an edge title any more
