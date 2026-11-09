@@ -234,11 +234,14 @@ case $script in
 *"@@NIC_DIAG"*)
     # FAKE_LLDPWHY=1: an unknown @@LLDP row is followed by its @@LLDPWHY reason, picked as the diag does (bond master
     # $bm first); off, the hosts report no reasons (bundles from before 11-02). lt: the script's own FF_LLDP=1 line
-    # (DIAG_SCRIPT's comments name FF_LLDP=1 too)
+    # (DIAG_SCRIPT's comments name FF_LLDP=1 too). FAKE_LLDPD_DOWN=h1,h2: lldpcli installed but lldpd not running
+    # there (one @@LLDPD_DOWN line; FF_LLDP=0 sees no neighbour on every port, reason lldpd_down; FF_LLDP=1 captures)
     lt=; [[ $'\n'$script == *$'\n'FF_LLDP=1$'\n'* ]] && lt=1
+    ld=; inlist "$h" "$FAKE_LLDPD_DOWN" && { ld=1; echo "@@LLDPD_DOWN $h"; }
     lrow() { echo "@@LLDP $*"; [[ $FAKE_LLDPWHY == 1 && $4 == unknown ]] || return 0; local w=no_neighbour
-             if [[ $2 == "$bm" ]]; then w=bond; elif inlist "$1" "$FAKE_NO_LLDPCLI"; then
-                 w=no_lldpcli; [[ $lt == 1 ]] && { w=no_frame; inlist "$1" "$FAKE_NO_TCPDUMP" && w=tcpdump_absent; }; fi
+             if [[ $2 == "$bm" ]]; then w=bond; elif inlist "$1" "$FAKE_NO_LLDPCLI" || [[ $ld == 1 ]]; then
+                 w=no_lldpcli; [[ $ld == 1 ]] && w=lldpd_down
+                 [[ $lt == 1 ]] && { w=no_frame; inlist "$1" "$FAKE_NO_TCPDUMP" && w=tcpdump_absent; }; fi
              echo "@@LLDPWHY $1 $2 $w"; }
     for nic in "$@"; do
         [[ $nic == - ]] && continue; bm=
@@ -248,6 +251,7 @@ case $script in
             echo "@@NIC_DIAG $h $nic $ip $sp 0 0 0 0 0 0 0 -1.4 -1.6 n/a n/a 45.0"
             sw=cleaf1.example; [[ -n $FAKE_CLIENT_SHARED_LEAF ]] && sw=leaf1.example
             case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac
+            [[ $ld == 1 && $lt != 1 ]] && sw=unknown
             pt=$(( 40 + n )); [[ $nic == ens1f1 ]] && pt=$(( 50 + n ))
             if inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == bond0 ]]; then   # a listed client: bond0's two members ens1f0/ens1f1 see the leaf, both up
                 sw2=$sw; inlist "$h" "$FAKE_BOND_LEAF2" && [[ $sw != unknown ]] && sw2=cleaf2.example   # FAKE_BOND_LEAF2=c: its ens1f1 sees a second leaf (an MLAG pair)
@@ -267,6 +271,7 @@ case $script in
         [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && sp=200000Mb/s   # FAKE_BOND_DOWN=h: h's rail A NIC is a 2-slave bond with one slave down (with FAKE_BOND_LLDP that member's LLDP row names no switch); FAKE_BOND_DOWN_SEEN=h: the same, but the down member still reports its switch
         echo "@@NIC_DIAG $h $nic 198.19.$r.$n $sp 12345 1 2 3 4 0 0 -1.2 -1.5 n/a n/a 48.5"
         sw=leaf$r.example; case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac   # FAKE_NO_LLDP: these hosts (or all) see no LLDP neighbour
+        [[ $ld == 1 && $lt != 1 ]] && sw=unknown
         if inlist "$h" "$FAKE_BOND_LLDP" && [[ $r == 1 ]]; then   # FAKE_BOND_LLDP=h,c: a host's rail A NIC (a client's bond0) is a bond: no neighbour of its own, its two members see the leaf
             bm=$nic; lrow $h $nic 198.19.$r.$n unknown unknown unknown unknown
             lrow $h ens1np0 198.19.$r.$n $sw swp$n FE_port_$n Cumulus_Linux

@@ -3,7 +3,7 @@
 # one tcpdump frame fills the @@LLDP row, the LLDP group MAC is added and removed around
 # it, never promiscuous; a NIC whose firmware LLDP agent eats the frames is not captured
 # tier: fast
-# checks: 20
+# checks: 26
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 # diag <name> "<extra tools>"|-<tool> [VAR=value ...]: DIAG_SCRIPT on p0, PATH = the fakes + /usr/bin:/bin (no lldpcli, tcpdump,
 # timeout, ip there on macOS); output $W/<name>.out, argv log $W/<name>.argv. FAKE_AWK picks the awk (bsd)
@@ -76,6 +76,39 @@ chk "reason row, lldpcli installed but it sees no neighbour on p0: p0 unknown, o
     "[ \"\$(row lcnone)\" = 'unknown unknown unknown unknown' ] && [ \"\$(why lcnone)\" = 'hx p0 no_neighbour' ] && [ \$(calls lcnone tcpdump) = 0 ]" "$(row lcnone) | $(why lcnone) | tcpdump $(calls lcnone tcpdump)"
 chk "bond p0 with members p1 and p2: one '@@LLDPWHY hx p0 bond' row and none for the members, whose rows are filled, under tcpdump (2 calls, one per member, none on p0) and under lldpcli" \
     "[ \"\$(why bond)\" = 'hx p0 bond' ] && [ \"\$(row bond p1)\" = \"\$want\" ] && [ \"\$(row bond p2)\" = \"\$want\" ] && [ \$(calls bond 'tcpdump -p -i p[12] ') = 2 ] && [ \$(calls bond 'tcpdump -p -i p0 ') = 0 ] && [ \"\$(why bondlc)\" = 'hx p0 bond' ] && [ \"\$(row bondlc p1)\" = 'leaf2.example swp9 uplink_to_hx Example_NOS_2.0' ]" "tcpdump: $(why bond) | p1 $(row bond p1) | p2 $(row bond p2) | calls p1/p2 $(calls bond 'tcpdump -p -i p[12] ') p0 $(calls bond 'tcpdump -p -i p0 '); lldpcli: $(why bondlc) | p1 $(row bondlc p1)"
+# --- lldpd not running (scope 3, 11-04): lldpcli is installed but every call fails (rc 1). FF_LLDP=1 captures as if
+# lldpcli were missing; FF_LLDP=0 reads lldpd_down, not no_neighbour; one '@@LLDPD_DOWN hx' line per host either way ---
+diag ld1 lldpcli FF_LLDP=1 FAKE_TCPDUMP=frame FAKE_LLDPD_DOWN=1
+diag ld0 lldpcli FAKE_LLDPD_DOWN=1
+diag ldbond lldpcli FAKE_DRV=bonding FF_SYSFS=$W/sys FAKE_LLDPD_DOWN=1
+dd() { grep -c '^@@LLDPD_DOWN hx$' $W/$1.out; }
+chk "lldpd down, FF_LLDP=1: 1 tcpdump call, p0's row from the frame, the raw header '=== lldp p0 (tcpdump) ===', '@@LLDPD_DOWN hx' once, 0 @@LLDPWHY rows (control: lldpd up with lldpcli makes 0 tcpdump calls, 0 @@LLDPD_DOWN lines and its own row)" \
+    "[ \$(calls ld1 tcpdump) = 1 ] && [ \"\$(row ld1)\" = \"\$want\" ] && grep -qx '=== lldp p0 (tcpdump) ===' $W/ld1.out && [ \$(dd ld1) = 1 ] && [ \$(grep -c '^@@LLDPWHY ' $W/ld1.out) = 0 ] && [ \$(calls lc tcpdump) = 0 ] && [ \$(dd lc) = 0 ] && [ \"\$(row lc)\" = 'leaf2.example swp9 uplink_to_hx Example_NOS_2.0' ]" \
+    "tcpdump $(calls ld1 tcpdump) | $(row ld1) | headers: $(grep '^=== lldp' $W/ld1.out | tr '\n' '|') | down lines $(dd ld1), why $(why ld1); lc: tcpdump $(calls lc tcpdump), down $(dd lc)"
+chk "lldpd down, FF_LLDP unset: 0 tcpdump calls, p0 unknown, one '@@LLDPWHY hx p0 lldpd_down' row, '@@LLDPD_DOWN hx' once (control: lldpd up and no neighbour on p0 reads no_neighbour with 0 @@LLDPD_DOWN lines)" \
+    "[ \$(calls ld0 tcpdump) = 0 ] && [ \"\$(row ld0)\" = 'unknown unknown unknown unknown' ] && [ \"\$(why ld0)\" = 'hx p0 lldpd_down' ] && [ \$(dd ld0) = 1 ] && [ \"\$(why lcnone)\" = 'hx p0 no_neighbour' ] && [ \$(dd lcnone) = 0 ]" \
+    "tcpdump $(calls ld0 tcpdump) | $(row ld0) | $(why ld0) | down $(dd ld0); lcnone: $(why lcnone), down $(dd lcnone)"
+chk "lldpd down, bond p0 with members p1 p2, FF_LLDP unset: the bond's own row still reads bond, each member lldpd_down" \
+    "[ \"\$(why ldbond)\" = 'hx p0 bond|hx p1 lldpd_down|hx p2 lldpd_down' ]" "$(why ldbond)"
+# --- scope 3b (11-04, an operator's E810 finding): lldpd up but the port names no neighbour, and the firmware agent holds the
+# frames: the pre-check runs on that port in every mode, why fw_lldp_on, its lines appended to the port's
+# "=== lldpcli p0 ===" section after lldpcli's text, no capture ---
+diag fwlc0 lldpcli FAKE_LLDPCLI_NONE=p0 FAKE_PRIV='fw-lldp-agent          : on'
+diag fwlc1 lldpcli FF_LLDP=1 FAKE_TCPDUMP=frame FAKE_LLDPCLI_NONE=p0 FAKE_PRIV='fw-lldp-agent          : on'
+diag fwlcm "lldpcli mlxconfig" FAKE_LLDPCLI_NONE=p0 FAKE_DRV=mlx5_core FAKE_MLX=on
+diag lcmoff "lldpcli mlxconfig" FAKE_LLDPCLI_NONE=p0 FAKE_DRV=mlx5_core
+sec() { awk -v h="=== lldpcli $2 ===" '$0 == h {on = 1; next} /^=== / {on = 0} on' $W/$1.out; }   # the port's lldpcli raw section
+fwh() { sec $1 p0 | grep -c 'reason: fw_lldp_on'; }
+th() { grep -c '^=== lldp p0 (tcpdump) ===$' $W/$1.out; }
+chk "lldpd up, no neighbour on p0, ethtool fw-lldp-agent on, FF_LLDP unset: one '@@LLDPWHY hx p0 fw_lldp_on' row, one 'reason: fw_lldp_on (…ethtool --show-priv-flags)' line inside p0's '=== lldpcli p0 ===' section with the flag line after it, 0 tcpdump and 0 ip maddr calls, 0 '=== lldp p0 (tcpdump) ===' headers (control: the same port with the flag off reads no_neighbour and prints 0 reason lines)" \
+    "[ \"\$(why fwlc0)\" = 'hx p0 fw_lldp_on' ] && [ \$(fwh fwlc0) = 1 ] && [ \$(sec fwlc0 p0 | grep -c 'reason: fw_lldp_on .*ethtool --show-priv-flags') = 1 ] && [ \$(sec fwlc0 p0 | grep -c '^fw-lldp-agent *: on$') = 1 ] && [ \$(calls fwlc0 tcpdump) = 0 ] && [ \$(calls fwlc0 'ip maddr') = 0 ] && [ \$(th fwlc0) = 0 ] && [ \"\$(why lcnone)\" = 'hx p0 no_neighbour' ] && [ \$(fwh lcnone) = 0 ]" \
+    "$(why fwlc0) | reason lines $(fwh fwlc0) | section: $(sec fwlc0 p0 | tr '\n' '|') | tcpdump $(calls fwlc0 tcpdump) maddr $(calls fwlc0 'ip maddr') tcpdump headers $(th fwlc0); lcnone: $(why lcnone), reason lines $(fwh lcnone)"
+chk "the same under FF_LLDP=1: fw_lldp_on, 0 tcpdump and 0 ip maddr calls on p0 (lldpcli answered, so no capture), 0 tcpdump headers, p0's row unknown (control: the no-lldpcli capture runs above make the calls)" \
+    "[ \"\$(why fwlc1)\" = 'hx p0 fw_lldp_on' ] && [ \$(fwh fwlc1) = 1 ] && [ \$(calls fwlc1 tcpdump) = 0 ] && [ \$(calls fwlc1 'ip maddr') = 0 ] && [ \$(th fwlc1) = 0 ] && [ \"\$(row fwlc1)\" = 'unknown unknown unknown unknown' ] && [ \$(calls cap.bsd tcpdump) = 1 ]" \
+    "$(why fwlc1) | reason lines $(fwh fwlc1) | tcpdump $(calls fwlc1 tcpdump) maddr $(calls fwlc1 'ip maddr') | $(row fwlc1)"
+chk "lldpd up, no neighbour, mlx5 with mlxconfig LLDP_NB_* non-zero: fw_lldp_on, the check's LLDP_NB_ lines in p0's lldpcli section, 1 mlxconfig call (control: LLDP_NB_* all zero reads no_neighbour, 0 reason lines, 1 mlxconfig call too)" \
+    "[ \"\$(why fwlcm)\" = 'hx p0 fw_lldp_on' ] && [ \$(fwh fwlcm) = 1 ] && [ \$(sec fwlcm p0 | grep -c 'reason: fw_lldp_on .*mlxconfig -d 0000:3b:00.0 q') = 1 ] && [ \$(sec fwlcm p0 | grep -c 'LLDP_NB_') -ge 2 ] && [ \$(calls fwlcm mlxconfig) = 1 ] && [ \"\$(why lcmoff)\" = 'hx p0 no_neighbour' ] && [ \$(fwh lcmoff) = 0 ] && [ \$(calls lcmoff mlxconfig) = 1 ]" \
+    "$(why fwlcm) | reason lines $(fwh fwlcm) NB lines $(sec fwlcm p0 | grep -c 'LLDP_NB_') mlxconfig $(calls fwlcm mlxconfig); lcmoff: $(why lcmoff), reason lines $(fwh lcmoff), mlxconfig $(calls lcmoff mlxconfig)"
 seen=$(cat $W/cap.bsd.out $W/cap.mawk.out $W/cap.gawk.out $W/has.out $W/fwoff.out $W/fwoffi.out $W/lc.out | grep -c '^@@LLDPWHY ')
 chk "control: the 7 runs where p0 has a neighbour (capture under 3 awks, group MAC present, both agent-off runs, lldpcli) print 0 @@LLDPWHY rows ($seen; control: the no-lldpcli run prints 1)" \
     "[ $seen = 0 ] && [ \$(grep -c '^@@LLDPWHY ' $W/off.out) = 1 ]" "seen $seen, off $(grep -c '^@@LLDPWHY ' $W/off.out)"

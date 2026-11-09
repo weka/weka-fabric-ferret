@@ -97,4 +97,47 @@ if (process.argv[3] === 'spines') {
   const r = (xs) => xs.length ? Math.round(Math.max(...xs.map(n => Math.hypot(n.x, n.y)))) : -1;
   console.log(JSON.stringify({ spines: sp.length, spines_placed: sp.length, min_spine_px: sp.length > 1 ? Math.round(min * 10) / 10 : -1, spine_r: r(sp), leaf_r: r(lf), spine_errors: errors.length }));
 }
+// "results" as the second argument: the one results table (scope 4 D, 11-07). Rows are read from #resultsBody's innerHTML
+// (<tr data-role="backend|client" data-share="<% of expected>">; a failed run carries data-share "error"),
+// with the pager (#resultsPager) and title (#resultsTitle) texts, at load and after the page's own setters
+// (window.resultsSetPageSize, resultsSetFilter, resultsSetPage); the CSV line counts come from resultsCsvText()
+if (process.argv[3] === 'results') {
+  const txt = (id) => { const e = els[id]; return e ? String(e.textContent || e.innerHTML || '').replace(/<[^>]*>/g, '').trim() : ''; };
+  const attr = (tag, a) => { const m = tag.match(new RegExp(' ' + a + '="([^"]*)"')); return m ? m[1] : ''; };
+  const rows = () => { const h = (els.resultsBody && els.resultsBody.innerHTML) || '';
+    return [...h.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/g)].map(m => { const s = attr(m[0], 'data-share'); const cells = [...m[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/g)].map(c => c[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim());
+      return { role: attr(m[0], 'data-role'), fail: !/^-?[0-9.]+$/.test(s), share: Number(s), expected: cells[8] || '', text: m[1].replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() }; }); };
+  const uniq = (xs) => [...new Set(xs)].sort((a, b) => (typeof a === 'number' ? a - b : String(a).localeCompare(String(b))));
+  // sorted: among the measured rows the share never decreases down the table (ties are not judged: no Gbps attribute)
+  const snap = () => { const r = rows(); const failed = r.filter(x => x.fail).length; const ok = r.filter(x => !x.fail); let sorted = true;
+    for (let i = 1; i < ok.length; i++) { if (ok[i].share < ok[i - 1].share) sorted = false; }
+    return { rows: r.length, backend: r.filter(x => x.role === 'backend').length, client: r.filter(x => x.role === 'client').length, failed,
+      failed_first: r.slice(0, failed).every(x => x.fail), sorted, first_share: ok.length ? ok[0].share : null, min_share: ok.length ? Math.min(...ok.map(x => x.share)) : null,
+      // D2 (11-07): the shares and the Expected cell (column 9) by role, unique and sorted, so a backend run's share reads against its path line rate
+      backend_shares: uniq(ok.filter(x => x.role === 'backend').map(x => x.share)), client_shares: uniq(ok.filter(x => x.role === 'client').map(x => x.share)),
+      backend_expected: uniq(ok.filter(x => x.role === 'backend').map(x => x.expected)),
+      first_text: r.length ? r[0].text.slice(0, 160) : '', pager: txt('resultsPager'), title: txt('resultsTitle') }; };
+  const call = (f, ...a) => { try { return sandbox[f](...a); } catch (e) { errors.push(e); return undefined; } };
+  const lines = (s) => typeof s === 'string' ? s.split('\n').filter(l => l.length).length : -1;
+  const head = (s) => typeof s === 'string' ? s.split('\n')[0] : '';
+  const out = { load: snap() };
+  call('resultsSetPageSize', 'all'); out.all = snap();
+  call('resultsSetFilter', 'backends'); out.backends = snap(); out.csv_backends = lines(call('resultsCsvText'));
+  call('resultsSetFilter', 'clients'); out.clients = snap(); out.csv_clients = lines(call('resultsCsvText'));
+  call('resultsSetFilter', 'all'); out.csv_all = lines(call('resultsCsvText')); out.csv_head = head(call('resultsCsvText'));
+  call('resultsSetPageSize', 50); call('resultsSetPage', 2); out.page2 = snap();
+  console.log(JSON.stringify({ results: out, results_errors: errors.length }));
+}
+// "raw" (scope 4 F, 11-09): the Raw Data card header follows the Detail switch. Ticks #rawVerbose, calls the page's own
+// rawToggleVerbose(), and reports the element the page wrote one of the two titles into (its id, text, and whether that
+// id is a card-header in the HTML); then unticks and reports again. Errors raised by the two calls are counted apart
+if (process.argv[3] === 'raw') {
+  const hdr = () => { for (const id of Object.keys(els)) { const t = String(els[id].textContent || els[id].innerHTML || '').replace(/<[^>]*>/g, '').trim();
+    if (t === 'Iperf3 Results' || t === 'Per NIC summary') return { id, text: t, card_header: classesOf(id).includes('card-header') }; } return null; };
+  const call = (f, ...a) => { try { return sandbox[f](...a); } catch (e) { errors.push(e); return undefined; } };
+  const n0 = errors.length, out = { load: hdr() };
+  el('rawVerbose').checked = true; call('rawToggleVerbose'); out.on = hdr();
+  el('rawVerbose').checked = false; call('rawToggleVerbose'); out.off = hdr();
+  console.log(JSON.stringify({ raw: out, raw_errors: errors.length - n0 }));
+}
 console.log('END errors=' + errors.length);

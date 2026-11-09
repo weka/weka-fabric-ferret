@@ -14,7 +14,12 @@ for sig in ${SIGS:?SIGS}; do
       until grep -q 'Iteration 1 of' $W/int.out || (( EPOCHSECONDS - t0 >= 90 )); do sleep 0.2; done
       grep -q 'Iteration 1 of' $W/int.out || echo "TIMEOUT after 90 s (no 'Iteration 1 of' to signal in)" >> $W/timeout.note
       if [ $sig = TEEKILL ]; then pkill -KILL -g $pid -x tee; sleep 3; kill -INT -- -$pid; else kill -$sig -- -$pid; fi
-      wait $pid; echo "rc=$?" >> $W/int.out ) > $W/job.out 2>&1
+      # bounded: a run still going 60 s after the signal is a TIMEOUT, its process group kept in stuck.txt, then killed
+      t1=$EPOCHSECONDS; until [[ $(ps -o stat= -p $pid) == Z* || -z $(ps -o stat= -p $pid) ]] || (( EPOCHSECONDS - t1 >= 60 )); do sleep 0.5; done
+      if [[ $(ps -o stat= -p $pid) != Z* && -n $(ps -o stat= -p $pid) ]]; then
+          ps -A -o pid,ppid,pgid,stat,etime,command | awk -v g=$pid 'NR == 1 || $3 == g' > $W/stuck.txt
+          to=" TIMEOUT after 60 s: $sig not acted on (group in stuck.txt)"; kill -KILL -- -$pid; fi
+      wait $pid; echo "rc=$?$to" >> $W/int.out ) > $W/job.out 2>&1
     # this run's own collect dir, from its "# Temp:" line; never pick by age (other runs share TMPDIR)
     pd=$(grep -m1 '^# Temp: ' $W/int.out | tr ' ' '\n' | grep 'dp_validation_' | head -n1)
     # this run's own temp paths, as it logged them (other runs, e.g. fsLab's, may share the machine)

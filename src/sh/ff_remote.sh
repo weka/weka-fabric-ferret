@@ -78,33 +78,45 @@ read -r -d '' DIAG_SCRIPT <<'EOF'
 h=$(hostname -s)
 have() { [ -n "$(command -v "$1")" ]; }
 ctr() { awk -v k="$1:" '$1==k {print $2; f=1; exit} END {if (!f) print "n/a"}'; }
-# LLDP without lldpcli (FF_LLDP=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
+# LLDP without lldpcli or lldpd (FF_LLDP=1): one tcpdump per port. A firmware LLDP agent takes the frames, so it is
 # reported, never turned off; the group MAC joins the NIC's filter only while we listen (never promiscuous)
 lldp_tcpdump() {
-    local p=$1 pf inf drv bus mx added=""
+    local p=$1 added=""
     [ -r "${FF_SYSFS:-/sys}/class/net/$p/bonding/slaves" ] && { echo "reason: bond (its members are captured)"; return; }
     have tcpdump || { echo "reason: tcpdump_absent (tcpdump not installed)"; return; }
     have timeout || { echo "reason: timeout_absent (timeout not installed)"; return; }
+    lldp_fw_check "$p" && return
+    ip maddr show dev "$p" | grep -qi 01:80:c2:00:00:0e || { ip maddr add 01:80:c2:00:00:0e dev "$p" && added=1; }
+    timeout 70 tcpdump -p -i "$p" -c 1 -vv -s 1500 ether proto 0x88cc 2>&1; echo "tcpdump rc=$?"
+    [ -n "$added" ] && ip maddr del 01:80:c2:00:00:0e dev "$p"
+}
+# lldp_fw_check port: exit 0 when the NIC firmware's LLDP agent is on (it takes the frames before the kernel, so
+# neither lldpd nor tcpdump hears them); read-only, run for a capture and for an lldpcli port with no neighbour
+lldp_fw_check() {
+    local p=$1 pf inf drv bus mx
     if have ethtool; then
         pf=$(ethtool --show-priv-flags "$p" 2>&1)
         if echo "$pf" | awk '($1 == "fw-lldp-agent" && $NF == "on") || ($1 == "disable-fw-lldp" && $NF == "off") {f = 1} END {exit !f}'; then
-            echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; ethtool --show-priv-flags)"; echo "$pf"; return
+            echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; ethtool --show-priv-flags)"; echo "$pf"; return 0
         fi
         inf=$(ethtool -i "$p" 2>&1)
         drv=$(echo "$inf" | awk -F': ' '$1 == "driver" {print $2; exit}'); bus=$(echo "$inf" | awk -F': ' '$1 == "bus-info" {print $2; exit}')
         if [ "$drv" = mlx5_core ] && have mlxconfig; then
             mx=$(mlxconfig -d "$bus" q 2>&1)
             if echo "$mx" | awk '$1 ~ /^LLDP_NB_(DCBX|RX_MODE)_P[0-9]+$/ {v = $NF; if (match(v, /\([0-9]+\)/)) v = substr(v, RSTART + 1, RLENGTH - 2); if (v != "0" && v != "False") f = 1} END {exit !f}'; then
-                echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; mlxconfig -d $bus q)"; echo "$mx" | grep LLDP_NB_; return
+                echo "reason: fw_lldp_on (the NIC firmware's LLDP agent takes the frames; mlxconfig -d $bus q)"; echo "$mx" | grep LLDP_NB_; return 0
             fi
         elif [ "$drv" = mlx5_core ]; then echo "note: mlxconfig_absent (the firmware LLDP agent was not checked)"; fi
     fi
-    ip maddr show dev "$p" | grep -qi 01:80:c2:00:00:0e || { ip maddr add 01:80:c2:00:00:0e dev "$p" && added=1; }
-    timeout 70 tcpdump -p -i "$p" -c 1 -vv -s 1500 ether proto 0x88cc 2>&1; echo "tcpdump rc=$?"
-    [ -n "$added" ] && ip maddr del 01:80:c2:00:00:0e dev "$p"
+    return 1
 }
 LT=""
-if [ "$FF_LLDP" = 1 ] && ! have lldpcli; then
+# lldpd down: lldpcli is there but its daemon doesn't answer, told by its exit status (never its text)
+LD=""
+if have lldpcli; then
+    ls=$(lldpcli show neighbors summary 2>&1) || { LD=1; echo "@@LLDPD_DOWN $h"; echo "=== lldpcli show neighbors summary ==="; echo "$ls"; }
+fi
+if [ "$FF_LLDP" = 1 ] && { ! have lldpcli || [ -n "$LD" ]; }; then
     LT=$(mktemp -d) || LT=""
     [ -n "$LT" ] && for nic in "$@"; do
         [ "$nic" = - ] && continue
@@ -145,7 +157,7 @@ for nic in "$@"; do
     members=""; [ "$drv" = bonding ] && [ -r "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" ] && members=$(cat "${FF_SYSFS:-/sys}/class/net/$nic/bonding/slaves" 2>&1)
     for port in $nic $members; do
         lh="lldpcli $port"
-        if have lldpcli; then lldp=$(lldpcli show neighbors ports "$port" 2>&1); lr=${lldp:-lldpcli not installed}
+        if have lldpcli && [ -z "$LD" ]; then lldp=$(lldpcli show neighbors ports "$port" 2>&1); lr=${lldp:-lldpcli not installed}
         elif [ -n "$LT" ]; then
             # tcpdump's -vv TLV lines, rewritten as the lldpcli lines read below
             lh="lldp $port (tcpdump)"; lr=$(cat "$LT/$port" 2>&1)
@@ -155,6 +167,7 @@ for nic in "$@"; do
                     k = /System Name/ ? "SysName" : /Port ID/ ? "PortID" : /Port Description/ ? "PortDescr" : "SysDescr"
                     if (k != "PortID" && match($0, /length [0-9]+: /)) {if (!(k in f)) f[k] = trim(substr($0, RSTART + RLENGTH))} else w = k}
                 END {for (k in f) print k ": " f[k]}')
+        elif [ -n "$LD" ]; then lldp=""; lr="lldpd not running (lldpcli show neighbors summary failed)"
         else lldp=""; lr="lldpcli not installed"; fi
         chassis=$(echo "$lldp" | awk -F': *' '/SysName:/{gsub(/ /,"_",$2); print $2; exit}')
         portid=$(echo "$lldp" | awk '/PortID:/{print $NF; exit}')
@@ -164,8 +177,12 @@ for nic in "$@"; do
         # no neighbour: why, from the strings its raw section prints (lldp_reasons.txt); a bond's members carry its LLDP
         if [ -z "$chassis" ]; then
             if [ "$port" = "$nic" ] && [ -n "$members" ]; then why=bond
-            elif have lldpcli; then why=no_neighbour
+            elif have lldpcli && [ -z "$LD" ]; then
+                # lldpd up but deaf: a firmware LLDP agent may hold the frames (an E810 reads fw_lldp_on, not no switch seen)
+                fw=$(lldp_fw_check "$port" 2>&1) && why=fw_lldp_on || why=no_neighbour
+                [ -n "$fw" ] && lr="$lr"$'\n'"$fw"
             elif [ -n "$LT" ]; then why=$(echo "$lr" | awk '/^reason: /{print $2; exit}'); why=${why:-no_frame}
+            elif [ -n "$LD" ]; then why=lldpd_down
             else why=no_lldpcli; fi
             echo "@@LLDPWHY $h $port $why"
         fi

@@ -87,10 +87,10 @@ Optional (default)
                    runs (discovery, rails, path checks for every planned path, mesh, LLDP, NIC/FEC/priority
                    and drop counters, system info, host-side receive), the counters over one FF_DURATION
                    window (1 s unless set) of the cluster's own traffic. The busy check reports but doesn't stop the run.
-  FF_LLDP          1 = where lldpcli is missing, read each NIC's LLDP with tcpdump instead (0): one 70 s
-                   capture per host, all NICs at once, never promiscuous (the LLDP group MAC joins the
-                   NIC's filter for the capture only). A NIC whose firmware LLDP agent takes the frames
-                   is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
+  FF_LLDP          1 = where lldpcli is missing or lldpd is not running, read each NIC's LLDP with tcpdump
+                   instead (0): one 70 s capture per host, all NICs at once, never promiscuous (the LLDP
+                   group MAC joins the NIC's filter for the capture only). A NIC whose firmware LLDP agent
+                   takes the frames is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
   FF_UDP (1)       after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off
                    (iperf3 -u -b 0, datagrams sized to the path MTU). Loss is split into sender
                    TX (never left the sender's NIC: kernel and port tx packet counts, udp_tx.txt),
@@ -732,12 +732,9 @@ main() {
     local BOND_DATA=$COLLECT_DIR/bonds.txt   # "host nic slaves_up slaves_total down_slaves" per bond NIC (raw_per_host has the kernel's report)
     local LLDP_WHY=$COLLECT_DIR/lldp_reasons.txt   # "host port reason" per port whose LLDP row names no neighbour
     : > "$NIC_DIAG"; : > "$LLDP_DATA"; : > "$DRV_DATA"; : > "$BOND_DATA"; : > "$LLDP_WHY"
-    local nl=0; for k in "${ELIG[@]}" "${CLI[@]}"; do section "${DISC[$k]}" tools | grep -q '^lldpcli /' || nl=$((nl + 1)); done
-    if (( nl )) && [[ $FF_LLDP == 1 ]]; then
-        log "lldpcli not installed on $nl hosts; FF_LLDP=1: capturing LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
-    elif (( nl )); then
-        log "lldpcli not installed on $nl hosts; FF_LLDP=1 captures LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
-    fi
+    local nl=0 nd=0 lc; for k in "${ELIG[@]}" "${CLI[@]}"; do section "${DISC[$k]}" tools | grep -q '^lldpcli /' || nl=$((nl + 1)); done
+    # before the wait: lldpd's state is known only after the diagnostics, so name only what discovery saw
+    [[ $FF_LLDP == 1 ]] && log "FF_LLDP=1: hosts without lldpcli or a running lldpd get a 70 s tcpdump LLDP capture ($nl host$( (( nl != 1 )) && echo s) without lldpcli)"
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
         rbash "${T_TARGET[$k]}" $(host_nics $k) <<<"FF_LLDP=$FF_LLDP"$'\n'"$DIAG_SCRIPT" > "$WORK/diag.$k" 2>&1 &
@@ -751,9 +748,16 @@ main() {
         grep '^@@LLDPWHY ' "$WORK/diag.$k" | cut -d' ' -f2- >> "$LLDP_WHY"
         grep -v '^@@' "$WORK/diag.$k" > "$RAW_DIR/${T_HOST[$k]}.txt"
     done
-    if (( nl )) && [[ $FF_LLDP == 1 ]]; then
+    # hosts without LLDP from lldpcli: not installed (discovery) or lldpd not answering (the diag's @@LLDPD_DOWN)
+    for k in "${ELIG[@]}" "${CLI[@]}"; do grep -q '^@@LLDPD_DOWN ' "$WORK/diag.$k" && nd=$((nd + 1)); done
+    lc=$( (( nl )) && echo "lldpcli not installed on $nl host$( (( nl != 1 )) && echo s)")
+    (( nd )) && lc+="${lc:+, }lldpd not running on $nd host$( (( nd != 1 )) && echo s)"
+    if [[ -n $lc && $FF_LLDP == 1 ]]; then
+        log "$lc; FF_LLDP=1: captured LLDP with tcpdump there (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
         local nt=0; for k in "${ELIG[@]}" "${CLI[@]}"; do grep -q '^reason: tcpdump_absent' "$WORK/diag.$k" && nt=$((nt + 1)); done
-        (( nt )) && log "tcpdump not installed on $nt hosts; LLDP capture skipped there"
+        (( nt )) && log "tcpdump not installed on $nt host$( (( nt != 1 )) && echo s); LLDP capture skipped there"
+    elif [[ -n $lc ]]; then
+        log "$lc; FF_LLDP=1 captures LLDP with tcpdump (70 s, adds the LLDP group MAC to the NIC filter, never promiscuous)"
     fi
     log "Diagnostics: $(wc -l < "$NIC_DIAG" | tr -d ' ') NIC, $(wc -l < "$LLDP_DATA" | tr -d ' ') LLDP, $(wc -l < "$DRV_DATA" | tr -d ' ') driver lines$( [[ -s $BOND_DATA ]] && echo ", $(wc -l < "$BOND_DATA" | tr -d ' ') bonds")"
     # ports with no neighbour by reason, most first; a bond's own row is left out (its members are counted)

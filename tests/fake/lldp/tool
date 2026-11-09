@@ -1,7 +1,8 @@
 #!/opt/homebrew/bin/bash
 # fake host tools for DIAG_SCRIPT's LLDP capture (ff/45), one file linked as ip, ethtool, mlxconfig, tcpdump, timeout,
 # hostname, lldpcli; argv -> $FAKE_LLDP_LOG. Knobs: FAKE_PRIV, FAKE_DRV (ice), FAKE_MLX=on, FAKE_MADDR_HAS=1,
-# FAKE_TCPDUMP=frame|fail|none (none: 70 s, nothing heard), FAKE_LLDPCLI_NONE=p0,p1 (lldpcli sees no neighbour there)
+# FAKE_TCPDUMP=frame|fail|none (none: 70 s, nothing heard), FAKE_LLDPCLI_NONE=p0,p1 (lldpcli sees no neighbour there),
+# FAKE_LLDPD_DOWN=1 (lldpcli is installed but lldpd is not running: every call prints lldpctl's warning, rc 1)
 t=${0##*/}
 echo "$t $*" >> "${FAKE_LLDP_LOG:?}"
 port=${!#}
@@ -36,7 +37,8 @@ tcpdump) i=; for a; do [[ $p == -i ]] && i=$a; p=$a; done
     printf '\tPort Description TLV (4), length 12: uplink to hx\n\tSystem Name TLV (5), length 13: leaf1.example\n'
     printf '\tSystem Description TLV (6), length 15\n\t  Example NOS 1.0\n\tEnd TLV (0), length 0\n'
     printf '1 packet captured\n1 packet received by filter\n0 packets dropped by kernel\n' >&2 ;;
-lldpcli) [[ ,$FAKE_LLDPCLI_NONE, == *",$port,"* ]] && { printf -- '-------------------------------------------------------------------------------\nLLDP neighbors:\n-------------------------------------------------------------------------------\n'; exit 0; }
+lldpcli) [[ $FAKE_LLDPD_DOWN == 1 ]] && { echo '[WARN/lldpctl] cannot connect to /var/run/lldpd.socket: No such file or directory' >&2; exit 1; }
+    [[ ,$FAKE_LLDPCLI_NONE, == *",$port,"* ]] && { printf -- '-------------------------------------------------------------------------------\nLLDP neighbors:\n-------------------------------------------------------------------------------\n'; exit 0; }
     printf 'Interface:    %s, via: LLDP, RID: 1, Time: 0 day, 01:00:00\n  Chassis:\n    SysName:      leaf2.example\n' "$port"
     printf '    SysDescr:     Example NOS 2.0\n  Port:\n    PortID:       ifname swp9\n    PortDescr:    uplink to hx\n' ;;
 esac

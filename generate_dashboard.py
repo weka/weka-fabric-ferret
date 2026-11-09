@@ -44,6 +44,7 @@ TOPO_DEFAULT_LAYOUT = 'radial'   # the topology map's opening layout: 'radial', 
 # lldp_reasons.txt: why a port names no LLDP neighbour, shown where a NIC would read "no switch seen"
 LLDP_WHY = {'fw_lldp_on': 'firmware LLDP agent holds the frames (fw_lldp_on)', 'tcpdump_absent': 'no tcpdump on host',
             'timeout_absent': 'no timeout command on host', 'no_lldpcli': 'no lldpcli; FF_LLDP=1 captures',
+            'lldpd_down': 'lldpd not running; FF_LLDP=1 captures',
             'no_frame': 'no LLDP frame in 70 s', 'no_neighbour': 'no switch seen', 'bond': 'bond: see members'}
 UNSEEN_TEXT = {'no switch seen', *LLDP_WHY.values()}
 
@@ -121,8 +122,30 @@ def generate_html(data, output_path):
     for r in results:
         iter_data[r['iteration']].append(r['gbps'])
 
-    # Bottom 50 results
-    bottom_50 = sorted(results, key=lambda r: r['gbps'] / (tpath(r, 'F') or 1))[:50]
+    # Test Distribution's results table: every backend and client run, worst first by share of expected (a backend
+    # run: its path's line rate; a client run: its expected rate), ties by Gbps; the page filters and pages it
+    host_of = {**{n['ip']: n['host'] for n in (data.get('clients') or {}).get('nics', [])}, **ip_to_host}
+    ph_of = lambda r: f"iter {r['iteration']} phase {r['phase']}" + (f" wave {r['wave']}" if r.get('wave') else '')
+    tier = lambda r: 'badge-ok' if r['gbps'] >= tpath(r, 'G') else 'badge-func' if r['gbps'] >= tpath(r, 'F') else 'badge-slow' if r['gbps'] >= tpath(r, 'S') else 'badge-down'
+    okp, slowp = int(data['metadata'].get('ok_pct', 75)), int(data['metadata'].get('slow_pct', 50))
+    cbadge = lambda p: 'badge-ok' if p >= okp else 'badge-slow' if p >= slowp else 'badge-down'
+    rline = lambda ip: data['rail_rate'].get(data.get('ip_rail', {}).get(ip), L)
+    test_rows = [('backend', r, min(rline(r['src']), rline(r['dst'])), tier(r)) for r in results]   # expected: the path's line rate
+    test_rows += [('client', f, f['expected'], cbadge(100 * f['gbps'] / f['expected'] if f['expected'] else 0))
+                  for f in (data.get('clients') or {}).get('flows', [])]
+    test_rows.sort(key=lambda t: (t[1]['gbps'] / t[2] if t[2] else 0, t[1]['gbps']))
+    # failed runs (no result) first: Gbps ERROR, iperf3's reason in Expected; a UDP run's side from its sender
+    cips_ = data.get('client_ips', set())
+    failed = ([('backend', e, e['why']) for e in data.get('run_errors', [])]
+              + [('client' if u['src'] in cips_ else 'backend', {**u, 'iteration': u.get('iter', '?'), 'phase': f"UDP {u['phase']}"},
+                  _err_reason(u['error'])) for u in data.get('udp', []) if 'error' in u]
+              + [('client', e, _err_reason('ERROR ' + e['why'])) for e in (data.get('clients') or {}).get('errors', [])])
+    test_rows_json = json.dumps([[role, host_of.get(r['src'], '-'), r['src'], host_of.get(r['dst'], '-'), r['dst'], ph_of(r), 'ERROR',
+                                  why, None, '-', '-', 'badge-down'] for role, r, why in failed]
+                                + [[role, host_of.get(r['src'], '-'), r['src'], host_of.get(r['dst'], '-'), r['dst'], ph_of(r), r['gbps'],
+                                    round(e, 1), round(100 * r['gbps'] / e, 1) if e else 0, r.get('retransmits', 0), r['gbytes'], b]
+                                   for role, r, e, b in test_rows])
+    n_test = len(failed) + len(test_rows)
 
     # one row per data NIC, backends and clients (the default view of the results tab)
     nic_rows, nic_cols = _nic_rows(data, ip_to_host, ip_to_nic)
@@ -244,6 +267,8 @@ def generate_html(data, output_path):
                       f'Spine (not declared)\n{len(real_switches)} leaf switches connected; set FF_SPINES, '
                       'FF_SPINE_LINKS and FF_SPINE_GBPS to judge the uplinks'),
         }
+        if ns > 8:   # Radial caps its ring inside the leaves, so above 8 spines a 30 px diamond (60 across) leaves the labels a margin
+            topo_nodes[sid]['size'] = 30
     busy = {}   # leaf -> its busiest judged row (the card's): the uplink edges' width, colour and tooltip
     for r in (u['rows'] if u else []):
         b = busy.get(r['leaf'])
@@ -496,7 +521,7 @@ def generate_html(data, output_path):
                     + (f" (from clients: {data['metadata'].get('mesh_client_failures', '?')} of {cmp})" if cmp and cmp != '0' else '')) if mp else ''
         preflight_html = f"""<div class="card mb-3"><div class="card-header">Preflight: rail layout and gateways |
 <b class="{'stat-bad' if bad else 'stat-good'}">{bad}</b> findings | gateways: {gw_ok} answered a full-MTU ping, {len(gw_bad)} failed, {gw_direct} rails on-link{mesh_txt}</div>
-<div class="card-body" style="max-height:300px; overflow-y:auto;">{'<p class="text-success mb-0">No rail swaps, cross-rail cabling, MTU differences or gateway failures found.</p>' if not bad else
+<div class="card-body{' scroll' if bad else ''}">{'<p class="text-success mb-0">No rail swaps, cross-rail cabling, MTU differences or gateway failures found.</p>' if not bad else
 f'<table class="table table-sm table-striped"><thead><tr><th>Finding</th><th>Host / rail</th><th>Detail</th></tr></thead><tbody>{rows}</tbody></table>'}</div></div>"""
 
     # FEC over the run: uncorrectable blocks and pre-FEC BER, not lifetime counts
@@ -519,7 +544,7 @@ f'<table class="table table-sm table-striped"><thead><tr><th>Finding</th><th>Hos
         fec_html = f"""<div class="card mb-3"><div class="card-header">FEC during this run (rate over {max(f['secs'] for f in fr)}s, not lifetime counts) |
 counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if n_off else ''} | <b class="{'stat-bad' if cnt['UNCORRECTABLE'] else 'stat-good'}">{cnt['UNCORRECTABLE']}</b> uncorrectable |
 <b class="{'stat-bad' if cnt['OVER FEC LIMIT'] else 'stat-good'}">{cnt['OVER FEC LIMIT']}</b> over the FEC limit | <b class="{'stat-warn' if cnt['WATCH'] else 'stat-good'}">{cnt['WATCH']}</b> watch</div>
-<div class="card-body" style="max-height:320px; overflow-y:auto;">
+<div class="card-body scroll">
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Pre-FEC BER = corrected bits / (seconds x link rate). Over limit: at or above {FEC_LIMIT_BER:.1e}, the correction limit commonly quoted for RS(544,514) "KP4" FEC on 200/400G PAM4 links (NRZ links on RS(528,514) correct less). Watch: {FEC_WATCH_BER:.0e}, a heuristic. Any uncorrectable block means errors reached the host.</p>
 <table class="table table-sm table-striped"><thead><tr><th>Host</th><th>NIC</th><th>Status</th><th>Pre-FEC BER</th><th>Corrected blocks</th><th>Uncorrectable</th><th>Seconds</th><th>Counter reset</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
@@ -535,7 +560,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
                      f"Recovered: <b class=\"stat-good\">{escape(', '.join(cmp_['down_cleared']) or 'none')}</b></p>")
         compare_html = f"""<div class="card mb-3"><div class="card-header">Compared with the run of {escape(cmp_['old_ts'])} ({escape(cmp_['old_label'])}):
 <b>{len(cmp_['changes'])}</b> NIC changes, {len(cmp_['down_added'])} newly down IPs, {len(cmp_['down_cleared'])} recovered</div>
-<div class="card-body" style="max-height:360px; overflow-y:auto;">{downs}
+<div class="card-body{' scroll' if rows else ''}">{downs}
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Per rail NIC (host + NIC), since pairings differ between runs. Throughput is compared per direction (sent, received); a drop seen only as received usually follows a drop on the sending NIC listed with it. Changes of 10% or more are listed; a lifetime counter that went down was reset (reboot or driver reload).{' A client NIC: sent = its runs to the backends, received = from them.' if data.get('clients') else ''}</p>
 {'<p class="text-success mb-0">No NIC-level changes.</p>' if not rows else f'<table class="table table-sm table-striped"><thead><tr><th>Host</th><th>NIC</th><th>What</th><th>Before</th><th>Now</th></tr></thead><tbody>{rows}</tbody></table>'}</div></div>"""
 
@@ -602,7 +627,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         temps_html = f"""<div class="card mb-3"><div class="card-header">Temperatures — heat before fabric |
 {len(rd)} sensors on {len(per)} hosts | <b class="{'stat-bad' if bad else 'stat-warn' if flg else 'stat-good'}">{len(flg)}</b> flagged ({bad} high or crit) |
 <b class="{'stat-warn' if nod else 'stat-good'}">{len(nod)}</b> host sources with no temperature data{f' | {len(nts)} notes' if nts else ''}</div>
-<div class="card-body" style="max-height:420px; overflow-y:auto;">
+<div class="card-body scroll">
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Read as thermals_capture.sh reads them: hwmon (CPU, NVMe, NIC…) and nvidia-smi (GPUs) before the run and after every phase; the BMC (ipmitool sensor: inlet, exhaust, GPU board, drives…) on the host once per iteration and at the end, and a -t file's bmc lines out of band. Each sensor is typed by what it measures: inlet, cpu, gpu, mem, nvme, nic or other. Flags: crit / high at or above the sensor's threshold (BMC: its own status), near = within {escape(m.get('temp_margin', '5'))}C of high, rise = up more than {escape(m.get('temp_rise', '10'))}C over the run. Module (optic) temperatures are in the NIC tables.</p>
 {'<ul class="mb-2">' + nlist + '</ul>' if nlist else ''}
 <table class="table table-sm table-striped"><thead><tr><th>Host</th>{theads}<th>Flags</th></tr></thead><tbody>{hrows}</tbody></table>
@@ -641,7 +666,7 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
 lost {lost:,} of {sent:,} datagrams ({100 * lost / sent if sent else 0:.3f}%): sender TX {txs:,}, receiver socket {sock:,}, NIC {nic:,}, kernel backlog {back:,}, unaccounted {unacc:,} |
 expected from overload {expd:,} ({100 * expd / sent if sent else 0:.3f}%) |
 <b class="{'stat-bad' if beyond else 'stat-good'}">unaccounted beyond expected (likely fabric) {beyond:,}</b>{f' | {errs} runs with no result' if errs else ''}</div>
-<div class="card-body" style="max-height:360px; overflow-y:auto;">{''.join(f'<p class="text-warning mb-1">{escape(n)}</p>' for n in notes)}
+<div class="card-body scroll">{''.join(f'<p class="text-warning mb-1">{escape(n)}</p>' for n in notes)}
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Host-side buckets are the receiving host's counters for that phase (not per flow); unaccounted = lost minus those, floored at 0.
 Expected = what overload alone loses: uncapped UDP has no backoff, so when what the senders actually sent into a NIC adds up to more than its line rate, at least 1 - line/offered of the datagrams are lost (all-at-once phases, or a faster sender than receiver). Only unaccounted loss beyond that is flagged. Sender TX = datagrams the sending NIC never put on the wire (sent minus its kernel and port packet counts, shared over its runs), taken out before unaccounted.</p>
 <table class="table table-sm table-striped"><thead><tr><th>Run</th><th>From</th><th>To</th><th>Gbps</th><th>Lost/Sent</th><th>Loss %</th>
@@ -664,7 +689,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
                        f"<td>{escape(' '.join(g['dsts'][:4]))}{' …' if len(g['dsts']) > 4 else ''}</td><td>{escape(', '.join(sorted(g['phases'])))}</td></tr>"
                        for why, g in sorted(groups.items(), key=lambda kv: -kv[1]['runs']))
         run_errors_html = f"""<div class="card mb-3"><div class="card-header">Runs with no result — {len(errs)} runs, by iperf3's reason (every row is in iperf3_results.txt / iperf3_udp_results.txt)</div>
-<div class="card-body"><table class="table table-sm table-striped">
+<div class="card-body scroll"><table class="table table-sm table-striped">
 <thead><tr><th>Runs</th><th>Reason</th><th>Destinations</th><th>First destinations</th><th>Phases</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     not_tested_html = ''
@@ -672,7 +697,7 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
         rows = ''.join(f"<tr><td>{escape(n['kind'])}</td><td>{escape(n['what'])}</td><td>{escape(n['why'])}</td></tr>"
                        for n in data['not_tested'])
         not_tested_html = f"""<div class="card mb-3"><div class="card-header">Not tested — {len(data['not_tested'])} rows (paths, rails, hosts, unreachable targets)</div>
-<div class="card-body" style="max-height:320px; overflow-y:auto;"><table class="table table-sm table-striped">
+<div class="card-body scroll"><table class="table table-sm table-striped">
 <thead><tr><th>Kind</th><th>What</th><th>Why</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     # DSCP check (FF_RDMA=1): per planned path the TOS byte sent and the one tcpdump saw on the receiving NIC
@@ -688,20 +713,19 @@ Expected = what overload alone loses: uncapped UDP has no backoff, so when what 
                        f"<td>{escape(dv(r['seen']))}</td><td class=\"{'stat-good' if r['verdict'] == 'kept' else 'stat-bad'}\">{escape(r['verdict'])}</td>"
                        f"<td>{escape(r['note'])}</td></tr>" for r in dscp)
         dscp_html = f"""<div class="card mb-3"><div class="card-header">DSCP check — {len(dscp)} paths, DSCP {dscp_d} ({dscp_src})</div>
-<div class="card-body" style="max-height:360px; overflow-y:auto;"><p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{cnt['kept']} kept, {cnt['rewritten']} rewritten, {cnt['stripped']} stripped, {cnt['unknown']} unknown.
+<div class="card-body scroll"><p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{cnt['kept']} kept, {cnt['rewritten']} rewritten, {cnt['stripped']} stripped, {cnt['unknown']} unknown.
 Each path's probe (iperf3 UDP, 1 Mbit/s for 2 s; ping when iperf3 is missing or its probe saw nothing) is marked with the TOS byte; tcpdump on the receiving NIC reads the byte that arrived. The verdict compares the DSCP (TOS &gt;&gt; 2) only. Unknown: the path check failed, a rail is down, a tool is missing, or no probe got through (Note).</p>
 <table class="table table-sm table-striped"><thead><tr><th>Src host</th><th>Src IP</th><th>Dst host</th><th>Dst IP</th><th>NIC</th><th>Probe</th><th>TOS sent</th><th>TOS seen</th><th>Verdict</th><th>Note</th></tr></thead>
 <tbody>{rows}</tbody></table></div></div>"""
 
-    # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, Clients (client hosts) and
+    # The cards' tabs (the cards' HTML is as above, only its place changes): Temperatures, and
     # Run checks (compare, preflight, run errors, not tested, UDP), each only when present; Run checks counts
     # the cards with a flagged result, from their figures; none at zero
     clients_html = _clients_html(data)
-    n_clients = len({n['host'] for n in data['clients']['nics']}) if data.get('clients') else 0
     checks = [c for c in (compare_html, preflight_html, run_errors_html, not_tested_html, udp_html, dscp_html) if c]
     n_checks = (pf_bad > 0) + (udp_beyond > 0) + bool(run_errors_html) + bool(not_tested_html) + (dscp_bad > 0)
 
-    # Where to look first, above the tabs: the findings of every kind, worst first (the _w_* functions)
+    # Where to look first, atop Needs Repair: the findings of every kind, worst first (the _w_* functions)
     slow, hot = _slow(nic_rows), _hot(data)
     leaf_ip = {n['ip']: (n['switch'] if n['switch'] not in ('unknown', '') else _unseen(n)) for n in all_nics}
     ipr_ = data.get('ip_rail', {})
@@ -756,8 +780,6 @@ Each path's probe (iperf3 UDP, 1 Mbit/s for 2 s; ping when iperf3 is missing or 
     tcls = 'stat-bad' if temps_bad else 'stat-warn' if temps_flagged else ''
     temps_tab = tab('tab-temps', f'Temperatures (<span class="{tcls}">{temps_flagged}</span> flagged)') if temps_html else ''
     temps_pane = pane('tab-temps', temps_html) if temps_html else ''
-    clients_tab = tab('tab-clients', f'Clients ({n_clients})') if clients_html else ''
-    clients_pane = pane('tab-clients', clients_html) if clients_html else ''
     checks_tab = tab('tab-checks', 'Run checks' + (f' (<span class="stat-bad">{n_checks}</span>)' if n_checks else '')) if checks else ''
     checks_pane = pane('tab-checks', ''.join(checks)) if checks else ''
     repair = _repair(slow)
@@ -783,7 +805,7 @@ Each path's probe (iperf3 UDP, 1 Mbit/s for 2 s; ping when iperf3 is missing or 
                     f'<tbody>{"".join(repair_row(x) for x in xs)}</tbody></table></details></td></tr>'
                     for (role, why, st), xs in sorted(groups.items(), key=lambda kv: -len(kv[1])))
     repair_html = (f'<div class="card mb-3"><div class="card-header">NICs that need repair — {len(repair)} (down, or CRITICAL: a run under the repair '
-                   f'cut-off; worst first; "(retr)": its retransmits were over the limit too). SLOW NICs that need no repair are in Connection Health</div><div class="card-body" style="max-height:420px; overflow-y:auto;">'
+                   f'cut-off; worst first; "(retr)": its retransmits were over the limit too). SLOW NICs that need no repair are in Connection Health</div><div class="card-body{" scroll" if repair else ""}">'
                    + (f'<table class="table table-sm table-striped"><thead>{head}</thead>'
                       f'<tbody>{"".join(repair_row(x) for x in repair if not unseen(x))}{grows}</tbody></table>' if repair else
                       '<p class="text-success mb-0">No NIC needs repair.</p>') + '</div></div>')
@@ -848,6 +870,14 @@ th small {{ display: block; font-weight: 400; color: #8899aa; font-size: 0.7rem;
 .page-item.active .page-link {{ background: #e94560; border-color: #e94560; }}
 .full-width-chart {{ width: 100%; }}
 td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; }}
+/* A tab fills the window below the tab bar (fitTabs sets the min-height). Each table scrolls inside its card: the
+   box starts at 260 px (contain:size keeps its rows out of the page height) and grows into the window's spare room */
+.tab-content {{ display: flex; flex-direction: column; }}
+.tab-content > .tab-pane.active {{ display: flex; flex-direction: column; flex: 1; }}
+.tab-pane > :has(.scroll) {{ flex: 1 0 auto; }}
+.tab-pane .row > [class*="col"] > .card {{ height: 100%; }}
+.scroll {{ flex: 1; overflow-y: auto; min-height: 260px; contain: size; }}
+#lldpTable td {{ white-space: nowrap; }}
 </style>
 </head>
 <body>
@@ -870,25 +900,24 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         <b class="{'stat-good' if not data['not_tested'] else 'stat-bad'}">{len(data['not_tested'])}</b> not tested
     </span>
 </div>
-{where_html}
 {problems_html}
 
-<!-- Tabs: the map (Topology) opens first; every card is in a tab (a tab only when its card is), Where to look and the banner above -->
+<!-- Tabs: the map (Topology) opens first; every card is in a tab (a tab only when its card is), the banner above -->
+<!-- Where to look first sits atop Needs Repair, above the repair card -->
 <ul class="nav nav-tabs mb-2" role="tablist">
+    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-topology">Topology{dot('tab-topology')}</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-connections">Connection Health{dot('tab-connections')}</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-slow">Needs Repair ({repair_n}){dot('tab-slow')}</a></li>
     {temps_tab}
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-nic">NIC / Optics{drops_n}{dot('tab-nic')}</a></li>
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-distribution">Test Distribution</a></li>
-    <li class="nav-item"><a class="nav-link active" data-bs-toggle="tab" href="#tab-topology">Topology{dot('tab-topology')}</a></li>
-    {clients_tab}
     {checks_tab}
     <li class="nav-item"><a class="nav-link" data-bs-toggle="tab" href="#tab-all">Raw Data ({count})</a></li>
 </ul>
 
 <div class="tab-content">
 
-<!-- Tab: Connection Health (default) -->
+<!-- Tab: Connection Health -->
 <div class="tab-pane fade" id="tab-connections">
     <div class="card">
         <div class="card-header">Average Throughput per Connection — {total_ips} IPs sorted lowest to highest (green=healthy &ge;{G}G, blue=functional {F}-{G}G, yellow &lt;{F}G, red &lt;{S}G)</div>
@@ -896,14 +925,16 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div id="ipBarChart" class="full-width-chart"></div>
         </div>
     </div>
+    {clients_html}
 </div>
 
 <!-- Tab: Needs Repair -->
 <div class="tab-pane fade" id="tab-slow">
+    {where_html}
     {repair_html}
     <div class="card">
         <div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Connections Below Functional (&lt;{F} Gbps) — with NIC Diagnostics<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('slowIpTable','needs_repair.csv')">Download CSV</button></div>
-        <div class="card-body"><div id="slowIpContainer"></div></div>
+        <div class="card-body{' scroll' if data['slow_ips'] else ''}"><div id="slowIpContainer"></div></div>
     </div>
 </div>
 {temps_pane}
@@ -912,7 +943,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 <div class="tab-pane fade" id="tab-nic">
     <div class="row g-3">
         <div class="col-md-4">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">NIC Inventory<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('not400Table','nic_not400g.csv')">Download CSV</button></div><div class="card-body">
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">NIC Inventory<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('not400Table','nic_not400g.csv')">Download CSV</button></div><div class="card-body scroll">
                 <p>Total NICs: <strong>{data['nic_inventory']['total']}</strong> | At {at_l}: <strong class="text-success">{data['nic_inventory']['at_line']}</strong> | Not {at_l}: <strong class="text-danger">{len(data['nic_inventory']['not_line'])}</strong> | Speed unknown: <strong>{data['nic_inventory']['unknown']}</strong></p>
                 <h6 class="text-danger mt-3">Down / Not-{at_l} / speed-unknown NICs</h6>
                 <table class="table table-sm table-striped" id="not400Table">
@@ -923,7 +954,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div></div>
         </div>
         <div class="col-md-4">
-            <div class="card"><div class="card-header">Driver / Firmware Homogeneity</div><div class="card-body">
+            <div class="card"><div class="card-header">Driver / Firmware Homogeneity</div><div class="card-body scroll">
                 <h6>Firmware Versions</h6>
                 <table class="table table-sm table-striped mb-3">
                 <thead><tr><th>Firmware</th><th>Count</th></tr></thead>
@@ -935,7 +966,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div></div>
         </div>
         <div class="col-md-4">
-            <div class="card"><div class="card-header">Switch Connectivity (LLDP)</div><div class="card-body">
+            <div class="card"><div class="card-header">Switch Connectivity (LLDP)</div><div class="card-body scroll">
                 <h6>Connected Switches</h6>
                 <table class="table table-sm table-striped">
                 <thead><tr><th>Switch</th><th>Ports</th></tr></thead>
@@ -943,25 +974,14 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             </div></div>
         </div>
     </div>
-    {'<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header text-danger" style="display:flex; justify-content:space-between; align-items:center;">Packet Drops During Testing (' + str(nics_with_drops) + ' NICs affected)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv(&#39;dropsTable&#39;,&#39;packet_drops.csv&#39;)">Download CSV</button></div><div class="card-body"><table class="table table-sm table-striped table-hover" id="dropsTable"><thead><tr><th>#</th><th>Host/NIC</th><th>IP</th><th>Rx Dropped<small>ideal 0</small></th><th>Tx Dropped<small>ideal 0</small></th><th>Rx OOB<small>ideal 0</small></th><th>Phases</th></tr></thead><tbody>' + "".join(f"<tr><td></td><td>{d['host_nic']}</td><td>{d['ip']}</td><td>{d['rx_drop']:,}</td><td>{d['tx_drop']:,}</td><td>{d['rx_oob']:,}</td><td>{d['phases']}</td></tr>" for d in drops) + '</tbody></table></div></div></div></div>' if drops else '<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header">Packet Drops</div><div class="card-body">' + no_drops_msg + '</div></div></div></div>'}
+    {'<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header text-danger" style="display:flex; justify-content:space-between; align-items:center;">Packet Drops During Testing (' + str(nics_with_drops) + ' NICs affected)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv(&#39;dropsTable&#39;,&#39;packet_drops.csv&#39;)">Download CSV</button></div><div class="card-body scroll"><table class="table table-sm table-striped table-hover" id="dropsTable"><thead><tr><th>#</th><th>Host/NIC</th><th>IP</th><th>Rx Dropped<small>ideal 0</small></th><th>Tx Dropped<small>ideal 0</small></th><th>Rx OOB<small>ideal 0</small></th><th>Phases</th></tr></thead><tbody>' + "".join(f"<tr><td></td><td>{d['host_nic']}</td><td>{d['ip']}</td><td>{d['rx_drop']:,}</td><td>{d['tx_drop']:,}</td><td>{d['rx_oob']:,}</td><td>{d['phases']}</td></tr>" for d in drops) + '</tbody></table></div></div></div></div>' if drops else '<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header">Packet Drops</div><div class="card-body">' + no_drops_msg + '</div></div></div></div>'}
     <div class="row g-3 mt-1">
         <div class="col-md-6">
             <div class="card"><div class="card-header">Top 50 FEC Corrected Bits (cumulative since the counters last reset; not a rate)</div>
             <div class="card-body"><div id="fecChart" style="height:400px;"></div></div></div>
         </div>
         <div class="col-md-6">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">LLDP Neighbor Table ({len(data['lldp_info'])} entries)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('lldpTable','lldp_neighbors.csv')">Download CSV</button></div><div class="card-body">
-                <table class="table table-sm table-striped table-hover" id="lldpTable">
-                <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th></tr></thead>
-                <tbody>
-                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l.get('why', l['switch'])}</td><td>{l['port_id']}</td><td>{l['port_desc']}</td><td>{l['sys_desc']}</td></tr>" for l in data['lldp_info'])}
-                </tbody></table>
-            </div></div>
-        </div>
-    </div>
-    <div class="row g-3 mt-1">
-        <div class="col-md-6">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">FEC Details — All {len(fec_data)} NICs with Corrected Bits<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('fecTable','fec_details.csv')">Download CSV</button></div><div class="card-body">
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">FEC Details — All {len(fec_data)} NICs with Corrected Bits<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('fecTable','fec_details.csv')">Download CSV</button></div><div class="card-body scroll">
                 <table class="table table-sm table-striped table-hover" id="fecTable">
                 <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Corrected Bits<small>ideal 0</small></th><th>Lane 0<small>ideal 0</small></th><th>Lane 1<small>ideal 0</small></th><th>Lane 2<small>ideal 0</small></th><th>Lane 3<small>ideal 0</small></th></tr></thead>
                 <tbody>
@@ -969,8 +989,22 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 </tbody></table>
             </div></div>
         </div>
+    </div>
+    <!-- LLDP gets a full row, its long text cells one line each (full text on hover) -->
+    <div class="row g-3 mt-1">
+        <div class="col-12">
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">LLDP Neighbor Table ({len(data['lldp_info'])} entries)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('lldpTable','lldp_neighbors.csv')">Download CSV</button></div><div class="card-body scroll">
+                <table class="table table-sm table-striped table-hover" id="lldpTable">
+                <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th></tr></thead>
+                <tbody>
+                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l.get('why', l['switch'])}</td><td>{l['port_id']}</td>" + ''.join(f'<td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:320px;" title="{escape(str(v))}">{v}</td>' for v in (l['port_desc'], l['sys_desc'])) + "</tr>" for l in data['lldp_info'])}
+                </tbody></table>
+            </div></div>
+        </div>
+    </div>
+    <div class="row g-3 mt-1">
         <div class="col-md-6">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Driver Inventory ({len(data['driver_info'])} NICs)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('driverTable','driver_inventory.csv')">Download CSV</button></div><div class="card-body">
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Driver Inventory ({len(data['driver_info'])} NICs)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('driverTable','driver_inventory.csv')">Download CSV</button></div><div class="card-body scroll">
                 <table class="table table-sm table-striped table-hover" id="driverTable">
                 <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Driver</th><th>Version</th><th>Firmware</th><th>Part Number</th></tr></thead>
                 <tbody>
@@ -978,10 +1012,8 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 </tbody></table>
             </div></div>
         </div>
-    </div>
-    <div class="row g-3 mt-1">
-        <div class="col-12">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Optics — {len(optics_data)} Transceivers<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('opticsTable','optics.csv')">Download CSV</button></div><div class="card-body">
+        <div class="col-md-6">
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Optics — {len(optics_data)} Transceivers<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('opticsTable','optics.csv')">Download CSV</button></div><div class="card-body scroll">
                 <table class="table table-sm table-striped table-hover" id="opticsTable">
                 <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>RX Ch1 (dBm)<small>ideal ~2</small></th><th>RX Ch2 (dBm)<small>ideal ~2</small></th><th>RX Ch3 (dBm)<small>ideal ~2</small></th><th>RX Ch4 (dBm)<small>ideal ~2</small></th><th>Temp (°C)<small>ideal &lt;45</small></th></tr></thead>
                 <tbody>
@@ -1008,13 +1040,17 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     </div>
     <div class="row g-3 mt-1">
         <div class="col-12">
-            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;">Bottom 50 Individual Test Results<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv('bottomTable','bottom_50.csv')">Download CSV</button></div>
-            <div class="card-body">
-                <table class="table table-striped table-hover table-sm" id="bottomTable">
-                <thead><tr><th>#</th><th>{ep[0]}</th><th>{ep[1]}</th><th>{ep[3]}</th><th>{ep[4]}</th><th>Gbps<small>expected {L}</small></th><th>Retrans<small>ideal 0</small></th><th>GBytes</th></tr></thead>
-                <tbody>
-                {''.join(f"<tr><td></td><td>{h(r['src'])}</td><td>{r['src']}</td><td>{h(r['dst'])}</td><td>{r['dst']}</td><td><span class='badge {'badge-ok' if r['gbps']>=tpath(r, 'G') else 'badge-func' if r['gbps']>=tpath(r, 'F') else 'badge-slow' if r['gbps']>=tpath(r, 'S') else 'badge-down'}'>{r['gbps']}</span></td><td>{'<span class=badge-down>' + str(r.get('retransmits',0)) + '</span>' if r.get('retransmits',0) > 0 else '0'}</td><td>{r['gbytes']}</td></tr>" for r in bottom_50)}
-                </tbody></table>
+            <div class="card"><div class="card-header" style="display:flex; justify-content:space-between; align-items:center;"><span id="resultsTitle">Individual Test Results ({n_test} runs, worst first)</span>
+                <span><span class="btn-group btn-group-sm me-2" role="group"><button class="btn btn-outline-info active" id="resultsAll" onclick="resultsSetFilter('all')">All</button><button class="btn btn-outline-info" id="resultsBackends" onclick="resultsSetFilter('backends')">Backends</button><button class="btn btn-outline-info" id="resultsClients" onclick="resultsSetFilter('clients')">Clients</button></span><button class="btn btn-sm btn-outline-info" onclick="resultsCsvDownload()">Download CSV</button></span></div>
+            <div class="card-body scroll">
+                <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Failed runs first, then by share of expected. Expected: a backend run, its path's line rate (the slower rail's); a client run, min(client line, backend rail line / runs sharing that backend NIC). A failed run shows iperf3's reason there.</p>
+                <div style="display:flex; gap:10px; align-items:center; font-size:0.85rem; color:#8899aa; margin-bottom:4px;">
+                    <select class="form-select form-select-sm" style="width:auto;" onchange="resultsSetPageSize(this.value === 'all' ? 'all' : +this.value)"><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option><option value="500">500</option><option value="all">All</option></select> per page
+                    <button class="btn btn-sm btn-outline-info" onclick="resultsSetPage(resultsPage - 1)">&lsaquo; prev</button><span id="resultsPager"></span><button class="btn btn-sm btn-outline-info" onclick="resultsSetPage(resultsPage + 1)">next &rsaquo;</button>
+                </div>
+                <table class="table table-striped table-hover table-sm" id="resultsTable">
+                <thead><tr><th>#</th><th>Role</th><th>Src host</th><th>Src IP</th><th>Dst host</th><th>Dst IP</th><th>Phase</th><th>Gbps</th><th>Expected</th><th>% of expected</th><th>Retrans<small>ideal 0</small></th><th>GBytes</th></tr></thead>
+                <tbody id="resultsBody"></tbody></table>
             </div></div>
         </div>
     </div>
@@ -1133,13 +1169,12 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
         </div>
     </div>
 </div>
-{clients_pane}
 {checks_pane}
 
 <!-- Tab: Raw Data -->
 <div class="tab-pane fade" id="tab-all">
     <div class="card">
-        <div class="card-header">All {count} iperf3 Results</div>
+        <div class="card-header" id="rawTitle">Per NIC summary</div>
         <!-- Filter/controls toolbar -->
         <div style="background:#0f3460; padding:8px 15px; display:flex; flex-wrap:wrap; gap:12px; align-items:center; font-size:0.85rem;">
             <!-- Verbose toggle -->
@@ -1174,7 +1209,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <button class="btn btn-sm btn-outline-info ms-2" onclick="rawDownloadCsv()">Download CSV</button>
             </div>
         </div>
-        <div class="card-body">
+        <div class="card-body scroll">
             <table class="table table-sm table-striped table-hover" id="allResultsTable">
             <thead><tr>{nic_head}</tr></thead>
             <tbody></tbody></table>
@@ -1288,8 +1323,16 @@ function nicIpCell(ip) {{
     return !ip || ip === '-' ? (ip || '-') : '<a href="#" class="ip-link" title="Open this NIC\\'s panel" onclick="topoNicPanel(\\'' + ip + '\\'); return false;">' + ip + '</a>';
 }}
 
+// The tab content's min-height: the window less everything else on the page (the banner's height varies)
+function fitTabs() {{
+    var tc = document.querySelector('.tab-content');
+    tc.style.minHeight = Math.max(0, window.innerHeight - (document.body.offsetHeight - tc.offsetHeight)) + 'px';
+}}
+$(window).on('resize', fitTabs);
+
 // All table init in document.ready so dtOpts is available everywhere
 $(document).ready(function() {{
+    fitTabs();
 
     // Needs Repair table
     var slowData = {slow_ips_json};
@@ -1351,6 +1394,7 @@ $(document).ready(function() {{
 
     window.rawToggleVerbose = function() {{
         rawIsVerbose = document.getElementById('rawVerbose').checked;
+        document.getElementById('rawTitle').textContent = rawIsVerbose ? 'Iperf3 Results' : 'Per NIC summary';
         rawApplyFilter();
     }};
     var dtMenu = [[25, 50, 100, 250, 500, 1000, -1], [25, 50, 100, 250, 500, 1000, 'All']];
@@ -1369,7 +1413,49 @@ $(document).ready(function() {{
         }}, extra || {{}});
     }};
     // rawApplyFilter initial call is deferred to after variable declarations below
-    $('#bottomTable').DataTable(dtOpts({{ pageLength: 50, paging: false, searching: false }}));
+    // Test Distribution's results: rows come failed then worst first from Python ([role, src host, src ip, dst host,
+    // dst ip, phase, gbps or ERROR, expected or reason, % or null, retr, gbytes, badge]); filter, then page, as strings
+    var testRows = {test_rows_json};
+    var resultsFilter = 'all', resultsSize = 50;
+    window.resultsPage = 1;
+    var resEsc = function(s) {{ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }};
+    function resultsRows() {{
+        return testRows.filter(function(t) {{ return resultsFilter === 'all' || t[0] + 's' === resultsFilter; }});
+    }}
+    function resultsDraw() {{
+        var rows = resultsRows(), n = rows.length, size = resultsSize === 'all' ? Math.max(n, 1) : resultsSize;
+        var pages = Math.max(1, Math.ceil(n / size));
+        window.resultsPage = Math.min(Math.max(1, window.resultsPage), pages);
+        var start = (window.resultsPage - 1) * size;
+        document.getElementById('resultsBody').innerHTML = rows.slice(start, start + size).map(function(t, i) {{
+            var bad = t[8] === null;
+            return '<tr data-role="' + t[0] + '" data-share="' + (bad ? 'error' : t[8].toFixed(1)) + '"><td>' + (start + i + 1) + '</td><td>' + t[0] +
+                '</td><td>' + resEsc(t[1]) + '</td><td>' + resEsc(t[2]) + '</td><td>' + resEsc(t[3]) + '</td><td>' + resEsc(t[4]) + '</td><td>' + resEsc(t[5]) +
+                '</td><td><span class="badge ' + t[11] + '">' + t[6] + '</span></td><td>' + resEsc(t[7]) + '</td><td>' + (bad ? '-' : t[8].toFixed(1) + '%') +
+                '</td><td>' + (t[9] > 0 ? '<span class="badge-down">' + t[9] + '</span>' : t[9]) + '</td><td>' + t[10] + '</td></tr>';
+        }}).join('');
+        document.getElementById('resultsPager').innerHTML = 'page ' + window.resultsPage + ' of ' + pages + ', ' + n + ' rows';
+        document.getElementById('resultsTitle').innerHTML = 'Individual Test Results (' + n + ' runs, worst first)';
+        [['all', 'resultsAll'], ['backends', 'resultsBackends'], ['clients', 'resultsClients']].forEach(function(b) {{
+            var e = document.getElementById(b[1]); if (e && e.classList) e.classList.toggle('active', b[0] === resultsFilter);
+        }});
+    }}
+    window.resultsSetFilter = function(f) {{ resultsFilter = f; window.resultsPage = 1; resultsDraw(); }};
+    window.resultsSetPageSize = function(s) {{ resultsSize = s; window.resultsPage = 1; resultsDraw(); }};
+    window.resultsSetPage = function(i) {{ window.resultsPage = i; resultsDraw(); }};
+    window.resultsCsvText = function() {{
+        var q = function(v) {{ return '"' + String(v === null ? '-' : v).replace(/"/g, '""') + '"'; }};
+        return ['Role,Src host,Src IP,Dst host,Dst IP,Phase,Gbps,Expected,% of expected,Retrans,GBytes'].concat(resultsRows().map(function(t) {{
+            return t.slice(0, 11).map(q).join(',');
+        }})).join('\\n');
+    }};
+    window.resultsCsvDownload = function() {{
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([window.resultsCsvText()], {{ type: 'text/csv' }}));
+        a.download = 'test_results.csv';
+        a.click();
+    }};
+    resultsDraw();
     $('#fecTable').DataTable(dtOpts({{ pageLength: 50, order: [[4, 'desc']] }}));
     $('#lldpTable').DataTable(dtOpts({{ pageLength: 50, order: [[4, 'asc']] }}));
     $('#driverTable').DataTable(dtOpts({{ pageLength: 50, order: [[1, 'asc']] }}));
@@ -1580,7 +1666,7 @@ $(document).ready(function() {{
     var topoRingIds = [], topoRadialLabels = {{}};   // the labels Radial hid, by node id, for the other layouts
     var topoRadialHome = {{}};   // each node's last ring place, by id: where "Put back" and a double click return it
     var R_HOST = 680, RING = 46, MINGAP = 22, LABELW = 90, GAP = 0.04;   // px: host ring, between rings, between hosts, a label; rad between groups
-    var SPINE_GAP = 104, SPINE_MAXR = 260;   // px: between neighbouring spines (a 40 px diamond each side, a label under), the spine ring's cap (leaves at 340)
+    var SPINE_GAP = 104, SPINE_MAXR = 260;   // px: between neighbouring spines (a diamond each side, 80 across, 60 above 8 spines, a label under), the spine ring's cap (leaves at 340)
     function topoRadialPlace() {{
         var byGroup = function(gs) {{ return topoNodesData.filter(function(n) {{ return gs.indexOf(n.group) > -1; }}); }};
         var leavesOf = {{}};   // a host's leaves: its links' leaves, and through a bond node its members' leaves
@@ -2532,7 +2618,7 @@ def _w_checks(checks):
 #   Topology: red, an uplink verdict "down"; amber, a capacity or "?" verdict, or a slow cross-rail run
 
 #   Connection Health: the NICs that ran slow or are down (_slow); red, one CRITICAL or DOWN; amber, SLOW only.
-#   Clients: the same, client NICs. Needs Repair: the CRITICAL or DOWN ones (_repair), counted, red; else green
+#   Needs Repair: the CRITICAL or DOWN ones (_repair), counted, red; else green
 
 #   Temperatures: red, a crit or high sensor; amber, near or rise. NIC / Optics: amber, a NIC with drops
 #   Run checks: red, a flagged check. Coloured numbers count faults only; Test Distribution, Raw Data: no dot
@@ -2550,7 +2636,6 @@ def _tab_states(slow, hot, findings, temps_flagged, temps_bad, n_checks, n_drops
             'tab-slow': TAB_RED if _repair(slow) else TAB_GREEN,
             'tab-temps': TAB_RED if temps_bad else TAB_AMBER if temps_flagged else TAB_GREEN,
             'tab-nic': TAB_AMBER if n_drops else TAB_GREEN,
-            'tab-clients': nic([x for x in slow if x['role'] == 'client']),
             'tab-checks': TAB_RED if n_checks else TAB_GREEN}
 
 
@@ -2570,7 +2655,7 @@ def _where_html(findings):
     items = ''.join(f'<li>{line(f)}</li>' for f in findings)   # one list, the first line like the rest
     return (f'<div class="card mb-3 where"><div class="card-header"><b>Where to look first</b> '
             f'<span style="color:#8899aa;">{len(findings)} findings, heat and slowness on the same host first</span></div>'
-            f'<div class="card-body"><ul class="where-list mb-0">{items}</ul></div></div>')
+            f'<div class="card-body scroll"><ul class="where-list mb-0">{items}</ul></div></div>')
 
 
 def _uplinks(data):
@@ -2746,12 +2831,13 @@ def _host_rx_html(rx, crx=None):
             'Klog: kernel log lines naming AER, PCIe, '
             'link down, timeouts, hung tasks or OOM (a lead, not a verdict). Raw per-host system info: sysinfo/&lt;host&gt;/ in the bundle.')
     return (f'<div class="card mb-3"><div class="card-header">{head}</div>'
-            f'<div class="card-body" style="max-height:420px; overflow-y:auto;">'
+            f'<div class="card-body scroll">'
             f'<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">{note}</p>{tb}</div></div>')
 
 
 def _clients_html(data):
-    """Clients card: per client NIC its runs to and from the backends, all-at-once totals, routes, anomalies, exclusions."""
+    """Clients card, at the foot of Connection Health: per client NIC its runs to and from the backends, all-at-once
+    totals, undeclared routes, failed client runs; preflight and not-tested rows are Run checks'."""
     cl = data.get('clients')
     if not cl:
         return ''
@@ -2768,23 +2854,21 @@ def _clients_html(data):
     rows = ''.join(f"<tr><td>{escape(n['host'])}</td><td>{escape(n['nic'])}</td><td>{escape(n['ip'])}</td><td>{line(n)}</td>"
                    f"{dcell(n, 'C->B')}{dcell(n, 'B->C')}<td>{n.get('retr', 0):,}</td><td>{badge(n['status'])}</td></tr>" for n in nics)
     cnt = Counter(n['status'] for n in cl['nics'])
+    hosts = len({n['host'] for n in cl['nics']})
     tot = ''.join(f"<tr><td>{escape(t['phase'])}</td><td>{escape(t['dir'])}</td><td>{t['flows']}</td><td>{t['gbps']:.1f}</td>"
                   f"<td>{t['exp']:.1f}</td><td>{100 * t['gbps'] / t['exp'] if t['exp'] else 0:.0f}%</td><td>{badge(t['status'])}</td></tr>"
                   for t in cl['totals'])
     und = [r for r in cl['routes'] if r[5] == 'undeclared']
-    an = [a for a in data.get('anomalies', []) if len(a) > 1 and (a[1].startswith('client_') or a[1] == 'shared_leaf')]
-    ex = [n for n in data['not_tested'] if n['kind'] in ('client', 'client path')]
-    hosts = len({n['host'] for n in cl['nics']})
     sec = lambda title, head, body: (f'<h6 class="mt-2">{title}</h6><table class="table table-sm table-striped"><thead><tr>'
                                      + ''.join(f'<th>{h}</th>' for h in head) + f'</tr></thead><tbody>{body}</tbody></table>')
-    out = (f'<div class="card mb-3"><div class="card-header">Clients: {len(cl["nics"])} data NICs on {hosts} clients | '
+    out = (f'<div class="card mb-3 mt-3"><div class="card-header">Clients: {len(cl["nics"])} data NICs on {hosts} clients | '
            f'<b class="stat-good">{cnt["OK"]}</b> OK, <b class="{"stat-warn" if cnt["SLOW"] else "stat-good"}">{cnt["SLOW"]}</b> slow, '
            f'<b class="{"stat-bad" if cnt["CRITICAL"] else "stat-good"}">{cnt["CRITICAL"]}</b> critical'
            + (f', <b class="stat-bad">{len(cl["nics"]) - cnt["OK"] - cnt["SLOW"] - cnt["CRITICAL"]}</b> no result'
               if len(cl['nics']) > sum(cnt[k] for k in cls) else '')
            + f' | ratio {escape(meta.get("client_ratio", "?"))}, {escape(meta.get("client_waves", "?"))} waves | '
            f'{len(und)} undeclared routes | {len(cl["errors"])} failed runs</div>'
-           '<div class="card-body" style="max-height:520px; overflow-y:auto;">'
+           '<div class="card-body scroll">'
            f'<p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Each run is judged against expected = min(client line, backend rail '
            f'line / share), share = runs on that backend NIC at once. OK &ge; {ok}% of expected, slow &ge; {slow}%, else critical. Per NIC: '
            f'average of its wave runs (C1 client->backend, C2 backend->client), or of the all-at-once runs (F1/F2) when it had no waves; '
@@ -2797,12 +2881,6 @@ def _clients_html(data):
         out += sec('Undeclared client routes (the unsourced route to a backend leaves by a NIC that is not a declared data NIC)',
                    ['Client', 'Client NIC', 'Backend rail', 'Backend IP', 'Egress', ''],
                    ''.join('<tr>' + ''.join(f'<td>{escape(c)}</td>' for c in r[:6]) + '</tr>' for r in und))
-    if an:
-        out += sec('Client findings (preflight)', ['Subject', 'Finding', 'Detail'],
-                   ''.join(f"<tr><td>{escape(a[0])}</td><td>{escape(a[1])}</td><td>{escape(a[2] if len(a) > 2 else '')}</td></tr>" for a in an))
-    if ex:
-        out += sec('Client paths and NICs not tested', ['Kind', 'What', 'Why'],
-                   ''.join(f"<tr><td>{escape(n['kind'])}</td><td>{escape(n['what'])}</td><td>{escape(n['why'])}</td></tr>" for n in ex))
     if cl['errors']:
         out += sec('Failed client runs', ['Phase', 'From', 'To', 'Error'],
                    ''.join(f"<tr><td>{escape(e['phase'])} {escape(e['wave'])}</td><td>{escape(e['src'])}</td><td>{escape(e['dst'])}</td>"
@@ -2835,7 +2913,7 @@ def _uplinks_html(u):
     cols = ('<th>Leaf</th>' + ('<th>Side</th>' if u.get('clients') else '') + '<th>Phase</th><th>Out</th><th>In</th>'
             + ('<th>Declared</th><th>Busiest</th>' if J else '')
             + '<th>Downlinks</th>' + ('<th>Oversubscribed</th><th>Verdict</th>' if J else ''))
-    return (f'<div class="card mb-3"><div class="card-header">{head}</div><div class="card-body">'
+    return (f'<div class="card mb-3"><div class="card-header">{head}</div><div class="card-body{" scroll" if u["rows"] else ""}">'
             + ''.join(f'<p class="text-warning mb-1">{escape(x)}</p>' for x in u['notes'])
             + (f'<table class="table table-sm table-striped"><thead><tr>{cols}</tr></thead><tbody>{rows}</tbody></table>'
                if u['rows'] else '') + '</div></div>')
@@ -2996,7 +3074,7 @@ def _clients(data, read_file):
                           'dir': 'C->B' if c_src else 'B->C', 'expected': round(exp, 1), 'rail': ipr.get(bip, '?')})
         elif ',ERROR' in line:
             p = line.split(',', 2)
-            errors.append({'phase': ph, 'wave': wv, 'src': p[0], 'dst': p[1] if len(p) > 1 else '',
+            errors.append({'iteration': it, 'phase': ph, 'wave': wv, 'src': p[0], 'dst': p[1] if len(p) > 1 else '',
                            'why': p[2][len('ERROR'):].strip() if len(p) > 2 else ''})
     def judge(g, e):
         pct = 100 * g / e if e else 0
@@ -3527,7 +3605,7 @@ def parse_tar_archive(filepath):
         if (ce is not None and (ct or 0) < ce) or (cp is not None and (co or 0) < cp):
             problems.append(f"Client coverage: clients tested {meta.get('clients_tested', '?')}/{meta.get('clients_expected', '?')}, "
                             f"client {'path checks passed' if no_load else 'paths with a result'} {meta.get('client_paths_ok', '?')}/"
-                            f"{meta.get('client_paths_planned', '?')} (see Clients and Not tested).")
+                            f"{meta.get('client_paths_planned', '?')} (see Not tested under Run checks).")
     hosts = _int(meta.get('total_hosts')) or 0
     if hosts and data['nic_inventory']['total'] == 0:
         problems.append('No NIC diagnostics were collected.')

@@ -88,10 +88,10 @@ backend,*,svc-fabric
 #   window (1 s unless set) of the cluster's own traffic. The busy check reports but doesn't stop the run.
 # FF_SKIP_IPERF=0
 #
-#   1 = where lldpcli is missing, read each NIC's LLDP with tcpdump instead (0): one 70 s
-#   capture per host, all NICs at once, never promiscuous (the LLDP group MAC joins the
-#   NIC's filter for the capture only). A NIC whose firmware LLDP agent takes the frames
-#   is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
+#   1 = where lldpcli is missing or lldpd is not running, read each NIC's LLDP with tcpdump
+#   instead (0): one 70 s capture per host, all NICs at once, never promiscuous (the LLDP
+#   group MAC joins the NIC's filter for the capture only). A NIC whose firmware LLDP agent
+#   takes the frames is reported as fw_lldp_on, never changed. Needs tcpdump and timeout on the host.
 # FF_LLDP=0
 #
 #   after the TCP phases, run the same pairs (and client runs) with UDP and no rate cap; 0 = off

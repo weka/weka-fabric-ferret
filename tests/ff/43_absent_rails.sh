@@ -3,7 +3,7 @@
 # fleet: 112 GPU hosts with bond0 only made 224 rail rows and 113 "Rails not usable" lines): one counted line per
 # rail and state in the log, no per-NIC row for it (table and dashboard); rails.txt keeps every host's row; any
 # other bad rail (h4's B is link DOWN in the fake) keeps its full line and its row
-# checks: 38
+# checks: 39
 # secs: 215
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 tbl() { grep -E '^ +(Role|backend|client) ' <<<"$1"; }
@@ -121,18 +121,27 @@ render nl; prc=$?
 chk "no LLDP, nothing declared: the log says 4 of 4 rail NICs have no LLDP neighbour and 4 runs are left out; the dashboard note says the same (control: the run above printed no such line)" \
     "grep -qx '  Uplinks: 4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' <<<\"\$out\" && grep -q '4 of 4 rail NICs have no LLDP neighbour; their 4 runs are left out of the leaf totals.' $W/nl.html && [ $prc = 0 ]" "rc=$rc prc=$prc $(grep -i 'lldp' <<<"$out" | tr '\n' '|')"
 # h21 has no lldpcli (its tools sweep): the log offers the opt-in capture once, by name (11-02)
-chk "no lldpcli on 1 host: the log names FF_LLDP once, in 'lldpcli not installed on 1 hosts; FF_LLDP=1 captures LLDP with tcpdump' (control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
-    "[ \$(grep -c FF_LLDP <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 hosts; FF_LLDP=1 captures LLDP with tcpdump' <<<\"\$out\" && [ \$(grep -c FF_LLDP $W/xs.log) = 0 ]" "$(grep -c FF_LLDP <<<"$out") lines: $(grep FF_LLDP <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP $W/xs.log)"
+chk "no lldpcli on 1 host: the log names FF_LLDP once, in 'lldpcli not installed on 1 host; FF_LLDP=1 captures LLDP with tcpdump' (singular at 1, 11-04), after the diag runs (it follows the 'Collecting NIC diagnostics' line; control: the cross-group run above, lldpcli everywhere, names it 0 times)" \
+    "[ \$(grep -c FF_LLDP <<<\"\$out\") = 1 ] && grep -q 'lldpcli not installed on 1 host; FF_LLDP=1 captures LLDP with tcpdump' <<<\"\$out\" && [ \$(grep -n 'lldpcli not installed on' <<<\"\$out\" | cut -d: -f1) -gt \$(grep -n 'Collecting NIC diagnostics' <<<\"\$out\" | cut -d: -f1) ] && [ \$(grep -c FF_LLDP $W/xs.log) = 0 ]" "$(grep -c FF_LLDP <<<"$out") lines: $(grep -n 'FF_LLDP\|Collecting NIC diag' <<<"$out" | tr '\n' '|'); xs: $(grep -c FF_LLDP $W/xs.log)"
 # the reasons (FAKE_LLDPWHY=1, 11-02): h21 has no lldpcli, h22's lldpcli sees nothing; lldp_reasons.txt and one log line
 chk "no-neighbour reasons: lldp_reasons.txt holds h21's 2 ports as no_lldpcli and h22's 2 as no_neighbour, and the log says '# LLDP: 4 ports name no neighbour (no_lldpcli 2, no_neighbour 2; lldp_reasons.txt)' once (control: the cross-group run above, every port seen, has the file empty and no such line)" \
     "[ \"\$(bfile nl lldp_reasons.txt | sort | paste -sd '|' -)\" = 'h21 enp196s0np0 no_lldpcli|h21 enp5s0np0 no_lldpcli|h22 enp196s0np0 no_neighbour|h22 enp5s0np0 no_neighbour' ] && [ \$(grep -cx '# LLDP: 4 ports name no neighbour (no_lldpcli 2, no_neighbour 2; lldp_reasons.txt)' <<<\"\$out\") = 1 ] && tar -tzf \$(bundle xs) | grep -q '/lldp_reasons.txt\$' && [ \$(bfile xs lldp_reasons.txt | grep -c .) = 0 ] && [ \$(grep -c '^# LLDP: ' $W/xs.log) = 0 ]" \
     "nl file: $(bfile nl lldp_reasons.txt | sort | paste -sd '|' -); nl lines: $(grep '^# LLDP: ' <<<"$out" | tr '\n' '|'); xs file in bundle $(tar -tzf $(bundle xs) | grep -c '/lldp_reasons.txt$'), rows $(bfile xs lldp_reasons.txt | grep -c .), lines $(grep -c '^# LLDP: ' $W/xs.log)"
-# the capture on: h21 and h22 lack lldpcli, h21 also tcpdump; only h21 is counted (11-02); no switch answers, so
-# every port gets a reason, and the reasons line prints with FF_SKIP_IPERF=1 too (Frank's question, 11-03)
-out=$(xrun lt FF_LLDP=1 FAKE_NO_LLDPCLI=h21,h22 FAKE_NO_TCPDUMP=h21 FAKE_NO_LLDP=all FAKE_LLDPWHY=1 FF_HOSTS=198.18.0.21-22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 60 $B $C 1); rc=$?
-chk "FF_LLDP=1, no lldpcli on 2 hosts, no tcpdump on 1 of them: 'lldpcli not installed on 2 hosts; FF_LLDP=1: capturing' once and 'tcpdump not installed on 1 hosts; LLDP capture skipped there' once (control: h22, tcpdump present, not counted)" \
-    "[ \$(grep -c 'lldpcli not installed on 2 hosts; FF_LLDP=1: capturing LLDP with tcpdump' <<<\"\$out\") = 1 ] && [ \$(grep -c 'tcpdump not installed on' <<<\"\$out\") = 1 ] && grep -q 'tcpdump not installed on 1 hosts; LLDP capture skipped there' <<<\"\$out\"" "rc=$rc $(grep -E 'not installed on' <<<"$out" | tr '\n' '|')"
+# the capture on: h21 lacks lldpcli and tcpdump, h22 has lldpcli but lldpd is down (scope 3, 11-04); only h21 is
+# counted for tcpdump; no switch answers, so every port gets a reason, and the reasons line prints with
+# FF_SKIP_IPERF=1 too (the operator's question, 11-03)
+out=$(xrun lt FF_LLDP=1 FAKE_NO_LLDPCLI=h21 FAKE_LLDPD_DOWN=h22 FAKE_NO_TCPDUMP=h21 FAKE_NO_LLDP=all FAKE_LLDPWHY=1 FF_HOSTS=198.18.0.21-22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 60 $B $C 1); rc=$?
+pre='FF_LLDP=1: hosts without lldpcli or a running lldpd get a 70 s tcpdump LLDP capture (1 host without lldpcli)'
+chk "FF_LLDP=1, no lldpcli on 1 host, lldpd down on 1, no tcpdump on the first: right after 'Collecting NIC diagnostics...' the line '$pre' once; after the diag runs 'lldpcli not installed on 1 host, lldpd not running on 1 host; FF_LLDP=1: captured LLDP with tcpdump there' once and 'tcpdump not installed on 1 host; LLDP capture skipped there' once (control: h22, tcpdump present, not counted)" \
+    "[ \$(grep -cF \"\$pre\" <<<\"\$out\") = 1 ] && [ \"\$(grep -A1 'Collecting NIC diagnostics' <<<\"\$out\" | sed -n 2p | sed 's/^# //')\" = \"\$pre\" ] && [ \$(grep -c 'lldpcli not installed on 1 host, lldpd not running on 1 host; FF_LLDP=1: captured LLDP with tcpdump there' <<<\"\$out\") = 1 ] && [ \$(grep -c 'tcpdump not installed on' <<<\"\$out\") = 1 ] && grep -q 'tcpdump not installed on 1 host; LLDP capture skipped there' <<<\"\$out\"" "rc=$rc $(grep -A1 'Collecting NIC diagnostics' <<<"$out" | tr '\n' '|') $(grep -E 'not installed on|not running on' <<<"$out" | tr '\n' '|')"
 chk "FF_SKIP_IPERF=1 with FF_LLDP=1: '# LLDP: 4 ports name no neighbour (no_frame 2, tcpdump_absent 2; lldp_reasons.txt)' once (a tie: by name), lldp_reasons.txt holding h21's 2 ports tcpdump_absent and h22's 2 no_frame (control: the nl run's line is a different one)" \
     "[ \$(grep -cx '# LLDP: 4 ports name no neighbour (no_frame 2, tcpdump_absent 2; lldp_reasons.txt)' <<<\"\$out\") = 1 ] && [ \"\$(bfile lt lldp_reasons.txt | sort | paste -sd '|' -)\" = 'h21 enp196s0np0 tcpdump_absent|h21 enp5s0np0 tcpdump_absent|h22 enp196s0np0 no_frame|h22 enp5s0np0 no_frame' ] && [ \$(grep -c '^# LLDP: 4 ports name no neighbour (no_lldpcli 2, no_neighbour 2; lldp_reasons.txt)\$' $W/nl.log) = 1 ]" \
     "lt lines: $(grep '^# LLDP: ' <<<"$out" | tr '\n' '|') file: $(bfile lt lldp_reasons.txt | sort | paste -sd '|' -); nl: $(grep '^# LLDP: ' $W/nl.log)"
+# lldpd down with FF_LLDP=0 (scope 3, 11-04): h21's lldpcli is installed but lldpd is stopped (its rail A NIC a bond),
+# h22's lldpd is up and sees nothing. The reasons file and the "# LLDP:" line only copy the fake's @@LLDPWHY rows, so
+# they are not pinned here (45 guards the remote's lldpd_down choice); the collector's own lldpd count line is
+out=$(xrun ld FAKE_LLDPD_DOWN=h21 FAKE_BOND_LLDP=h21 FAKE_NO_LLDP=h22 FAKE_LLDPWHY=1 FF_HOSTS=198.18.0.21-22 FF_ITER=1 FF_SKIP_IPERF=1 timeout 60 $B $C 1); rc=$?
+chk "lldpd down on h21, FF_LLDP unset: the log says 'lldpd not running on 1 host; FF_LLDP=1 captures LLDP with tcpdump' once and 'lldpcli not installed' 0 times (control: the nl run says 'lldpcli not installed' once and 'lldpd not running' 0 times)" \
+    "[ \$(grep -c 'lldpd not running on 1 host; FF_LLDP=1 captures LLDP with tcpdump' <<<\"\$out\") = 1 ] && [ \$(grep -c 'lldpcli not installed' <<<\"\$out\") = 0 ] && [ \$(grep -c 'get a 70 s tcpdump LLDP capture' <<<\"\$out\") = 0 ] && [ \$(grep -c 'lldpcli not installed' $W/nl.log) = 1 ] && [ \$(grep -c 'lldpd not running' $W/nl.log) = 0 ] && [ \$(grep -c 'get a 70 s tcpdump LLDP capture' $W/lt.log) = 1 ]" \
+    "ld: $(grep -E 'not installed|not running' <<<"$out" | tr '\n' '|'); nl: $(grep -E 'not installed|not running' $W/nl.log | tr '\n' '|')"
 finish
