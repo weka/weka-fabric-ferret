@@ -18,8 +18,10 @@ END { for (i = 1; i <= n; i++) {
           who = sprintf("    %s %s -> %s %s: %.3f Gb/s paced, ", host[S[i]], S[i], h, D[i], paced)
           if (k in CS) {
               pc = 100 * CL[k] / CS[k]; keep = CL[k] / CS[k] * WIRE[k]; if (keep > share) keep = share
-              printf "%s %s %s %s %.3f %d %d %.3f %d %s %d %s\n", t, WV[k], S[i], D[i], paced, CL[k], CS[k], pc, secs, GB[k], share - keep + 0.5, (CL[k] ? "persists" : "gone") >> rows
-              if (CL[k]) printf "%s%d/%d lost (%.3f%%): loss persists at a paced rate (%.3f %%): lossy path\n", who, CL[k], CS[k], pc, pc
+              mv = int(share - keep + 0.5); rd = !CL[k] ? "gone" : mv > 0 ? "part" : "persists"
+              printf "%s %s %s %s %.3f %d %d %.3f %d %s %d %s\n", t, WV[k], S[i], D[i], paced, CL[k], CS[k], pc, secs, GB[k], mv, rd >> rows
+              if (rd == "part") printf "%s%d/%d lost (%.3f%%): that share persists at a paced rate and stays flagged; the rest was overload against a rate limit of about %s Gb/s between the hosts\n", who, CL[k], CS[k], pc, GB[k]
+              else if (rd == "persists") printf "%s%d/%d lost (%.3f%%): loss persists at a paced rate (%.3f %%): lossy path\n", who, CL[k], CS[k], pc, pc
               else printf "%s%d/%d lost (%.3f%%): loss gone at a paced rate: overload against a rate limit of about %s Gb/s between the hosts\n", who, CL[k], CS[k], pc, GB[k]
           } else {
               printf "%s %s %s %s %.3f - - - %d %s 0 no_result\n", t, WV[k], S[i], D[i], paced, secs, GB[k] >> rows

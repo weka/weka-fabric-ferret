@@ -3198,8 +3198,10 @@ udp_confirm() {
               who = sprintf("    %s %s -> %s %s: %.3f Gb/s paced, ", host[S[i]], S[i], h, D[i], paced)
               if (k in CS) {
                   pc = 100 * CL[k] / CS[k]; keep = CL[k] / CS[k] * WIRE[k]; if (keep > share) keep = share
-                  printf "%s %s %s %s %.3f %d %d %.3f %d %s %d %s\n", t, WV[k], S[i], D[i], paced, CL[k], CS[k], pc, secs, GB[k], share - keep + 0.5, (CL[k] ? "persists" : "gone") >> rows
-                  if (CL[k]) printf "%s%d/%d lost (%.3f%%): loss persists at a paced rate (%.3f %%): lossy path\n", who, CL[k], CS[k], pc, pc
+                  mv = int(share - keep + 0.5); rd = !CL[k] ? "gone" : mv > 0 ? "part" : "persists"
+                  printf "%s %s %s %s %.3f %d %d %.3f %d %s %d %s\n", t, WV[k], S[i], D[i], paced, CL[k], CS[k], pc, secs, GB[k], mv, rd >> rows
+                  if (rd == "part") printf "%s%d/%d lost (%.3f%%): that share persists at a paced rate and stays flagged; the rest was overload against a rate limit of about %s Gb/s between the hosts\n", who, CL[k], CS[k], pc, GB[k]
+                  else if (rd == "persists") printf "%s%d/%d lost (%.3f%%): loss persists at a paced rate (%.3f %%): lossy path\n", who, CL[k], CS[k], pc, pc
                   else printf "%s%d/%d lost (%.3f%%): loss gone at a paced rate: overload against a rate limit of about %s Gb/s between the hosts\n", who, CL[k], CS[k], pc, GB[k]
               } else {
                   printf "%s %s %s %s %.3f - - - %d %s 0 no_result\n", t, WV[k], S[i], D[i], paced, secs, GB[k] >> rows
@@ -4645,7 +4647,7 @@ main() {
                 echo "  Lost datagrams ${r[0]} of ${r[1]}: sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
                 local cf=$COLLECT_DIR/udp_confirm.txt   # written once a paced confirm run happened (udp_confirm)
                 echo "  Expected from overload: ${r[7]}$( [[ -e $cf ]] && echo "; rate limit between the hosts (paced run): ${r[10]}"); unaccounted beyond it (likely fabric): ${r[8]}"
-                [[ -e $cf ]] && awk '!/^#/ { n++; c[$13]++ } END { printf "  Paced confirm runs: %d (udp_confirm.txt): %d loss gone, %d loss persists, %d no result\n", n, c["gone"], c["persists"], c["no_result"] }' "$cf"
+                [[ -e $cf ]] && awk '!/^#/ { n++; c[$13]++ } END { printf "  Paced confirm runs: %d (udp_confirm.txt): %d loss gone, %d part, %d loss persists, %d no result\n", n, c["gone"], c["part"], c["persists"], c["no_result"] }' "$cf"
             else
                 echo "  No UDP results collected."
             fi
