@@ -73,6 +73,10 @@ cnics() { if [[ $h == c4 ]]; then echo "ens1f0 198.19.10.4 100000Mb/s"; echo "en
 cnic() { cnics | awk -v k="$1" '$1 == k'; }   # one client NIC's line (empty if not a data NIC)
 # host owning a data IP (for the iperf3 listen check)
 iphost() { case $1 in 198.19.[123].*) echo "h${1##*.}" ;; 198.19.1[01].*) echo "c${1##*.}" ;; esac; }
+# FAKE_UDP_PATH="<dst host>:cap=<Gbps>,loss=<ppm>,cfail=1 ...": UDP into that host. cap = what gets through of an uncapped
+# 250G (a rate limit: no loss under it), loss = lost at any rate, cfail = a paced run gets no result
+upath() { local x; for x in $FAKE_UDP_PATH; do [[ ${x%%:*} == "$(iphost "$1")" ]] && { echo "${x#*:}"; return; }; done; }
+pval() { local kv; for kv in ${ps//,/ }; do [[ ${kv%%=*} == "$1" ]] && { echo "${kv#*=}"; return; }; done; }   # one key of $ps
 # the sweep's privilege probe (sh -c <probe> ff-probe): "uid escalator". uid 0 for root, else 1000; the escalator from
 # FAKE_ESC="target:esc ..." (spaces as _, or none), else sudo_-n (the fake runs anything as root)
 if [[ ${args[-1]} == ff-probe ]]; then
@@ -269,6 +273,7 @@ case $script in
         sp=400000Mb/s; [[ $r == 2 && -n $FAKE_SPEED_B ]] && sp=${FAKE_SPEED_B}Mb/s   # FAKE_SPEED_B: rail B speed (Mb/s)
         [[ $h == h3 && $r == 2 ]] && sp=200000Mb/s
         [[ ( $h == "$FAKE_BOND_DOWN" || $h == "$FAKE_BOND_DOWN_SEEN" ) && $r == 1 ]] && sp=200000Mb/s   # FAKE_BOND_DOWN=h: h's rail A NIC is a 2-slave bond with one slave down (with FAKE_BOND_LLDP that member's LLDP row names no switch); FAKE_BOND_DOWN_SEEN=h: the same, but the down member still reports its switch
+        [[ -n $FAKE_NOSPEED ]] && sp=Unknown!   # FAKE_NOSPEED=1: no backend NIC reports a speed (a virtio NIC)
         echo "@@NIC_DIAG $h $nic 198.19.$r.$n $sp 12345 1 2 3 4 0 0 -1.2 -1.5 n/a n/a 48.5"
         sw=leaf$r.example; case " ${FAKE_NO_LLDP//,/ } " in *" $h "*|*" all "*) sw=unknown ;; esac   # FAKE_NO_LLDP: these hosts (or all) see no LLDP neighbour
         [[ $ld == 1 && $lt != 1 ]] && sw=unknown
@@ -354,7 +359,7 @@ case $script in
 *"fabric_ferret.lock"*)
     f=$FSTATE/lock.$h
     case $1 in
-        take) if [[ -f $f ]] && ! grep -q "^$2 " "$f"; then echo "BUSY $(cut -d' ' -f2- "$f") (lock refreshed 30s ago)"; else echo "$2 $3" > "$f"; echo OK; fi ;;
+        take) if [[ -f $f ]] && ! grep -q "^$2 " "$f"; then echo "BUSY $(cut -d' ' -f2- "$f") (lock refreshed 30s ago)"; else echo "$2 $3" > "$f"; echo "$4" > "$FSTATE/lockmax.$h"; echo OK; fi ;;   # lockmax.<h>: the max age the run asked for
         touch) echo OK ;;
         release) [[ -f $f ]] && grep -q "^$2 " "$f" && rm -f "$f"; echo OK ;;
     esac ;;
@@ -463,7 +468,24 @@ case $script in
     echo "UDP $*" >> $FSTATE/iperf_args.log
     lost=10; [[ $2 == 198.19.1.2 || $2 == 198.19.2.2 ]] && lost=1050
     g=250; [[ -n $FAKE_UDP_LOST ]] && { lost=$FAKE_UDP_LOST; g=$(awk -v l=$lost 'BEGIN {printf "%.1f", 250 * (1000000 - l) / 1000000}'); }   # below h2's +1000 socket drops: host counters exceed the loss; the sender keeps 250, the receiver gets the rest
+    ps=$(upath "$2"); l=$(pval loss)
+    [[ -n $ps ]] && read -r lost g <<<"$(awk -v c="$(pval cap)" -v l="${l:-0}" 'BEGIN { d = 1000000; if (c != "") d = d * c / 250; d = int(d * (1 - l / 1000000) + 0.5); printf "%d %.1f", 1000000 - d, 250 * d / 1000000 }')"
     echo "[SUM]   0.00-${5}.00  sec  29.1 GBytes  $g Gbits/sec  0.002 ms  $lost/1000000 (0.1%)  receiver" ;;
+*"iperf3 "*"-u -b "*)
+    # a paced UDP run (the confirm run): its flags are read off the script's iperf3 line, each operand a positional
+    # or a literal. Logged as "UDPC src dst port streams secs len tos bps". 250G sent is 1000000 datagrams, as uncapped.
+    argv=("" "$@")
+    opt() { local re="[[:space:]]-$1[[:space:]]+\"?(\\\$\\{?([0-9]+)|[^[:space:]\"]+)"; [[ $script =~ $re ]] || return 0
+            if [[ -n ${BASH_REMATCH[2]} ]]; then echo "${argv[${BASH_REMATCH[2]}]}"; else echo "${BASH_REMATCH[1]}"; fi; }
+    src=$(opt B); dst=$(opt c); bps=$(opt b); np=$(opt P); secs=$(opt t)
+    [[ $bps =~ ^[0-9.]+[KMG]?$ && -n $dst && $np =~ ^[0-9]+$ && $secs =~ ^[0-9]+$ ]] || { echo "ERROR rc=1 fake ssh: cannot read the paced iperf3 call: -b '$bps' -c '$dst' -P '$np' -t '$secs'"; exit 0; }
+    echo "UDPC $src $dst $(opt p) $np $secs $(opt l) $(x=$(opt S); echo "${x:--}") $bps" >> $FSTATE/iperf_args.log
+    ps=$(upath "$dst"); [[ -n $(pval cfail) ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server: Connection refused"; exit 0; }
+    l=$(pval loss); [[ -z $ps && -n $FAKE_UDP_LOST ]] && l=$FAKE_UDP_LOST
+    awk -v b="$bps" -v np="$np" -v c="$(pval cap)" -v l="${l:-0}" -v t="$secs" 'BEGIN {
+        m = 1; if (b ~ /K$/) m = 1e3; if (b ~ /M$/) m = 1e6; if (b ~ /G$/) m = 1e9; T = (b + 0) * m * np / 1e9
+        sent = int(1000000 * T / 250 + 0.5); d = sent; if (c != "" && T > c) d = d * c / T; d = int(d * (1 - l / 1000000) + 0.5)
+        printf "[SUM]   0.00-%s.00  sec  %.1f GBytes  %.3f Gbits/sec  0.002 ms  %d/%d (%.2g%%)  receiver\n", t, T * t / 8, sent ? T * d / sent : 0, sent - d, sent, sent ? 100 * (sent - d) / sent : 0 }' ;;
 *"retransmits:"*)
     [[ -n $FAKE_IPERF_FAIL ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server: Connection refused"; exit 0; }
     # FAKE_IPERF_NOROUTE="ip ip": a TCP or UDP run to one of these destinations fails as a host firewall's reject reads
