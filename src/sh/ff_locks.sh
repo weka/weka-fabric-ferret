@@ -4,7 +4,7 @@ take_locks() {
     local k busy other
     RUN_ID="$(hostname -s)-$$-$START_TS"
     cross_waves $(( ${#ELIG[@]} / 2 ))   # phase 2 waves stretch an iteration
-    local max=$(( 2 * ((1 + XW) * FF_DURATION + (FF_UDP == 1 ? (1 + XW) * FF_UDP_DURATION : 0)) + 300 ))
+    local max=$(( 2 * ((1 + XW) * FF_DURATION + (FF_UDP == 1 ? (1 + XW) * (FF_UDP_DURATION + (FF_UDP_CONFIRM == 1 ? UDP_CONFIRM_SECS : 0)) : 0)) + 300 ))   # confirm runs follow a UDP phase
     local info="since=$(date -u +%Y-%m-%dT%H:%M:%SZ),from=$(hostname -s),user=$(id -un)"   # no spaces: args are re-split remotely
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle

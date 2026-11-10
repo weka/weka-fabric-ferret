@@ -99,6 +99,12 @@ Optional (default)
                    is expected loss (udp_expected.txt); only unaccounted loss beyond it is flagged.
                    With FF_TOS the whole TOS byte, ECN bits included, is sent.
   FF_UDP_DURATION  seconds per UDP run (FF_DURATION)
+  FF_UDP_CONFIRM (1)  when a UDP phase leaves a host with unaccounted loss beyond expected (FF_UDP_CONFIRM_PCT %
+                   or more of the datagrams sent to it), repeat each run into it once: 5 s at 80% of the rate
+                   it delivered. Loss gone at the paced rate was overload against a rate limit between the
+                   hosts (reported with the limit, no longer flagged); loss that persists stays flagged.
+                   udp_confirm.txt. 0 = off.
+  FF_UDP_CONFIRM_PCT (1)  that threshold, a whole number from 0 to 100 (0 = on any such loss)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
                    kill each other's iperf3 servers and both get garbage)
   FF_MESH (1)      before load, ping every tested host's rail IPs from every other one's (same rail and
@@ -381,7 +387,12 @@ main() {
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
     [[ -z $FF_UDP ]] && FF_UDP=$(( ! FF_SKIP_IPERF ))   # UDP by default, except with no load
     : "${FF_UDP_DURATION:=$FF_DURATION}"
+    : "${FF_UDP_CONFIRM:=1}" "${FF_UDP_CONFIRM_PCT:=1}"
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
+    [[ $FF_UDP_CONFIRM == 0 || $FF_UDP_CONFIRM == 1 ]] || die "FF_UDP_CONFIRM must be 0 or 1, got '$FF_UDP_CONFIRM'"
+    [[ $FF_UDP_CONFIRM_PCT =~ ^[0-9]+$ ]] && (( 10#$FF_UDP_CONFIRM_PCT <= 100 )) || die "FF_UDP_CONFIRM_PCT must be a whole number from 0 to 100, got '$FF_UDP_CONFIRM_PCT'"
+    [[ $FF_UDP == 1 ]] || FF_UDP_CONFIRM=0   # nothing to confirm without the UDP pass
+    UDP_CONFIRM_SECS=5   # a paced confirm run (udp_confirm)
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
     [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
@@ -1207,7 +1218,9 @@ main() {
                     "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
                 local r; read -r -a r <<<"$(udp_attr "")"
                 echo "  Lost datagrams ${r[0]} of ${r[1]}: sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
-                echo "  Expected from overload: ${r[7]}; unaccounted beyond it (likely fabric): ${r[8]}"
+                local cf=$COLLECT_DIR/udp_confirm.txt   # written once a paced confirm run happened (udp_confirm)
+                echo "  Expected from overload: ${r[7]}$( [[ -e $cf ]] && echo "; rate limit between the hosts (paced run): ${r[10]}"); unaccounted beyond it (likely fabric): ${r[8]}"
+                [[ -e $cf ]] && awk '!/^#/ { n++; c[$13]++ } END { printf "  Paced confirm runs: %d (udp_confirm.txt): %d loss gone, %d loss persists, %d no result\n", n, c["gone"], c["persists"], c["no_result"] }' "$cf"
             else
                 echo "  No UDP results collected."
             fi
@@ -1322,6 +1335,8 @@ main() {
         echo "udp=$FF_UDP"
         echo "iperf=$( (( FF_SKIP_IPERF )) && echo skipped || echo run)"
         echo "udp_duration=$FF_UDP_DURATION"
+        echo "udp_confirm=$FF_UDP_CONFIRM"
+        echo "udp_confirm_pct=$FF_UDP_CONFIRM_PCT"
         echo "coverage=$coverage"
         echo "hosts_expected=$expect"
         echo "hosts_tested=$hosts_tested"

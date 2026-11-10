@@ -106,6 +106,16 @@ backend,*,svc-fabric
 #   seconds per UDP run (FF_DURATION)
 # FF_UDP_DURATION=
 #
+#   when a UDP phase leaves a host with unaccounted loss beyond expected (FF_UDP_CONFIRM_PCT %
+#   or more of the datagrams sent to it), repeat each run into it once: 5 s at 80% of the rate
+#   it delivered. Loss gone at the paced rate was overload against a rate limit between the
+#   hosts (reported with the limit, no longer flagged); loss that persists stays flagged.
+#   udp_confirm.txt. 0 = off.
+# FF_UDP_CONFIRM=1
+#
+#   that threshold, a whole number from 0 to 100 (0 = on any such loss)
+# FF_UDP_CONFIRM_PCT=1
+#
 #   run even if another fabric_ferret run holds a host (two runs on the same hosts
 #   kill each other's iperf3 servers and both get garbage)
 # FF_IGNORE_LOCK=0

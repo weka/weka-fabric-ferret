@@ -400,6 +400,14 @@ if [ -n "$rcv" ]; then echo "$rcv"
 else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
 EOF
 
+# One paced UDP run (a confirm run, udp_confirm): src dst port streams secs len bits_per_s_per_stream [tos] -> as UDP_SCRIPT
+read -r -d '' UDPC_SCRIPT <<'EOF'
+out=$(iperf3 --connect-timeout 5000 -u -b "$7" -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${8:+-S $8} 2>&1); rc=$?
+rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
+if [ -n "$rcv" ]; then echo "$rcv"
+else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+EOF
+
 # Sender-side packet counts per data NIC: "host_nic ip kernel_tx wire_tx". kernel_tx = packets the kernel handed
 # the driver (sysfs, every driver); wire_tx = packets the port sent (mlx5 tx_packets_phy). A bond or VLAN has no
 # port: its lower devices' sum, down to 3 levels ("na" if any has no port counter; a VLAN parent's count includes

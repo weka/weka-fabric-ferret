@@ -256,6 +256,7 @@ run_path() {
     if [[ $mode == udp ]]; then
         local m1=${RMTU[$sk,$sr]:-1500} m2=${RMTU[$dk,$dr]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))   # largest datagram that needs no fragmenting
+        [[ $FF_UDP_CONFIRM == 1 ]] && echo "$PHASE_OUT ${RIP[$sk,$sr]} ${RIP[$dk,$dr]} $FF_PORT $len ${T_TARGET[$sk]}" >> "$WORK/uplan.$ITER.$PHASE"   # for udp_confirm
         ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "${T_TARGET[$sk]}" \
                   "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"

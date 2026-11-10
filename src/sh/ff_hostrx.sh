@@ -61,11 +61,13 @@ client_rx() {
 # beyond = unaccounted above it, per host.
 # Files: udp_expected.txt, ipmap (ip host rail), nicmap (host_nic host rail), UDP results, host counters, NIC drops.
 # -v t="iterN Ux" limits it to one phase. Prints: lost sent socket nic backlog unaccounted over expected beyond tx
-# (over: buckets beyond the loss).
+# (over: buckets beyond the loss). Once udp_confirm.txt exists: beyond is less what the paced runs moved to the
+# rate limit bucket, printed as an 11th number. hosts=1 adds a line per receiving host, "H host beyond sent".
 UDP_ATTR_AWK='
 #@awk ff_udp_attr'
 
-udp_attr() {  # [iterN Ux] -> "lost sent socket nic backlog unaccounted over expected beyond tx"
-    awk -v t="$1" "$UDP_ATTR_AWK" "$COLLECT_DIR/udp_expected.txt" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
-        "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt"
+udp_attr() {  # [iterN Ux] [hosts] -> "lost sent socket nic backlog unaccounted over expected beyond tx [rate_limit]"
+    local cf=$COLLECT_DIR/udp_confirm.txt; [[ -e $cf ]] || cf=
+    awk -v t="$1" -v hosts="${2:-0}" "$UDP_ATTR_AWK" "$COLLECT_DIR/udp_expected.txt" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
+        "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt" ${cf:+"$cf"}
 }

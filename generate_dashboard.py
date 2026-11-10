@@ -54,6 +54,12 @@ def _unseen(l):
     return l.get('why', 'no switch seen')
 
 
+# the UDP card's note on the paced confirm runs, shown only when a bundle has them (udp_confirm.txt)
+PACED_NOTE = (" Paced run = where a host's loss beyond expected reached the threshold, each run into it was repeated for 5 s "
+              "at 80% of the rate it delivered. Loss gone at that rate is overload against a rate limit between the hosts "
+              "(Rate limit column, taken out of Beyond expected); loss that persists stays in Beyond expected.")
+
+
 def generate_html(data, output_path):
     """Generate self-contained interactive HTML dashboard."""
 
@@ -642,6 +648,11 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
         sock = sum(u['sock'] for u in ok_rows); nic = sum(u['nic'] for u in ok_rows)
         back = sum(u['back'] for u in ok_rows); unacc = sum(u['unacc'] for u in ok_rows)
         expd = sum(u['exp'] for u in ok_rows); beyond = sum(u['beyond'] for u in ok_rows)
+        paced = any(u.get('paced') for u in ok_rows)   # paced confirm runs happened: their bucket, columns and note
+        moved = sum(u.get('moved', 0) for u in ok_rows)
+        def paced_cell(u):
+            c = u.get('paced')
+            return '' if not c else 'no result' if c['reading'] == 'no_result' else f"{escape(c['gbps'])} Gbps, {escape(c['pct'])}%"
         udp_beyond = beyond
         txs = sum(u['tx'] for u in ok_rows)
         errs = len(data['udp']) - len(ok_rows)
@@ -660,17 +671,18 @@ counters on {len(exposed)} of {len(fr)} rail NICs{f' ({n_off} with FEC off)' if 
             f"<td>{100 * u['lost'] / u['sent'] if u['sent'] else 0:.3f}</td><td class=\"{'text-warning' if u['tx'] else ''}\">{u['tx']:,}</td><td>{u['sock']:,}</td><td>{u['nic']:,}</td>"
             f"<td>{u['back']:,}</td><td>{u['unacc']:,}</td>"
             f"<td>{u['exp']:,} ({100 * u['exp'] / u['sent'] if u['sent'] else 0:.1f}%)</td>"
+            + (f"<td>{paced_cell(u)}</td><td>{u.get('moved', 0):,}</td>" if paced else '') +
             f"<td class=\"{'text-danger' if u['beyond'] else ''}\">{u['beyond']:,}</td></tr>"
             for u in sorted(ok_rows, key=lambda u: (-u['beyond'], -u['lost'])))
         udp_html = f"""<div class="card mb-3"><div class="card-header">UDP, no rate cap (iperf3 -u -b 0): avg {avg:.1f} Gbps per run |
 lost {lost:,} of {sent:,} datagrams ({100 * lost / sent if sent else 0:.3f}%): sender TX {txs:,}, receiver socket {sock:,}, NIC {nic:,}, kernel backlog {back:,}, unaccounted {unacc:,} |
-expected from overload {expd:,} ({100 * expd / sent if sent else 0:.3f}%) |
+expected from overload {expd:,} ({100 * expd / sent if sent else 0:.3f}%) |{f' rate limit between the hosts (paced run) {moved:,} |' if paced else ''}
 <b class="{'stat-bad' if beyond else 'stat-good'}">unaccounted beyond expected (likely fabric) {beyond:,}</b>{f' | {errs} runs with no result' if errs else ''}</div>
 <div class="card-body scroll">{''.join(f'<p class="text-warning mb-1">{escape(n)}</p>' for n in notes)}
 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Host-side buckets are the receiving host's counters for that phase (not per flow); unaccounted = lost minus those, floored at 0.
-Expected = what overload alone loses: uncapped UDP has no backoff, so when what the senders actually sent into a NIC adds up to more than its line rate, at least 1 - line/offered of the datagrams are lost (all-at-once phases, or a faster sender than receiver). Only unaccounted loss beyond that is flagged. Sender TX = datagrams the sending NIC never put on the wire (sent minus its kernel and port packet counts, shared over its runs), taken out before unaccounted.</p>
+Expected = what overload alone loses: uncapped UDP has no backoff, so when what the senders actually sent into a NIC adds up to more than its line rate, at least 1 - line/offered of the datagrams are lost (all-at-once phases, or a faster sender than receiver). Only unaccounted loss beyond that is flagged. Sender TX = datagrams the sending NIC never put on the wire (sent minus its kernel and port packet counts, shared over its runs), taken out before unaccounted.{PACED_NOTE if paced else ''}</p>
 <table class="table table-sm table-striped"><thead><tr><th>Run</th><th>From</th><th>To</th><th>Gbps</th><th>Lost/Sent</th><th>Loss %</th>
-<th>Sender TX</th><th>Rx socket</th><th>NIC</th><th>Backlog</th><th>Unaccounted</th><th>Expected (overload)</th><th>Beyond expected</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
+<th>Sender TX</th><th>Rx socket</th><th>NIC</th><th>Backlog</th><th>Unaccounted</th><th>Expected (overload)</th>{'<th>Paced run</th><th>Rate limit</th>' if paced else ''}<th>Beyond expected</th></tr></thead><tbody>{rows}</tbody></table></div></div>"""
 
     # runs with no result, grouped by iperf3's reason (the collector's err_hist): runs, distinct destinations, the
     # first four, the phases; a 10-27 field run: 138 runs, one reason, 48 destinations that never answered
@@ -3242,6 +3254,13 @@ def parse_tar_archive(filepath):
                 uexp[(p[0], p[1], p[3], p[4])] = (float(p[7]), int(p[11]) if len(p) >= 12 and p[11].isdigit() else 0)
             except ValueError:
                 pass
+    # (iter, phase, src, dst) -> its paced confirm runs, in order (udp_confirm.txt: iter phase wave src dst paced_gbps
+    # lost sent loss_pct secs limit_gbps moved reading); a bundle from before the confirm runs has no such file
+    uconf = defaultdict(list)
+    for l in read_file('udp_confirm.txt').splitlines():
+        p = l.split()
+        if len(p) >= 13 and not l.startswith('#') and p[11].isdigit():
+            uconf[(p[0], p[1], p[3], p[4])].append({'gbps': p[5], 'pct': p[8], 'moved': int(p[11]), 'reading': p[12]})
     udp, it, ph = [], '', ''
     for line in read_file('iperf3_udp_results.txt').splitlines():
         mm = re.match(r'^###\s+iteration:(\d+)\s+phase:(\S+)', line)
@@ -3257,11 +3276,14 @@ def parse_tar_archive(filepath):
             frac, tx = uexp.get((it, ph, m.group(1), m.group(2)), (0.0, 0))
             unacc = max(0, lost - tx - sock - nic - back)
             expd = round(frac * (sent - tx))
+            cq = uconf.get((it, ph, m.group(1), m.group(2)))
+            cfm = cq.pop(0) if cq else None
+            moved = min(cfm['moved'], max(0, unacc - expd)) if cfm else 0   # to the rate limit bucket
             udp.append({'iter': it, 'phase': ph, 'src': m.group(1), 'dst': m.group(2),
                         'src_host': host_of_ip.get(m.group(1), ''), 'dst_host': dst_host,
                         'gbps': float(m.group(3)), 'lost': lost, 'sent': sent, 'tx': tx,
                         'sock': sock, 'nic': nic, 'back': back,
-                        'unacc': unacc, 'exp': expd, 'beyond': max(0, unacc - expd)})
+                        'unacc': unacc, 'exp': expd, 'beyond': max(0, unacc - expd) - moved, 'moved': moved, 'paced': cfm})
         elif line.strip() and ',ERROR' in line:
             p = line.split(',', 2)
             udp.append({'iter': it, 'phase': ph, 'src': p[0], 'dst': p[1] if len(p) > 1 else '', 'error': p[2] if len(p) > 2 else ''})

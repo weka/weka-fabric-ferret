@@ -100,6 +100,12 @@ Optional (default)
                    is expected loss (udp_expected.txt); only unaccounted loss beyond it is flagged.
                    With FF_TOS the whole TOS byte, ECN bits included, is sent.
   FF_UDP_DURATION  seconds per UDP run (FF_DURATION)
+  FF_UDP_CONFIRM (1)  when a UDP phase leaves a host with unaccounted loss beyond expected (FF_UDP_CONFIRM_PCT %
+                   or more of the datagrams sent to it), repeat each run into it once: 5 s at 80% of the rate
+                   it delivered. Loss gone at the paced rate was overload against a rate limit between the
+                   hosts (reported with the limit, no longer flagged); loss that persists stays flagged.
+                   udp_confirm.txt. 0 = off.
+  FF_UDP_CONFIRM_PCT (1)  that threshold, a whole number from 0 to 100 (0 = on any such loss)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
                    kill each other's iperf3 servers and both get garbage)
   FF_MESH (1)      before load, ping every tested host's rail IPs from every other one's (same rail and
@@ -323,7 +329,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_DURATION"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_CONFIRM FF_UDP_CONFIRM_PCT FF_UDP_DURATION"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -959,6 +965,14 @@ EOF
 # One UDP run, no rate cap: src dst port streams secs len [tos] -> "[SUM] ... receiver" or "ERROR ..."
 read -r -d '' UDP_SCRIPT <<'EOF'
 out=$(iperf3 --connect-timeout 5000 -u -b 0 -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${7:+-S $7} 2>&1); rc=$?
+rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
+if [ -n "$rcv" ]; then echo "$rcv"
+else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+EOF
+
+# One paced UDP run (a confirm run, udp_confirm): src dst port streams secs len bits_per_s_per_stream [tos] -> as UDP_SCRIPT
+read -r -d '' UDPC_SCRIPT <<'EOF'
+out=$(iperf3 --connect-timeout 5000 -u -b "$7" -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${8:+-S $8} 2>&1); rc=$?
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
 else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
@@ -2114,7 +2128,7 @@ take_locks() {
     local k busy other
     RUN_ID="$(hostname -s)-$$-$START_TS"
     cross_waves $(( ${#ELIG[@]} / 2 ))   # phase 2 waves stretch an iteration
-    local max=$(( 2 * ((1 + XW) * FF_DURATION + (FF_UDP == 1 ? (1 + XW) * FF_UDP_DURATION : 0)) + 300 ))
+    local max=$(( 2 * ((1 + XW) * FF_DURATION + (FF_UDP == 1 ? (1 + XW) * (FF_UDP_DURATION + (FF_UDP_CONFIRM == 1 ? UDP_CONFIRM_SECS : 0)) : 0)) + 300 ))   # confirm runs follow a UDP phase
     local info="since=$(date -u +%Y-%m-%dT%H:%M:%SZ),from=$(hostname -s),user=$(id -un)"   # no spaces: args are re-split remotely
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
@@ -2512,6 +2526,7 @@ run_path() {
     if [[ $mode == udp ]]; then
         local m1=${RMTU[$sk,$sr]:-1500} m2=${RMTU[$dk,$dr]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))   # largest datagram that needs no fragmenting
+        [[ $FF_UDP_CONFIRM == 1 ]] && echo "$PHASE_OUT ${RIP[$sk,$sr]} ${RIP[$dk,$dr]} $FF_PORT $len ${T_TARGET[$sk]}" >> "$WORK/uplan.$ITER.$PHASE"   # for udp_confirm
         ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "${T_TARGET[$sk]}" \
                   "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "$FF_PORT" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
@@ -2898,7 +2913,8 @@ client_rx() {
 # beyond = unaccounted above it, per host.
 # Files: udp_expected.txt, ipmap (ip host rail), nicmap (host_nic host rail), UDP results, host counters, NIC drops.
 # -v t="iterN Ux" limits it to one phase. Prints: lost sent socket nic backlog unaccounted over expected beyond tx
-# (over: buckets beyond the loss).
+# (over: buckets beyond the loss). Once udp_confirm.txt exists: beyond is less what the paced runs moved to the
+# rate limit bucket, printed as an 11th number. hosts=1 adds a line per receiving host, "H host beyond sent".
 UDP_ATTR_AWK='
 FNR == 1 { for (i = 1; i < ARGC; i++) if (ARGV[i] == FILENAME) f = i }   # by name: an empty file must not shift the rest
 f == 1 { E[$1 " " $2 " " $3 " " $4 " " $5] = $8; TR[$1 " " $2 " " $3 " " $4 " " $5] = $12 + 0; next }
@@ -2908,19 +2924,25 @@ f == 4 { if (/^### /) { split($2, a, ":"); split($3, b, ":"); ph = "iter" a[2] "
          if (t != "" && ph != t) next
          n = 0; for (i = 1; i <= NF; i++) if ($i ~ /^[0-9]+\/[0-9]+$/) { split($i, x, "/"); n = 1 }
          if (!n) next
-         split($1, s, ","); k = ph SUBSEP host[s[2]]; L[k] += x[1]; sent += x[2]; r = ph " " wv " " s[1] " " s[2]
+         split($1, s, ","); k = ph SUBSEP host[s[2]]; L[k] += x[1]; sent += x[2]; SE[k] += x[2]; r = ph " " wv " " s[1] " " s[2]
          TX[k] += TR[r]; X[k] += E[r] * (x[2] - TR[r]); next }
 f == 5 { k = $1 " " $2 SUBSEP $3; SK[k] += $4; BK[k] += $7; next }
-f == 6 { k = $1 " " $2 SUBSEP nh[$3]; DR[k] += $4; DO[k] += $5 }
+f == 6 { k = $1 " " $2 SUBSEP nh[$3]; DR[k] += $4; DO[k] += $5; next }
+f == 7 { cf = 1; if ($1 !~ /^#/ && (t == "" || $1 " " $2 == t)) mv += $12 }
 END { for (k in L) { nk = DR[k] - BK[k]; if (nk < 0) nk = 0; nk += DO[k]
                      lost += L[k]; sock += SK[k]; nic += nk; back += BK[k]; ex += X[k]; tx += TX[k]
                      u = L[k] - TX[k] - SK[k] - nk - BK[k]; if (u > 0) un += u; else ov -= u
-                     if (u - X[k] > 0) bey += u - X[k] }
-      printf "%d %d %d %d %d %d %d %d %d %d\n", lost, sent, sock, nic, back, un, ov, ex + 0.5, bey, tx }'
+                     HB[k] = (u - X[k] > 0) ? u - X[k] : 0; bey += HB[k] }
+      if (mv > bey) mv = bey
+      printf "%d %d %d %d %d %d %d %d %d %d", lost, sent, sock, nic, back, un, ov, ex + 0.5, bey - mv, tx
+      if (cf) printf " %d", mv
+      print ""
+      if (hosts) for (k in L) { split(k, p, SUBSEP); printf "H %s %.3f %d\n", p[2], HB[k], SE[k] } }'
 
-udp_attr() {  # [iterN Ux] -> "lost sent socket nic backlog unaccounted over expected beyond tx"
-    awk -v t="$1" "$UDP_ATTR_AWK" "$COLLECT_DIR/udp_expected.txt" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
-        "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt"
+udp_attr() {  # [iterN Ux] [hosts] -> "lost sent socket nic backlog unaccounted over expected beyond tx [rate_limit]"
+    local cf=$COLLECT_DIR/udp_confirm.txt; [[ -e $cf ]] || cf=
+    awk -v t="$1" -v hosts="${2:-0}" "$UDP_ATTR_AWK" "$COLLECT_DIR/udp_expected.txt" "$WORK/uipmap" "$WORK/unicmap" "$UDP_RESULTS" \
+        "$COLLECT_DIR/udp_host_counters.txt" "$COLLECT_DIR/udp_nic_drops.txt" ${cf:+"$cf"}
 }
 
 # cross_summary ipmap results: the inter-rail total (an iteration's cross-rail runs share the path between
@@ -3068,12 +3090,14 @@ xgroup_summary() {
 # UDP phases U1 (same rail), U2 (cross) and U3 (cross-group, when group pairs exist) on the current pairs, with host
 # and NIC counters read around each phase so lost datagrams can be placed.
 udp_phases() {
-    local u p ck sk a=$WORK/udp.0
+    local u p ck sk a=$WORK/udp.0 stale=0
     collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"; collect_counters "$TXCTR_SCRIPT" "$a.tx"
     for u in 1 2 3; do
         PHASE=U$u; PHASE_OUT=$WORK/phase.$ITER.$PHASE; : > "$PHASE_OUT"
         if [[ $u == 2 && $CROSS != on ]]; then log "Phase U2: skipped (cross-rail $CROSS)"; phase_skip U2; continue; fi
         [[ $u == 3 ]] && (( ${#XGL[@]} == 0 )) && continue
+        # confirm runs came after the last phase's counters were read: read them again, or this phase is charged their traffic
+        (( stale )) && { collect_counters "$UDPHOST_SCRIPT" "$a.host"; collect_drops "$a.nic"; collect_counters "$TXCTR_SCRIPT" "$a.tx"; stale=0; }
         phase_start
         if [[ $u == 1 ]]; then log "Phase U1: UDP $(same_desc) at once (-b 0), start $PT0"
         elif [[ $u == 2 ]]; then log "Phase U2: UDP cross-rail, $(cross_desc) at once (-b 0), start $PT0"
@@ -3091,15 +3115,15 @@ udp_phases() {
         collect_counters "$UDPHOST_SCRIPT" "$b.host"; collect_drops "$b.nic"; collect_counters "$TXCTR_SCRIPT" "$b.tx"
         collect_temps "iter${ITER}_$PHASE"
         udp_close $PHASE "$a" "$b"
-        a=$b
+        a=$b; stale=$UDP_CONFIRMED
     done
 }
 
 # udp_close phase pre post: the phase's host and NIC counter deltas, appended to udp_host_counters.txt
 # ("iterN phase host dInErrors dRcvbufErrors dSndbufErrors dSoftnet") and udp_nic_drops.txt ("iterN phase host_nic drx doob"),
-# then its loss line
+# then its confirm runs, if its loss calls for them (udp_confirm; UDP_CONFIRMED=1 then), and its loss lines
 udp_close() {
-    local ph=$1 a=$2 b=$3 r
+    local ph=$1 a=$2 b=$3 r at; UDP_CONFIRMED=0
     awk -v t="iter$ITER $ph" 'NR==FNR {for (i = 2; i <= 5; i++) p[$1, i] = $i; next}
         ($1, 2) in p {printf "%s %s", t, $1; for (i = 2; i <= 5; i++) printf " %d", $i - p[$1, i]; print ""}' \
         "$a.host" "$b.host" >> "$COLLECT_DIR/udp_host_counters.txt"
@@ -3113,9 +3137,75 @@ udp_close() {
             dw = ($4 ~ /^[0-9]+$/ && w[$1] ~ /^[0-9]+$/) ? $4 - w[$1] : "-"
             print t, $1, $2, dk, dw }' "$a.tx" "$b.tx" >> "$COLLECT_DIR/udp_tx.txt"
     udp_expect
-    read -r -a r <<<"$(udp_attr "iter$ITER $ph")"
+    at=$(udp_attr "iter$ITER $ph" "$FF_UDP_CONFIRM"); read -r -a r <<<"${at%%$'\n'*}"
+    if [[ $FF_UDP_CONFIRM == 1 ]] && udp_confirm "$ph" "$at"; then UDP_CONFIRMED=1; read -r -a r <<<"$(udp_attr "iter$ITER $ph")"; fi
     log "  $ph loss: ${r[0]} of ${r[1]} datagrams lost ($(awk -v l="${r[0]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * l / s : 0}')%): sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
-    log "  $ph expected from overload: ${r[7]} ($(awk -v e="${r[7]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * e / s : 0}')%); unaccounted beyond it (likely fabric): ${r[8]}"
+    log "  $ph expected from overload: ${r[7]} ($(awk -v e="${r[7]}" -v s="${r[1]}" 'BEGIN {printf "%.3f", s ? 100 * e / s : 0}')%)$( (( UDP_CONFIRMED )) && echo "; rate limit between the hosts (paced run): ${r[10]}"); unaccounted beyond it (likely fabric): ${r[8]}"
+    (( UDP_CONFIRMED )) || return 0
+    log "  $ph paced confirm runs: $(wc -l < "$WORK/uconf.$ITER.$ph.pick" | tr -d ' '), each at 80% of what its run delivered, $UDP_CONFIRM_SECS s:"
+    sed 's/^/# /' "$WORK/uconf.$ITER.$ph.log" >&2
+}
+
+# udp_confirm phase attr_output (FF_UDP_CONFIRM=1): 0 when confirm runs happened. Every run into a host that
+# triggers (ff_udp_confirm.pick) runs again for UDP_CONFIRM_SECS s at 80% of what it delivered, a wave's runs at
+# once; a rate limit no host counter shows loses nothing at that rate. Rows: udp_confirm.txt.
+udp_confirm() {
+    local ph=$1 w=$WORK/uconf.$ITER.$1 plan=$WORK/uplan.$ITER.$1 cf=$COLLECT_DIR/udp_confirm.txt
+    [[ -s $plan ]] || return 1
+    echo "$2" > "$w.hosts"
+    awk -v t="iter$ITER $ph" -v pct="$FF_UDP_CONFIRM_PCT" -v streams="$FF_STREAMS" '# The runs to confirm, in launch order: "wave_no bps_per_stream nth src dst port len target".
+    # trig is the whole trigger, per receiving host: loss beyond expected, pct % or more of what was sent to it.
+    function trig(h) { return bey[h] > 0 && bey[h] >= pct / 100 * sent[h] }
+    FNR == 1 { for (i = 1; i < ARGC; i++) if (ARGV[i] == FILENAME) f = i }
+    f == 1 { if ($1 == "H") { bey[$2] = $3; sent[$2] = $4 }; next }
+    f == 2 { host[$1] = $2; next }
+    f == 3 { if ($1 " " $2 == t) G[$4, $5, ++n3[$4, $5]] = $11; next }
+    f == 4 { c = ++n4[$2, $3]
+             if (!trig(host[$3]) || !(($2, $3, c) in G)) next
+             bps = int(0.8 * G[$2, $3, c] * 1e9 / streams); if (bps < 1) next
+             if (!($1 in gid)) gid[$1] = ++ng
+             print gid[$1], bps, c, $2, $3, $4, $5, $6 }' \
+        "$w.hosts" "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" "$plan" > "$w.pick"
+    [[ -s $w.pick ]] || return 1
+    local g bps c src dst port len tgt cur=
+    : > "$w.out"
+    while read -r g bps c src dst port len tgt; do
+        [[ $g == "$cur" ]] || { wait; cur=$g; }
+        ( out=$(rbash -T $(( UDP_CONFIRM_SECS + 30 )) "$tgt" \
+                  "$src" "$dst" "$port" "$FF_STREAMS" "$UDP_CONFIRM_SECS" "$len" "$bps" "$FF_TOS" <<<"$UDPC_SCRIPT" 2>&1)
+          [[ -n $out ]] || out="ERROR timeout or ssh failure"
+          echo "$c $src $dst ${out%%$'\n'*}" >> "$w.out" ) &
+    done < "$w.pick"
+    wait
+    [[ -e $cf ]] || echo "# iter phase wave src dst paced_gbps lost sent loss_pct secs limit_gbps moved reading" > "$cf"
+    awk -v t="iter$ITER $ph" -v secs="$UDP_CONFIRM_SECS" -v streams="$FF_STREAMS" -v rows="$cf" '# Places the loss of the confirmed runs: a host loss beyond expected is shared over its runs by wire loss;
+    # what a run still loses at the paced rate stays, the rest moves to the rate limit bucket.
+    # Rows go to the file named by rows (udp_confirm.txt), the log lines to stdout.
+    FNR == 1 { for (i = 1; i < ARGC; i++) if (ARGV[i] == FILENAME) f = i }
+    f == 1 { if ($1 == "H") bey[$2] = $3; next }
+    f == 2 { host[$1] = $2; next }
+    f == 3 { if ($1 " " $2 != t) next
+             k = $4 SUBSEP $5 SUBSEP (++n3[$4, $5]); w = $9 - $12; if (w < 0) w = 0
+             W[k] = w; WH[host[$5]] += w; WIRE[k] = $10 - $12; GB[k] = $11; WV[k] = $3; next }
+    f == 4 { n++; K[n] = $4 SUBSEP $5 SUBSEP $3; S[n] = $4; D[n] = $5; BPS[n] = $2; next }
+    f == 5 { k = $2 SUBSEP $3 SUBSEP $1; got = 0
+             for (i = 4; i <= NF; i++) if ($i ~ /^[0-9]+\/[0-9]+$/) { split($i, x, "/"); got = 1 }
+             if (got && /receiver/ && x[2] > 0) { CL[k] = x[1]; CS[k] = x[2] }
+             else { e = $0; sub(/^[^ ]+ [^ ]+ [^ ]+ /, "", e); ERR[k] = e } }
+    END { for (i = 1; i <= n; i++) {
+              k = K[i]; h = host[D[i]]; paced = BPS[i] * streams / 1e9
+              share = (WH[h] > 0) ? bey[h] * W[k] / WH[h] : 0
+              who = sprintf("    %s %s -> %s %s: %.3f Gb/s paced, ", host[S[i]], S[i], h, D[i], paced)
+              if (k in CS) {
+                  pc = 100 * CL[k] / CS[k]; keep = CL[k] / CS[k] * WIRE[k]; if (keep > share) keep = share
+                  printf "%s %s %s %s %.3f %d %d %.3f %d %s %d %s\n", t, WV[k], S[i], D[i], paced, CL[k], CS[k], pc, secs, GB[k], share - keep + 0.5, (CL[k] ? "persists" : "gone") >> rows
+                  if (CL[k]) printf "%s%d/%d lost (%.3f%%): loss persists at a paced rate (%.3f %%): lossy path\n", who, CL[k], CS[k], pc, pc
+                  else printf "%s%d/%d lost (%.3f%%): loss gone at a paced rate: overload against a rate limit of about %s Gb/s between the hosts\n", who, CL[k], CS[k], pc, GB[k]
+              } else {
+                  printf "%s %s %s %s %.3f - - - %d %s 0 no_result\n", t, WV[k], S[i], D[i], paced, secs, GB[k] >> rows
+                  printf "%sno result (%s): nothing moved\n", who, (k in ERR) ? ERR[k] : "no output"
+              } } }' \
+        "$w.hosts" "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" "$w.pick" "$w.out" > "$w.log"
 }
 
 # udp_expect: udp_expected.txt, per UDP run "iterN phase wave src dst offered rx expected lost sent gbps tx".
@@ -3238,6 +3328,7 @@ cl_run() {
     if [[ $mode == udp ]]; then   # as run_path: the largest datagram neither end's MTU fragments
         local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
         local len=$(( (m1 < m2 ? m1 : m2) - 28 ))
+        [[ $FF_UDP_CONFIRM == 1 ]] && echo "$PHASE_OUT $src $dst $port $len $from" >> "$WORK/uplan.$ITER.$ph"   # for udp_confirm
         ( out=$(rbash -T $(( FF_UDP_DURATION + 30 )) "$from" \
                   "$src" "$dst" "$port" "$FF_STREAMS" "$FF_UDP_DURATION" "$len" "$FF_TOS" <<<"$UDP_SCRIPT" 2>&1)
           [[ -n $out ]] || out="ERROR timeout or ssh failure"
@@ -3691,7 +3782,12 @@ main() {
     [[ $FF_BUSY_CHECK == none ]] && FF_BUSY_CHECK=""
     [[ -z $FF_UDP ]] && FF_UDP=$(( ! FF_SKIP_IPERF ))   # UDP by default, except with no load
     : "${FF_UDP_DURATION:=$FF_DURATION}"
+    : "${FF_UDP_CONFIRM:=1}" "${FF_UDP_CONFIRM_PCT:=1}"
     [[ $FF_UDP == 0 || $FF_UDP == 1 ]] || die "FF_UDP must be 0 or 1, got '$FF_UDP'"
+    [[ $FF_UDP_CONFIRM == 0 || $FF_UDP_CONFIRM == 1 ]] || die "FF_UDP_CONFIRM must be 0 or 1, got '$FF_UDP_CONFIRM'"
+    [[ $FF_UDP_CONFIRM_PCT =~ ^[0-9]+$ ]] && (( 10#$FF_UDP_CONFIRM_PCT <= 100 )) || die "FF_UDP_CONFIRM_PCT must be a whole number from 0 to 100, got '$FF_UDP_CONFIRM_PCT'"
+    [[ $FF_UDP == 1 ]] || FF_UDP_CONFIRM=0   # nothing to confirm without the UDP pass
+    UDP_CONFIRM_SECS=5   # a paced confirm run (udp_confirm)
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
     [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
@@ -4547,7 +4643,9 @@ main() {
                     "$WORK/uipmap" "$COLLECT_DIR/udp_expected.txt" | { read -r hdr; echo "$hdr"; sort -k4 -rn; } | column -t | sed 's/^/  /'
                 local r; read -r -a r <<<"$(udp_attr "")"
                 echo "  Lost datagrams ${r[0]} of ${r[1]}: sender TX ${r[9]}, receiver socket ${r[2]}, NIC ${r[3]}, kernel backlog ${r[4]}, unaccounted ${r[5]}$( (( r[6] > 0 )) && echo "; host counters exceed the loss by ${r[6]} (they count all of the phase's traffic, not only these flows)")"
-                echo "  Expected from overload: ${r[7]}; unaccounted beyond it (likely fabric): ${r[8]}"
+                local cf=$COLLECT_DIR/udp_confirm.txt   # written once a paced confirm run happened (udp_confirm)
+                echo "  Expected from overload: ${r[7]}$( [[ -e $cf ]] && echo "; rate limit between the hosts (paced run): ${r[10]}"); unaccounted beyond it (likely fabric): ${r[8]}"
+                [[ -e $cf ]] && awk '!/^#/ { n++; c[$13]++ } END { printf "  Paced confirm runs: %d (udp_confirm.txt): %d loss gone, %d loss persists, %d no result\n", n, c["gone"], c["persists"], c["no_result"] }' "$cf"
             else
                 echo "  No UDP results collected."
             fi
@@ -4664,6 +4762,8 @@ main() {
         echo "udp=$FF_UDP"
         echo "iperf=$( (( FF_SKIP_IPERF )) && echo skipped || echo run)"
         echo "udp_duration=$FF_UDP_DURATION"
+        echo "udp_confirm=$FF_UDP_CONFIRM"
+        echo "udp_confirm_pct=$FF_UDP_CONFIRM_PCT"
         echo "coverage=$coverage"
         echo "hosts_expected=$expect"
         echo "hosts_tested=$hosts_tested"
