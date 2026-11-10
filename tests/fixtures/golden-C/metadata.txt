@@ -1,6 +1,6 @@
 label=h21
-timestamp=20261027T220913Z
-end_timestamp=20261027T220929Z
+timestamp=20261110T002643Z
+end_timestamp=20261110T002656Z
 duration=1
 iterations=2
 parallel_streams=16
@@ -47,6 +47,8 @@ pairs_total=1
 udp=1
 iperf=run
 udp_duration=1
+udp_confirm=1
+udp_confirm_pct=1
 coverage=COMPLETE
 hosts_expected=2
 hosts_tested=2

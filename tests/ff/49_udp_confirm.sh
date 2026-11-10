@@ -5,7 +5,7 @@
 # Fake (FAKE_UDP_PATH, by receiving host): h21 and c1 sit behind a rate limit, h22 on a lossy path (15% at any rate),
 # h23 both (limit + 2%), h24's paced runs get no result, h25 loses 0.5% (under the trigger), h26 gets nothing.
 # checks: 17
-# secs: 35
+# secs: 45
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 X=$S/ff/expected/49_off.log.txt
 PATHS='h21:cap=50 h22:loss=150000 h23:cap=50,loss=20000 h24:cap=50,cfail=1 h25:loss=5000 h26:loss=1000000 c1:cap=20'
@@ -36,20 +36,20 @@ chk "confirm runs: 5 s, the original's port, stream count, datagram length and T
     "[ \$(npaced cf) = 14 ] && [ \$(paced cf | awk 'NR == FNR { if (\$1 == \"UDP\") o[\$2 \" \" \$3] = \$4 \" \" \$5 \" \" \$7 \" \" (\$8 == \"\" ? \"-\" : \$8); next } \$5 != 5 || o[\$1 \" \" \$2] != \$3 \" \" \$4 \" \" \$6 \" \" \$7 { bad++ } END { print bad + 0 }' $W/cf.args -) = 0 ] && [ \$(paced cf | awk 'NR == FNR { g[\$1 \" \" \$2] = \$3; next } { w = int(0.8 * g[\$1 \" \" \$2] * 1e9 / \$4); d = \$8 - w; if (d < -1 || d > 1) bad++ } END { print bad + 0 }' <(echo \"\$want\") -) = 0 ] && paced cf | grep -qE '^198\\.19\\.2\\.26 198\\.19\\.2\\.21 [0-9]+ 16 5 [0-9]+ [^ ]+ (2500000000|2499999999)\$'" \
     "$(paced cf | sort | head -n 3 | tr '\n' '|'); original: $(grep '^UDP 198.19.2.26 198.19.2.21' $W/cf.args | head -n 1)"
 # 3
-chk "udp_confirm.txt: a '#' header naming the columns, then a row per confirm run (14): 5 gone (h21 x3, c1 x2), 7 persists (h22 x4, h23 x3), 2 no_result (h24); h26>h21's row: 40 Gbps paced, 0 of 160000 lost" \
-    "head -n 1 <<<\"\$uc\" | grep -qE '^# .*paced_gbps.*moved' && [ \$(grep -c . <<<\"\$rows\") = 14 ] && [ \"\$(awk '{print \$NF}' <<<\"\$rows\" | sort | uniq -c | awk '{printf \"%s:%s \", \$2, \$1}')\" = 'gone:5 no_result:2 persists:7 ' ] && awk '\$4 == \"198.19.2.26\" && \$5 == \"198.19.2.21\" && \$6 + 0 == 40 && \$7 == 0 && \$8 == 160000 { f = 1 } END { exit !f }' <<<\"\$rows\"" \
+chk "udp_confirm.txt: a '#' header naming the columns, then a row per confirm run (14): 5 gone (h21 x3, c1 x2), 3 part (h23), 4 persists (h22), 2 no_result (h24); h26>h21's row: 40 Gbps paced, 0 of 160000 lost" \
+    "head -n 1 <<<\"\$uc\" | grep -qE '^# .*paced_gbps.*moved' && [ \$(grep -c . <<<\"\$rows\") = 14 ] && [ \"\$(awk '{print \$NF}' <<<\"\$rows\" | sort | uniq -c | awk '{printf \"%s:%s \", \$2, \$1}')\" = 'gone:5 no_result:2 part:3 persists:4 ' ] && awk '\$4 == \"198.19.2.26\" && \$5 == \"198.19.2.21\" && \$6 + 0 == 40 && \$7 == 0 && \$8 == 160000 { f = 1 } END { exit !f }' <<<\"\$rows\"" \
     "$(head -n 1 <<<"$uc" | cut -c1-120); rows $(grep -c . <<<"$rows"); $(awk '{print $NF}' <<<"$rows" | sort | uniq -c | tr '\n' ' ')"
 # 4
 chk "rate limit (h21, c1): 0 lost at the paced rate, so all of the run's loss moves (800000 per h21 run, 920000 per c1 run); the log names the limit: '...loss gone at a paced rate: overload against a rate limit of about 50 Gb/s between the hosts' (c1: 16 Gb/s paced, about 20)" \
-    "[ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.21\$/ {print \$(NF-1)}' <<<\"\$rows\" | sort -u)\" = 800000 ] && [ \"\$(awk '\$5 == \"198.19.10.1\" {print \$(NF-1)}' <<<\"\$rows\" | sort -u)\" = 920000 ] && grep -qE '^#  +h26 198\\.19\\.2\\.26 -> h21 198\\.19\\.2\\.21: 40(\\.0+)? Gb/s paced, 0/160000 lost \\(0(\\.0+)?%\\): loss gone at a paced rate: overload against a rate limit of about 50(\\.0+)? Gb/s between the hosts\$' <<<\"\$out\" && grep -qE '-> c1 198\\.19\\.10\\.1: 16(\\.0+)? Gb/s paced, 0/64000 lost .*rate limit of about 20(\\.0+)? Gb/s between the hosts\$' <<<\"\$out\"" \
+    "[ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.21\$/ {print \$(NF-1)}' <<<\"\$rows\" | sort -u)\" = 800000 ] && [ \"\$(awk '\$5 == \"198.19.10.1\" {print \$(NF-1)}' <<<\"\$rows\" | sort -u)\" = 920000 ] && grep -qE '^#  +h26 198\\.19\\.2\\.26 -> h21 198\\.19\\.2\\.21: 40(\\.0+)? Gb/s paced, 0/160000 lost \\(0(\\.0+)?%\\): loss gone at a paced rate: overload against a rate limit of about 50(\\.0+)? Gb/s between the hosts\$' <<<\"\$out\" && grep -qE -- '-> c1 198\\.19\\.10\\.1: 16(\\.0+)? Gb/s paced, 0/64000 lost .*rate limit of about 20(\\.0+)? Gb/s between the hosts\$' <<<\"\$out\"" \
     "moved: $(awk '$5 ~ /\.21$|^198\.19\.10\.1$/ {print $5 ":" $(NF-1)}' <<<"$rows" | tr '\n' ' '); $(grep -m2 'loss gone' <<<"$out" | cut -c1-200 | tr '\n' '|')"
 # 5
-chk "control, lossy path (h22: 15% at any rate): confirm runs happen (4), nothing moves, the reading says lossy path: '170 Gb/s paced, 102000/680000 lost (15.000%): loss persists at a paced rate (15.000 %): lossy path'" \
+chk "control, lossy path (h22: 15% at any rate): confirm runs happen (4), nothing moves (moved 0), so the reading is persists and says lossy path: '170 Gb/s paced, 102000/680000 lost (15.000%): loss persists at a paced rate (15.000 %): lossy path'" \
     "[ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.22\$/ {print \$(NF-1), \$NF}' <<<\"\$rows\" | sort | uniq -c | awk '{print \$1, \$2, \$3}')\" = '4 0 persists' ] && grep -qE -- '-> h22 198\\.19\\.2\\.22: 170(\\.0+)? Gb/s paced, 102000/680000 lost \\(15(\\.0+)?%\\): loss persists at a paced rate \\(15(\\.0+)? ?%\\): lossy path\$' <<<\"\$out\"" \
     "$(awk '$5 ~ /\.22$/ {print $5 ":" $(NF-1) ":" $NF}' <<<"$rows" | tr '\n' ' '); $(grep -m1 -- '-> h22 ' <<<"$out" | cut -c1-200)"
 # 6
-chk "mixed (h23: the limit plus 2% at any rate): only the 2% share stays beyond: each run moves 784000 of its 804000 lost (20000 = 2% of the 1000000 sent stays); reading 'loss persists at a paced rate (2.000 %)'" \
-    "[ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.23\$/ {print \$(NF-1), \$NF}' <<<\"\$rows\" | sort | uniq -c | awk '{print \$1, \$2, \$3}')\" = '3 784000 persists' ] && grep -qE -- '-> h23 198\\.19\\.2\\.23: 39\\.20* Gb/s paced, 3136/156800 lost \\(2(\\.0+)?%\\): loss persists at a paced rate \\(2(\\.0+)? ?%\\): lossy path\$' <<<\"\$out\"" \
+chk "mixed (h23: the limit plus 2% at any rate): only the 2% share stays beyond: each run moves 784000 of its 804000 lost (20000 = 2% of the 1000000 sent stays); reading part: '...lost (2.000%): that share persists at a paced rate and stays flagged; the rest was overload against a rate limit of about 49 Gb/s between the hosts'" \
+    "[ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.23\$/ {print \$(NF-1), \$NF}' <<<\"\$rows\" | sort | uniq -c | awk '{print \$1, \$2, \$3}')\" = '3 784000 part' ] && grep -qE -- '-> h23 198\\.19\\.2\\.23: 39\\.20* Gb/s paced, 3136/156800 lost \\(2(\\.0+)?%\\): that share persists at a paced rate and stays flagged; the rest was overload against a rate limit of about 49(\\.0+)? Gb/s between the hosts\$' <<<\"\$out\"" \
     "$(awk '$5 ~ /\.23$/ {print $5 ":" $(NF-1) ":" $NF}' <<<"$rows" | tr '\n' ' '); $(grep -m1 -- '-> h23 ' <<<"$out" | cut -c1-200)"
 # 7
 chk "a confirm run with no result (h24, 2 runs): nothing moved, lost and sent '-', and the log names each run with 'no result' and 'nothing moved' (never a silent 0)" \

@@ -6,7 +6,7 @@
 # that only reads a client run reads this one (moved here from 32, 33, 35, 36, 37, 38, 40, 41, 42, names prefixed
 # "golden-C:"). Its bundle members are the stored fixtures in fixtures/golden-C/, compared with the fresh ones here
 # (FIXTURE_UPDATE=1 rewrites them and says WRITTEN; only a normal run counts).
-# checks: 134
+# checks: 135
 # secs: 66
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 NETS=198.19.10.0/24,198.19.11.0/24
@@ -17,7 +17,7 @@ out=$(xrun gc FF_CLIENTS=198.18.1.1-4 FF_CLIENT_NETS=$NETS FF_HOSTS=198.18.0.21,
 
 # --- fixture freshness: the stored members the unit groups read, sorted, timestamps out ---
 MEMBERS="iperf3_results.txt client_results.txt iperf3_udp_results.txt host_counters.txt prio_counters.txt packet_drops.txt
- udp_host_counters.txt udp_nic_drops.txt udp_expected.txt udp_tx.txt temps.txt temps_summary.txt host_rx.txt client_rx.txt
+ udp_host_counters.txt udp_nic_drops.txt udp_expected.txt udp_tx.txt udp_confirm.txt temps.txt temps_summary.txt host_rx.txt client_rx.txt
  clients.txt client_routes.txt nic_diagnostics.txt lldp_neighbors.txt mesh_failures.txt rails.txt rail_anomalies.txt metadata.txt"
 norm() { case $1 in metadata.txt) grep -vE '^(timestamp|end_timestamp)=' ;; *) cat ;; esac | sort; }
 if [[ -n $FIXTURE_UPDATE ]]; then
