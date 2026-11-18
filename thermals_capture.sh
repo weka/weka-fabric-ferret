@@ -12,6 +12,7 @@ usage() {
 Usage: FF_HOSTS=<targets> ./thermals_capture.sh [-o jsonl,html,md] [-d seconds [-i seconds]] [-v]
        ./thermals_capture.sh -t file [options]           (targets from the file alone)
        ./thermals_capture.sh --list [-t file]            (print expanded targets, no ssh)
+       ./thermals_capture.sh --pw-prompt [-t file] [...] (ask on the terminal for the ssh password; see -t)
 Targets come from FF_HOSTS or from -t, not both.
 From a jump host (settings ride in the remote command):
        ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o jsonl,md" < thermals_capture.sh
@@ -37,6 +38,8 @@ Options
                    The pw is everything after the third comma. A password reaches ssh (SSH_ASKPASS: OpenSSH 8.4+,
                    or setsid, here) and ipmitool (-f) only through a one-use fifo in a private temp dir: never an
                    environment variable or a command line, never written out. chmod 600 the file (warned otherwise).
+                   A pw of exactly ? keeps the password out of the file: it is asked on the terminal at the start,
+                   without echo, once per login (a bmc row: once per BMC user).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
                    stdin stream, not argv); without a pw, the first passwordless escalator (FF_SSH_USER below).
                    -t or FF_HOSTS, not both.
@@ -53,6 +56,8 @@ Options
                    and the md, silently without -v (RESULT unreachable=N counts them; the html lists them under
                    Not read). A target that connects but fails
                    (auth refused, cut off, no hwmon…) is always reported as no data.
+  --pw-prompt      ask on the terminal, at the start, for one password for every ssh target that has none of
+                   its own (as FF_PW_PROMPT=1; see -t for a pw of ?)
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
@@ -62,6 +67,9 @@ Settings (the same names as fabric_ferret.sh; default)
                    and runs ipmitool through the first passwordless escalator: on each host, once per run,
                    `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n, in
                    that order; none = no BMC data from that host (its reason says so)
+  FF_PW_PROMPT=1   as --pw-prompt: ask on the terminal, at the start, for one password for every ssh target
+                   that has none of its own (FF_HOSTS targets too); default 0. A prompt needs a terminal: from
+                   a jump host, copy the script there and run it with ssh -t, not bash -s
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -527,8 +535,8 @@ sample() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_CONFIRM FF_UDP_CONFIRM_PCT FF_UDP_DURATION"
-TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_CONFIRM FF_UDP_CONFIRM_PCT FF_UDP_DURATION FF_PW_PROMPT"
+TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER FF_PW_PROMPT"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
 # each tool, which exports what it sets (HF_SET): as on the command line. HF_ENV's names win (noted in HF_PRELOG);
@@ -540,7 +548,7 @@ load_settings_lines() {
         ln=$(( ln + 1 )); line=${line%$'\r'}
         [[ $line =~ ^[[:space:]]*(FF_[A-Z0-9_]+)[[:space:]]*=(.*)$ ]] || continue
         nm=${BASH_REMATCH[1]}; val=${BASH_REMATCH[2]}; val=${val#"${val%%[![:space:]]*}"}
-        [[ $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
+        [[ $nm != FF_PW_PROMPT && $nm =~ PASS|PW|SECRET|TOKEN ]] && die "-t $f line $ln: $nm looks like a credential; a password goes in a row's pw field, never in a setting"
         [[ $nm == FF_HOSTS || $nm == FF_CLIENTS ]] && die "-t $f line $ln: $nm is not a setting here; list the targets as rows"
         if [[ " $HF_KNOWN " == *" $nm "* ]]; then
             if [[ " $HF_ENV " == *" $nm "* ]]; then HF_PRELOG+=("-t $f line $ln: $nm is set in the environment; the file's value is ignored")
@@ -568,13 +576,76 @@ settings_prepass() {
     for nm in $HF_SET; do export "$nm"; done
 }
 
+# hf_row line: one -t row's fields, as load_target_file and pw_prompts both read them (one split, so the two cannot
+# differ): HF_TY (lower case) HF_H HF_LG (ends trimmed) HF_PW (verbatim). Returns 1 for a line that is no row: blank,
+# a # comment, a settings line (read by settings_prepass), "host,# ..." or "host," (commented out or empty).
+hf_row() {
+    local line=${1%$'\r'} rest k
+    [[ $line =~ ^[[:space:]]*(#|$) ]] && return 1
+    [[ $line =~ ^[[:space:]]*FF_[A-Z0-9_]+[[:space:]]*= ]] && return 1
+    [[ $line == *,* ]] || line="backend,$line"   # a bare line is a backend with the defaults: a plain host list works
+    [[ $line =~ ^[^,]*,[[:space:]]*(#|,*[[:space:]]*$) ]] && return 1
+    HF_TY=${line%%,*}; rest=${line#*,}
+    HF_H=${rest%%,*}; [[ $rest == *,* ]] && rest=${rest#*,} || rest=
+    HF_LG=${rest%%,*}; [[ $rest == *,* ]] && HF_PW=${rest#*,} || HF_PW=
+    # trim the ends only: a space inside a type, host or login is bad input, refused by the caller with its line number
+    for k in HF_TY HF_H HF_LG; do local -n v=$k; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}; unset -n v; done
+    HF_TY=${HF_TY,,}
+    return 0
+}
+
+# ---------- passwords asked on the terminal: --pw-prompt, FF_PW_PROMPT=1, or a -t row whose pw is ? ----------
+# PW_ASK holds each password asked, in memory only (an unexported shell variable: never in a file, argv or the
+# environment), keyed ssh:<login> (the ? rows of that login), bmc:<user> (the ? bmc rows of that BMC user) and all
+# (--pw-prompt / FF_PW_PROMPT=1: every ssh target whose credential gives no password). Only a pw of exactly ? asks;
+# ?abc or " ?" is a password as written. PW_NOASK=1 (--list, --help): nothing is asked and nothing reaches ssh.
+declare -A PW_ASK=(); PW_NOASK=0
+# pw_prompts tfile all: each tool's top level runs it before main, the run log and the viewer, so the prompts are on
+# the terminal alone: one per key, read from /dev/tty without echo. No terminal, an empty password or end of input
+# stops the run (rc 2), before any ssh.
+pw_prompts() {
+    local f=$1 all=$2 def=${FF_SSH_USER:-$(id -un)} me=$(id -un) line k label pw rc err
+    local -a need=(); local -A seen=()
+    if [[ -n $f && -r $f && -f $f ]]; then
+        while IFS= read -r line || [[ -n $line ]]; do
+            hf_row "$line" && [[ $HF_PW == '?' ]] || continue
+            if [[ $HF_TY == bmc ]]; then k=bmc:${HF_LG:-$me}; else k=ssh:${HF_LG:-$def}; fi
+            [[ -n ${seen[$k]} ]] || { seen[$k]=1; need+=("$k"); }
+        done < "$f"
+    fi
+    (( all )) && need+=(all)
+    (( ${#need[@]} && ! PW_NOASK )) || return 0
+    err=$( { : < /dev/tty; } 2>&1 ) || die "a password prompt (--pw-prompt, FF_PW_PROMPT=1 or a -t pw of ?) needs a terminal, and there is none (${err##*: })"
+    for k in "${need[@]}"; do
+        case $k in
+            ssh:*) label="Password for login ${k#ssh:} (the -t rows whose pw is ?): " ;;
+            bmc:*) label="BMC password for user ${k#bmc:} (the -t bmc rows whose pw is ?): " ;;
+            *)     label="Password for every ssh target with no password of its own (--pw-prompt): " ;;
+        esac
+        printf '%s' "$label" > /dev/tty
+        IFS= read -rs pw < /dev/tty; rc=$?
+        printf '\n' > /dev/tty
+        (( rc == 0 )) || die "no password read (end of input): ${label%% (*}"
+        [[ -n $pw ]] || die "empty password: ${label%% (*}"
+        PW_ASK[$k]=$pw
+    done
+    pw=
+}
+# pw_fill_all: FF_HOSTS targets (no -t rows) under --pw-prompt: the asked password for each target without one (T_PW)
+pw_fill_all() {
+    local k
+    [[ -n ${PW_ASK[all]+x} ]] || return 0
+    for k in "${!TARGETS[@]}"; do [[ -n ${T_PW[$k]+x} ]] || T_PW[$k]=${PW_ASK[all]}; done
+}
+
 # load_target_file file deflogin: "<type>,<host>,<login>,<pw>" lines (# comments, blank lines skipped; FF_<setting>=value
 # lines are settings, read by settings_prepass before, skipped here). type backend
 # (host = backend) or client: ssh targets (IP, name, CIDR or range, as FF_HOSTS); bmc: one BMC address read out of
 # band. A host field * or a glob (* ? [...], any case) is a credential row: it adds no targets. Type * = backend
 # and client, never bmc. Each target takes the most specific row that gives a login or pw: one host > CIDR/range >
 # glob > <type>,* > *,* > the default (deflogin, key; a bmc: the current user, empty password). That row is the
-# credential, with no fallback. The pw is everything after the third comma, verbatim. Errors and warnings name
+# credential, with no fallback. The pw is everything after the third comma, verbatim; exactly ? takes the password
+# pw_prompts asked (PW_ASK), and --pw-prompt's gives every target that has none. Errors and warnings name
 # line numbers, never the text (it may hold a password). Sets TARGETS T_TYPE T_LOGIN T_PW T_LINE, BMCS B_LOGIN
 # B_PW B_LINE (T_LINE/B_LINE: the line whose credential it took, or "default").
 load_target_file() {
@@ -597,20 +668,16 @@ load_target_file() {
         fi
     }
     while IFS= read -r line || [[ -n $line ]]; do
-        ln=$(( ln + 1 )); line=${line%$'\r'}
-        [[ $line =~ ^[[:space:]]*(#|$) ]] && continue
-        [[ $line =~ ^[[:space:]]*FF_[A-Z0-9_]+[[:space:]]*= ]] && continue   # a settings line (read above)
-        [[ $line == *,* ]] || line="backend,$line"   # a bare line is a backend with the defaults: a plain host list works
-        [[ $line =~ ^[^,]*,[[:space:]]*(#|,*[[:space:]]*$) ]] && continue   # "host,# ...", "host," : commented out or empty
-        ty=${line%%,*}; rest=${line#*,}
-        h=${rest%%,*}; [[ $rest == *,* ]] && rest=${rest#*,} || rest=
-        lg=${rest%%,*}; [[ $rest == *,* ]] && pw=${rest#*,} || pw=
-        # trim the ends only: a space inside a type, host or login is bad input, refused below with its line number
-        for k in ty h lg; do local -n v=$k; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}; unset -n v; done
-        ty=${ty,,}
+        ln=$(( ln + 1 ))
+        hf_row "$line" || continue
+        ty=$HF_TY; h=$HF_H; lg=$HF_LG; pw=$HF_PW
         [[ -z $lg || $lg =~ ^[A-Za-z0-9._@-]+$ ]] || die "-t $f line $ln: bad login (letters, digits . _ @ - only)"
-        [[ -n $pw ]] && HAVE_PW=1
         [[ $ty == host ]] && ty=backend
+        if [[ $pw == '?' ]]; then   # asked on the terminal (pw_prompts, run first); the file holds no password
+            if [[ $ty == bmc ]]; then k=bmc:${lg:-$me}; else k=ssh:${lg:-$def}; fi
+            if [[ -n ${PW_ASK[$k]+x} ]]; then pw=${PW_ASK[$k]}
+            elif (( ! PW_NOASK )); then die "-t $f line $ln: pw ? but no password was asked for it"; fi   # --list, --help: pw stays ?, unused
+        elif [[ -n $pw ]]; then HAVE_PW=1; fi
         [[ $ty =~ ^(backend|client|bmc|\*)$ ]] || die "-t $f line $ln: type must be backend, client, bmc (host = backend) or *"
         [[ -n $h ]] || die "-t $f line $ln: no host"
         r=${#R_LN[@]}; R_LN[r]=$ln; R_TY[r]=$ty; R_H[r]=$h; R_LG[r]=$lg; R_PW[r]=$pw
@@ -658,6 +725,7 @@ load_target_file() {
         r=${T_ROW[$k]}
         if [[ -n $r ]]; then T_LOGIN[$k]=${R_LG[r]:-$def}; T_LINE[$k]=${R_LN[r]}; [[ -n ${R_PW[r]} ]] && T_PW[$k]=${R_PW[r]}
         else T_LOGIN[$k]=$def; T_LINE[$k]=default; fi
+        [[ -z ${T_PW[$k]+x} && -n ${PW_ASK[all]+x} ]] && T_PW[$k]=${PW_ASK[all]}   # --pw-prompt: every target without one
     done
     for k in "${!BMCS[@]}"; do
         r=${B_ROW[$k]}
@@ -1241,6 +1309,7 @@ main() {
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
     [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    pw_fill_all   # --pw-prompt: FF_HOSTS targets
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
     # the capture (tc_main.sh, shared with fabric_ferret.sh --thermals-only)
     tc_check_settings
@@ -1257,10 +1326,25 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
     # the file works as the command line does. -t found as main's getopts finds it; a bad line dies here, rc 2.
     HF_PRELOG=(); HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh
+    # --pw-prompt is taken off the arguments first (getopts would read its letters, its t taking the next argument);
+    # main never sees it. It or FF_PW_PROMPT=1, and a -t pw of ?: the passwords are asked below, on the terminal alone,
+    # before the viewer and main start (hostfile.sh)
+    pre_args=(); pre_all=0
+    for pre_a in "$@"; do
+        case $pre_a in
+            --pw-prompt) pre_all=1 ;;
+            --list|-h|--help) PW_NOASK=1; pre_args+=("$pre_a") ;;
+            *) pre_args+=("$pre_a") ;;
+        esac
+    done
+    set -- "${pre_args[@]}"
     pre_t=; OPTIND=1
     while getopts ":o:i:d:t:vh" pre_o; do [[ $pre_o == t ]] && pre_t=$OPTARG; done
     OPTIND=1
     [[ -n $pre_t ]] && settings_prepass "$pre_t"
+    [[ ${FF_PW_PROMPT:-0} == [01] ]] || die "FF_PW_PROMPT must be 0 or 1, got '$FF_PW_PROMPT'"
+    [[ $FF_PW_PROMPT == 1 ]] && pre_all=1
+    pw_prompts "$pre_t" "$pre_all"
     view=()
     if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
         if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")

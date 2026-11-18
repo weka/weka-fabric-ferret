@@ -11,6 +11,7 @@ usage() {
 Usage: FF_HOSTS=<targets> ./thermals_capture.sh [-o jsonl,html,md] [-d seconds [-i seconds]] [-v]
        ./thermals_capture.sh -t file [options]           (targets from the file alone)
        ./thermals_capture.sh --list [-t file]            (print expanded targets, no ssh)
+       ./thermals_capture.sh --pw-prompt [-t file] [...] (ask on the terminal for the ssh password; see -t)
 Targets come from FF_HOSTS or from -t, not both.
 From a jump host (settings ride in the remote command):
        ssh jump "FF_HOSTS=10.1.0.0/24 bash -s -- -o jsonl,md" < thermals_capture.sh
@@ -36,6 +37,8 @@ Options
                    The pw is everything after the third comma. A password reaches ssh (SSH_ASKPASS: OpenSSH 8.4+,
                    or setsid, here) and ipmitool (-f) only through a one-use fifo in a private temp dir: never an
                    environment variable or a command line, never written out. chmod 600 the file (warned otherwise).
+                   A pw of exactly ? keeps the password out of the file: it is asked on the terminal at the start,
+                   without echo, once per login (a bmc row: once per BMC user).
                    A non-root host login with a pw runs ipmitool with sudo -S and that pw (sent on the ssh
                    stdin stream, not argv); without a pw, the first passwordless escalator (FF_SSH_USER below).
                    -t or FF_HOSTS, not both.
@@ -52,6 +55,8 @@ Options
                    and the md, silently without -v (RESULT unreachable=N counts them; the html lists them under
                    Not read). A target that connects but fails
                    (auth refused, cut off, no hwmon…) is always reported as no data.
+  --pw-prompt      ask on the terminal, at the start, for one password for every ssh target that has none of
+                   its own (as FF_PW_PROMPT=1; see -t for a pw of ?)
   -h, --help       this text
 
 Settings (the same names as fabric_ferret.sh; default)
@@ -61,6 +66,9 @@ Settings (the same names as fabric_ferret.sh; default)
                    and runs ipmitool through the first passwordless escalator: on each host, once per run,
                    `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e, sudo -n, in
                    that order; none = no BMC data from that host (its reason says so)
+  FF_PW_PROMPT=1   as --pw-prompt: ask on the terminal, at the start, for one password for every ssh target
+                   that has none of its own (FF_HOSTS targets too); default 0. A prompt needs a terminal: from
+                   a jump host, copy the script there and run it with ssh -t, not bash -s
   FF_SSH_PARALLEL  ssh sessions at once (64)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
   FF_IPMI (1)      also read each host's BMC with in-band ipmitool sensor; 0 = hwmon only (-t bmc lines are
@@ -159,6 +167,7 @@ main() {
     [[ $FF_SSH_USER =~ ^[A-Za-z0-9._@-]+$ ]] || die "FF_SSH_USER: bad login (letters, digits . _ @ - only)"
     if [[ -n $FF_HOSTS ]]; then expand_targets "$FF_HOSTS"; for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; T_TYPE[$v]=backend; done; fi
     [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    pw_fill_all   # --pw-prompt: FF_HOSTS targets
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
     # the capture (tc_main.sh, shared with fabric_ferret.sh --thermals-only)
     tc_check_settings
@@ -175,10 +184,25 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
     # the file works as the command line does. -t found as main's getopts finds it; a bad line dies here, rc 2.
     HF_PRELOG=(); HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh
+    # --pw-prompt is taken off the arguments first (getopts would read its letters, its t taking the next argument);
+    # main never sees it. It or FF_PW_PROMPT=1, and a -t pw of ?: the passwords are asked below, on the terminal alone,
+    # before the viewer and main start (hostfile.sh)
+    pre_args=(); pre_all=0
+    for pre_a in "$@"; do
+        case $pre_a in
+            --pw-prompt) pre_all=1 ;;
+            --list|-h|--help) PW_NOASK=1; pre_args+=("$pre_a") ;;
+            *) pre_args+=("$pre_a") ;;
+        esac
+    done
+    set -- "${pre_args[@]}"
     pre_t=; OPTIND=1
     while getopts ":o:i:d:t:vh" pre_o; do [[ $pre_o == t ]] && pre_t=$OPTARG; done
     OPTIND=1
     [[ -n $pre_t ]] && settings_prepass "$pre_t"
+    [[ ${FF_PW_PROMPT:-0} == [01] ]] || die "FF_PW_PROMPT must be 0 or 1, got '$FF_PW_PROMPT'"
+    [[ $FF_PW_PROMPT == 1 ]] && pre_all=1
+    pw_prompts "$pre_t" "$pre_all"
     view=()
     if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
         if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")

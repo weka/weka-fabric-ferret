@@ -16,7 +16,8 @@ write_targets_template() {
 #          (* ? [...], any case) makes a credential row: it adds no targets and needs a login or a password.
 #          A row whose host field is empty or starts with # is skipped ("host,# ..." comments a row out).
 #   login  the ssh login (a bmc: its user); empty = FF_SSH_USER, by default the user running the tool.
-#   pw     everything after the third comma, verbatim; empty = key (passwordless) ssh, or an empty BMC password.
+#   pw     everything after the third comma, verbatim; empty = key (passwordless) ssh, or an empty BMC password;
+#          exactly ? = asked on the terminal at the start, without echo, once per login (the file holds no password).
 # Each target takes the most specific row that gives a login or a password: the row naming the one host, then a
 # CIDR or range, then a glob, then <type>,*, then *,*. That row is its credential; there is no fallback to a less
 # specific one. Passwords never appear on a command line, in an environment variable or in any output.

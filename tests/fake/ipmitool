@@ -2,6 +2,7 @@
 # fake local ipmitool for fabric_ferret.sh's -t bmc lines (read out of band, tc_bmc.sh): only
 # "-I lanplus -H <bmc> -U <user> (-E | -f <file>) sensor"; argv -> $FAKE_STATE/ipmi_calls.log; two degrees-C rows
 # (Inlet 24, CPU1 61) and a fan line. FAKE_BMC_DOWN=<bmc>: no session (rc 1), as a dead BMC answers.
+# $FAKE_STATE/bmcpw.<bmc>, when present: the password must match (else no session, rc 1); a match -> "<bmc> ok" in bmcpw.log.
 FAKE_STATE=${FAKE_STATE:?FAKE_STATE unset}
 echo "ipmitool $*" >> "$FAKE_STATE/ipmi_calls.log"
 h=; u=; e=; s=; i=; pf=
@@ -12,6 +13,10 @@ done
 if [[ -n $pf ]]; then IFS= read -r IPMI_PASSWORD < "$pf" || { echo "Unable to read password from file $pf" >&2; exit 1; }
 else [[ -n ${IPMI_PASSWORD+x} ]] || { echo "Unable to read password from environment" >&2; exit 1; }; fi
 [[ $h == "${FAKE_BMC_DOWN:-}" ]] && { echo "Error: Unable to establish IPMI v2 / RMCP+ session" >&2; exit 1; }
+if [[ -r $FAKE_STATE/bmcpw.$h ]]; then
+    [[ $IPMI_PASSWORD == "$(< "$FAKE_STATE/bmcpw.$h")" ]] || { echo "Error: Unable to establish IPMI v2 / RMCP+ session" >&2; exit 1; }
+    echo "$h ok" >> "$FAKE_STATE/bmcpw.log"
+fi
 cat <<OUT
 Inlet Temp       | 24.000     | degrees C  | ok    | na        | -7.000    | -2.000    | 38.000    | 42.000    | na
 CPU1 Temp        | 61.000     | degrees C  | ok    | na        | 0.000     | 0.000     | 90.000    | 95.000    | na

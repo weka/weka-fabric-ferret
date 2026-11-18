@@ -52,7 +52,7 @@ any other private address. Renumbered 2026-10-29 from a private harness into the
 
 ## Needs
 bash 4.3+ first on PATH and at /opt/homebrew/bin/bash (the groups' shebang), python3 (the dashboard), node (rows.js: the
-page's own JS), jq, perl, GNU timeout, /usr/bin/expect (01: the viewer on a pty), gawk and mawk beside the system awk for
+page's own JS), jq, perl, GNU timeout, /usr/bin/expect (01: the viewer on a pty; 64: the password prompts), gawk and mawk beside the system awk for
 the awk-portability checks (links made under tests/awkbin at run time, untracked), headless Google Chrome for three
 thermals sections. A group that needs one it cannot find is SKIPPED by name.
 

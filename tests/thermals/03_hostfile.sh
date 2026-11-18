@@ -19,11 +19,11 @@ lt() { ( source "${3:-$TC}"; declare -ga T_LOGIN=() T_PW=() T_TYPE=() T_LINE=() 
 mk() { local f=$W/$1; shift; printf '%s\n' "$@" > "$f"; chmod 600 "$f"; echo "$f"; }   # mk <name> <line>...: a 600 file
 
 # --- the repository's example file (hostlist.example.csv, 10-27): 87 ssh targets (23 backends, 64 clients),
-# one bmc; storage-09 by its own row (line 20), the other backends by backend,* (line 26), gpu-node-01/02 by the
-# glob (line 27), the /26 clients (62) by the default; no warning, no password anywhere ---
+# one bmc; storage-09 by its own row (line 21), the other backends by backend,* (line 27), gpu-node-01/02 by the
+# glob (line 28), the /26 clients (62) by the default; no warning, no password anywhere ---
 o=$(lt "$(dirname "$TC")/hostlist.example.csv" deflt)
 chk "hostlist.example.csv: 87 targets and 1 bmc; credentials by row as the header says; no warning" \
-    "[ \$(grep -c '^T ' <<<\"\$o\") = 87 ] && grep -qx 'B 10.20.100.11 $me pw:- default' <<<\"\$o\" && grep -qx 'T storage-09 backend svc-fabric pw:- 20' <<<\"\$o\" && [ \$(grep -c '^T 10.20.1.[0-9]* backend svc-fabric pw:- 26\$' <<<\"\$o\") = 22 ] && [ \$(grep -c '^T gpu-node-0[12] client admin pw:- 27\$' <<<\"\$o\") = 2 ] && [ \$(grep -c '^T 10.20.2.[0-9]* client deflt pw:- default\$' <<<\"\$o\") = 62 ] && ! grep -qE 'WARNING|ERROR' <<<\"\$o\"" "$(grep -v '^T 10\.' <<<"$o" | tr '\n' '|')"
+    "[ \$(grep -c '^T ' <<<\"\$o\") = 87 ] && grep -qx 'B 10.20.100.11 $me pw:- default' <<<\"\$o\" && grep -qx 'T storage-09 backend svc-fabric pw:- 21' <<<\"\$o\" && [ \$(grep -c '^T 10.20.1.[0-9]* backend svc-fabric pw:- 27\$' <<<\"\$o\") = 22 ] && [ \$(grep -c '^T gpu-node-0[12] client admin pw:- 28\$' <<<\"\$o\") = 2 ] && [ \$(grep -c '^T 10.20.2.[0-9]* client deflt pw:- default\$' <<<\"\$o\") = 62 ] && ! grep -qE 'WARNING|ERROR' <<<\"\$o\"" "$(grep -v '^T 10\.' <<<"$o" | tr '\n' '|')"
 
 # --- settings lines (10-27, step 2): FF_SSH_USER from the file is the rows' default login; fabric_ferret.sh's
 # names are skipped and named; the environment wins; an unknown name stops by line number, value unprinted ---

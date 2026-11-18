@@ -109,7 +109,7 @@ chk "order: -t FILE 30 --list" "grep -qx '# 3 targets' <<<\"\$o\"" "$o"
 o=$(ls_ $C 30 -t$W/ty --list)
 chk "order: 30 -tFILE --list" "grep -qx '# 3 targets' <<<\"\$o\"" "$o"
 o=$(ls_ $C --list -t $W/ty extra); rc=$?
-chk "an unexpected argument is refused" "[ $rc = 2 ] && grep -q \"unexpected argument 'extra' (arguments: \\[-t FILE\\] \\[--list\\] \\[duration_s\\]; --help)\" <<<\"\$o\"" "rc=$rc $o"
+chk "an unexpected argument is refused" "[ $rc = 2 ] && grep -q \"unexpected argument 'extra' (arguments: \\[-t FILE\\] \\[--list\\] \\[--pw-prompt\\] \\[duration_s\\]; --help)\" <<<\"\$o\"" "rc=$rc $o"
 o=$(ls_ $C --list 30 40 -t $W/ty); rc=$?
 chk "a second duration is refused" "[ $rc = 2 ] && grep -q \"unexpected argument '40'\" <<<\"\$o\"" "rc=$rc $o"
 o=$(ls_ $C --list -t); rc=$?

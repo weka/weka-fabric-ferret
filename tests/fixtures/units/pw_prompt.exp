@@ -1,0 +1,26 @@
+#!/usr/bin/expect -f
+# pw_prompt.exp <capture> <secs> <answers> <cmd> [arg...]: <cmd> on a pty (its controlling terminal, so /dev/tty
+# works); each password prompt it shows ("...assword...: ") gets the next line of the file <answers> (an empty
+# line sends just Enter; "^D" sends end of input; no line left: Enter), and every byte the pty shows goes to
+# <capture>. Gives up after <secs> (exit 99, a TIMEOUT); else the exit status is <cmd>'s.
+set cap [lindex $argv 0]
+set timeout [lindex $argv 1]
+set fh [open [lindex $argv 2] r]
+set answers [split [string trimright [read $fh] "\n"] "\n"]
+close $fh
+set cmd [lrange $argv 3 end]
+log_user 0
+log_file -a -noappend $cap
+spawn {*}$cmd
+set n 0
+expect {
+    -re {assword[^\r\n]*: $} {
+        set a [lindex $answers $n]; incr n
+        if {$a eq "^D"} { send "\004" } else { send -- "$a\r" }
+        exp_continue
+    }
+    eof {}
+    timeout { puts stderr "pw_prompt.exp: TIMEOUT after [lindex $argv 1] s"; exit 99 }
+}
+lassign [wait] pid spawnid oserr rc
+exit $rc

@@ -11,6 +11,7 @@ usage() {
 Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
        FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh -t FILE [duration_s]   (targets from a file instead)
        FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh; -t FILE works too)
+       ./fabric_ferret.sh --pw-prompt [-t FILE] [...]   (ask on the terminal for the ssh password; see -t)
        FF_HOSTS=<targets> [FF_CLIENTS=<targets>] ./fabric_ferret.sh --thermals-only [-o jsonl,html,md] [-d s [-i s]] [-v]
        ./fabric_ferret.sh --thermals-only -t FILE [options]   (temperatures only, as thermals_capture.sh)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
@@ -26,6 +27,10 @@ From a jump host (settings ride in the remote command; nothing to edit or copy f
              glob) included, as thermals_capture.sh resolves them; no login: FF_SSH_USER; no password: key ssh.
              A password is read once, where the target's ssh session opens, through SSH_ASKPASS from a one-use
              fifo (OpenSSH 8.4+, or setsid, here): never an environment variable, a command line or a file.
+             A pw of exactly ? keeps the password out of the file: the run asks for it on the terminal at the
+             start, without echo, once per login (a bmc row: once per BMC user). --pw-prompt (or FF_PW_PROMPT=1)
+             asks one password for every ssh target that has none of its own, FF_HOSTS targets too. A prompt needs
+             a terminal: from a jump host, copy the script there and run it with ssh -t, not bash -s.
              Remote steps run as root: a root login directly; any other login through the first passwordless
              escalator (FF_SSH_USER below); where none works, a row password runs them with sudo -S -k (the
              password first on the ssh input stream, behind a guard that never lets it run as a command). A host
@@ -125,6 +130,8 @@ Optional (default)
                    the remote steps through the first passwordless escalator: on each host, once per run, during
                    the sweep, `<escalator> true` (5 s timeout) for dzdo -n, pbrun, sesu, pmrun, doas -n, ksu -e,
                    sudo -n, in that order
+  FF_PW_PROMPT=1   as --pw-prompt: ask on the terminal, at the start, for one password for every ssh target
+                   that has none of its own (FF_HOSTS targets too); default 0
   FF_SSH_PARALLEL  ssh sessions at once for sweep and collection (64)
   FF_SSH_RETRY_PARALLEL  retry targets that refused ssh under load (reset, kex) this many at a time (8)
   FF_MAX_TARGETS   refuse to expand FF_HOSTS beyond this (4096)
@@ -318,6 +325,7 @@ thermals_only() {
     nb=${#TARGETS[@]}; TARGETS+=("${cl[@]}")
     for v in "${!TARGETS[@]}"; do T_LOGIN[$v]=$FF_SSH_USER; if (( v < nb )); then T_TYPE[$v]=backend; else T_TYPE[$v]=client; fi; done
     [[ -n $tfile ]] && load_target_file "$tfile" "$FF_SSH_USER"
+    pw_fill_all   # --pw-prompt: FF_HOSTS/FF_CLIENTS targets
     (( ${#TARGETS[@]} + ${#BMCS[@]} > 0 )) || die "no targets in -t $tfile"
     tc_check_settings
     (( list )) && tc_list
@@ -348,7 +356,7 @@ main() {
             -o|-d|-i) (( $# >= 2 )) || die "$1 needs a value (--help)"; topt=${topt:-$1}
                       case $1 in -o) fmt=$2 ;; -d) du=$2 ;; -i) iv=$2 ;; esac; shift 2 ;;
             -v) verbose=1; topt=${topt:--v}; shift ;;
-            *) [[ -z $dur && $1 =~ ^[0-9]+$ ]] || die "unexpected argument '$1' (arguments: [-t FILE] [--list] [duration_s]; --help)"
+            *) [[ -z $dur && $1 =~ ^[0-9]+$ ]] || die "unexpected argument '$1' (arguments: [-t FILE] [--list] [--pw-prompt] [duration_s]; --help)"
                dur=$1; shift ;;
         esac
     done
@@ -458,6 +466,7 @@ main() {
     fi
     TARGETS+=("${CL_T[@]}")
     local t; for t in "${TARGETS[@]}"; do [[ -n ${TL[$t]} ]] || TL[$t]=$FF_SSH_USER; done   # FF_HOSTS/FF_CLIENTS: FF_SSH_USER
+    if [[ -n ${PW_ASK[all]+x} ]]; then for t in "${TARGETS[@]}"; do [[ -n ${TPW[$t]+x} ]] || TPW[$t]=${PW_ASK[all]}; done; fi   # --pw-prompt
 
     local c
     for c in ssh timeout column sort awk tar; do [[ -n $(command -v $c) ]] || die "'$c' not found on this machine"; done
@@ -1425,6 +1434,22 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
         elif [[ $pre_a == -t?* ]]; then pre_t=${pre_a#-t}; fi
     done
     [[ -n $pre_t ]] && settings_prepass "$pre_t"
+    # --pw-prompt (taken off the arguments here; main never sees it) or FF_PW_PROMPT=1, and a -t pw of ?: the
+    # passwords are asked now, on the terminal alone, before the run log, the viewer and main start (hostfile.sh)
+    pre_args=(); pre_all=0; pre_n=0
+    for pre_a in "$@"; do
+        if (( pre_n )); then pre_n=0; pre_args+=("$pre_a"); continue; fi
+        case $pre_a in
+            --pw-prompt) pre_all=1 ;;
+            -t) pre_n=1; pre_args+=("$pre_a") ;;
+            --list|-h|--help) PW_NOASK=1; pre_args+=("$pre_a") ;;
+            *) pre_args+=("$pre_a") ;;
+        esac
+    done
+    set -- "${pre_args[@]}"
+    [[ ${FF_PW_PROMPT:-0} == [01] ]] || die "FF_PW_PROMPT must be 0 or 1, got '$FF_PW_PROMPT'"
+    [[ $FF_PW_PROMPT == 1 ]] && pre_all=1
+    pw_prompts "$pre_t" "$pre_all"
     FF_RUNLOG=$(mktemp "${TMPDIR:-/tmp}/ff_runlog.XXXXXX") || exit 2
     STATE_FILE=$FF_RUNLOG.state
     trap ':' INT TERM HUP   # keep waiting for main's cleanup on Ctrl-C or a group kill (a no-op trap, so main gets its own)
