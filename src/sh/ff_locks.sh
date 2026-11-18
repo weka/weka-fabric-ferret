@@ -8,7 +8,7 @@ take_locks() {
     local info="since=$(date -u +%Y-%m-%dT%H:%M:%SZ),from=$(hostname -s),user=$(id -un)"   # no spaces: args are re-split remotely
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        ( out=$(rbash "${T_TARGET[$k]}" take "$RUN_ID" "$info" "$max" <<<"$LOCK_SCRIPT" 2>&1)
+        ( rcap out "lock ${T_HOST[$k]}" rbash "${T_TARGET[$k]}" take "$RUN_ID" "$info" "$max" <<<"$LOCK_SCRIPT"
           echo "${T_HOST[$k]} ${out%%$'\n'*}" > "$WORK/lock.$k" ) &
     done
     wait

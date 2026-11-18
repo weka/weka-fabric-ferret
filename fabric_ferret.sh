@@ -639,8 +639,24 @@ wait_all() { while [[ -n $(jobs -rp) ]]; do wait; done; }   # a trapped Ctrl-C e
 # ---------- ssh ----------
 
 # throttle: jobs.sh, shared with thermals_capture.sh
+# rq cmd...: cmd (an ssh call, maybe behind timeout) with the remote side's preamble kept off its stderr. sshd prints
+# some lines on a session's stderr before the command runs ("Could not chdir to home directory ..." where the login's
+# home is missing; "X11 forwarding request failed ..." for a client set to forward X11); in the output the checks read,
+# they took the place of the answers and every host failed (2026-11-18). Those lines go to ssh_errors.log
+# (RUNLOG_SSH); any other stderr line stays on stderr, after the command's stdout. Before WORK exists: cmd as is.
+SSH_NOISE='^(Could not chdir to home directory |X11 forwarding request failed )'
+rq() {
+    local e rc
+    { [[ -d ${WORK-} && -n ${RUNLOG_SSH-} ]] && e=$(mktemp "$WORK/rq.XXXXXX"); } || { "$@"; return; }
+    "$@" 2> "$e"; rc=$?
+    if [[ -s $e ]]; then
+        grep -E "$SSH_NOISE" "$e" | sed 's/^/sshd: /' >> "$RUNLOG_SSH"
+        grep -v -E "$SSH_NOISE" "$e" >&2
+    fi
+    rm -f "$e"; return $rc
+}
 # TL[target]: the target's login (FF_SSH_USER, or its -t row's), keyed by the target so cleanup can use it too
-rsh() { local t=$1; shift; ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
+rsh() { local t=$1; shift; rq ssh -n "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "$@"; }
 # sweep_ssh target cmd...: the call that opens the target's ssh master. A password login (TPW) reads its password here,
 # through the askpass helper from a one-use fifo (BatchMode=no first: ssh keeps an option's first value); every later
 # call rides the master under BatchMode=yes, so a lost master fails loud instead of prompting
@@ -673,16 +689,30 @@ rbash() {
     local t=$1; shift; privv "$t"
     if [[ ${TESC[$t]-} == S ]]; then
         [[ -n ${TPW[$t]+x} ]] || return 3   # after a crash: no password to give sudo (never saved); no blank try
-        { printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL"; cat; } | "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
+        { printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL"; cat; } | rq "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
             "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo -- "$@"
-    else "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
+    else rq "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
+}
+# rcap var tag cmd...: cmd (an rbash call) with its stdout alone in var; its stderr apart, so a line the remote side
+# prints there (sshd's "Could not chdir to home directory", a login banner, an X11 refusal) never takes the place of a
+# check's answer. The stderr goes to ssh_errors.log (RUNLOG_SSH), each line after "<tag>: "; an empty stdout takes
+# the stderr's last line instead (ssh's own failure: the reason). Returns cmd's rc.
+rcap() {
+    local -n _rc_o=$1; local tag=$2 e rc; shift 2
+    e=$(mktemp "$WORK/err.XXXXXX") || { _rc_o="SSH no stderr file"; return 1; }
+    _rc_o=$("$@" 2> "$e"); rc=$?
+    if [[ -s $e ]]; then
+        awk -v t="$tag" '{print t ": " $0}' "$e" >> "$RUNLOG_SSH"
+        [[ -n $_rc_o ]] || _rc_o=$(tail -n 1 "$e")
+    fi
+    rm -f "$e"; return $rc
 }
 # rlogin_bash [-T secs] target args...: stdin as a bash script on the target as its login, no escalation (the
 # temperature reader escalates ipmitool alone), over the sweep's master; -T: cut off after secs where timeout exists
 rlogin_bash() {
     local -a to=(); [[ $1 == -T ]] && { [[ -n $TO ]] && to=("$TO" "$2"); shift 2; }
     local t=$1; shift
-    "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" bash -s -- "$@"
+    rq "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" bash -s -- "$@"
 }
 # rroot target cmd...: one command as root (TESC). Returns 3, running nothing, for a sudo -S host whose password isn't
 # in memory: the cleanup after a crash works from the state file, which never holds a password
@@ -690,7 +720,7 @@ rroot() {
     local t=$1 PRIV; shift; privv "$t"
     if [[ ${TESC[$t]-} != S ]]; then rsh "$t" "${PRIV[@]}" "$@"; return; fi
     [[ -n ${TPW[$t]+x} ]] || return 3
-    printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL" | ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
+    printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL" | rq ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
         "${PRIV[@]}" sh -c "$(sudo_guard '"$@"')" ff-sudo "$@"
 }
 
@@ -2176,7 +2206,7 @@ gateway_check() {
         for j in "${ELIG[@]}"; do [[ $j != "$k" ]] && rail_ok $j $r && peers+=("${RIP[$j,$r]}"); done
         (( ${#peers[@]} )) || continue
         throttle
-        ( out=$(rbash "${T_TARGET[$k]}" "${RIP[$k,$r]}" "${RNIC[$k,$r]}" $(( ${RMTU[$k,$r]:-1500} - 28 )) "${peers[@]}" <<<"$GW_SCRIPT" 2>&1)
+        ( rcap out "gateway ${T_HOST[$k]}" rbash "${T_TARGET[$k]}" "${RIP[$k,$r]}" "${RNIC[$k,$r]}" $(( ${RMTU[$k,$r]:-1500} - 28 )) "${peers[@]}" <<<"$GW_SCRIPT"
           while read -r line; do [[ -n $line ]] && echo "${T_HOST[$k]} $(rail_letter $r) ${RIP[$k,$r]} $line"; done <<<"${out:-SSH no output}" > "$WORK/gw.$k.$r" ) &
     done; done
     wait
@@ -2201,7 +2231,7 @@ take_locks() {
     local info="since=$(date -u +%Y-%m-%dT%H:%M:%SZ),from=$(hostname -s),user=$(id -un)"   # no spaces: args are re-split remotely
     for k in "${ELIG[@]}" "${CLI[@]}"; do
         throttle
-        ( out=$(rbash "${T_TARGET[$k]}" take "$RUN_ID" "$info" "$max" <<<"$LOCK_SCRIPT" 2>&1)
+        ( rcap out "lock ${T_HOST[$k]}" rbash "${T_TARGET[$k]}" take "$RUN_ID" "$info" "$max" <<<"$LOCK_SCRIPT"
           echo "${T_HOST[$k]} ${out%%$'\n'*}" > "$WORK/lock.$k" ) &
     done
     wait
@@ -2578,7 +2608,7 @@ check_path() {
     # router side would be), so a 4220 RDMA rail to a 9000 rail passes but a 1500 host on a 9000 rail fails.
     local r1=${RAIL_MTU[$sr]:-$m1} r2=${RAIL_MTU[$dr]:-$m2}
     local size=$(( (sr == dr ? (m1 > m2 ? m1 : m2) : (r1 < r2 ? r1 : r2)) - 28 ))
-    ( out=$(rbash "${T_TARGET[$sk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "${RNIC[$sk,$sr]}" $size <<<"$PATH_SCRIPT" 2>&1)
+    ( rcap out "path $key" rbash "${T_TARGET[$sk]}" "${RIP[$sk,$sr]}" "${RIP[$dk,$dr]}" "${RNIC[$sk,$sr]}" $size <<<"$PATH_SCRIPT"
       echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
 }
 
@@ -3372,10 +3402,10 @@ cl_check() {
     local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
     local size=$(( (m1 < m2 ? m1 : m2) - 28 ))
     if [[ $dir == c2b ]]; then
-        ( out=$(rbash "${T_TARGET[$ck]}" "${CIP[$ck,$cj]}" "${RIP[$b,$r]}" "${CNIC[$ck,$cj]}" $size <<<"$PATH_SCRIPT" 2>&1)
+        ( rcap out "path $key" rbash "${T_TARGET[$ck]}" "${CIP[$ck,$cj]}" "${RIP[$b,$r]}" "${CNIC[$ck,$cj]}" $size <<<"$PATH_SCRIPT"
           echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
     else
-        ( out=$(rbash "${T_TARGET[$b]}" "${RIP[$b,$r]}" "${CIP[$ck,$cj]}" "${RNIC[$b,$r]}" $size <<<"$PATH_SCRIPT" 2>&1)
+        ( rcap out "path $key" rbash "${T_TARGET[$b]}" "${RIP[$b,$r]}" "${CIP[$ck,$cj]}" "${RNIC[$b,$r]}" $size <<<"$PATH_SCRIPT"
           echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
     fi
 }

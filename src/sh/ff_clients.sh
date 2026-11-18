@@ -63,10 +63,10 @@ cl_check() {
     local m1=${CMTU[$ck,$cj]:-1500} m2=${RMTU[$b,$r]:-1500}
     local size=$(( (m1 < m2 ? m1 : m2) - 28 ))
     if [[ $dir == c2b ]]; then
-        ( out=$(rbash "${T_TARGET[$ck]}" "${CIP[$ck,$cj]}" "${RIP[$b,$r]}" "${CNIC[$ck,$cj]}" $size <<<"$PATH_SCRIPT" 2>&1)
+        ( rcap out "path $key" rbash "${T_TARGET[$ck]}" "${CIP[$ck,$cj]}" "${RIP[$b,$r]}" "${CNIC[$ck,$cj]}" $size <<<"$PATH_SCRIPT"
           echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
     else
-        ( out=$(rbash "${T_TARGET[$b]}" "${RIP[$b,$r]}" "${CIP[$ck,$cj]}" "${RNIC[$b,$r]}" $size <<<"$PATH_SCRIPT" 2>&1)
+        ( rcap out "path $key" rbash "${T_TARGET[$b]}" "${RIP[$b,$r]}" "${CIP[$ck,$cj]}" "${RNIC[$b,$r]}" $size <<<"$PATH_SCRIPT"
           echo "${out:-SSH no output}" | tail -n1 > "$PATHS/$key" ) &
     fi
 }

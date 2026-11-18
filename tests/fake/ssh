@@ -47,6 +47,11 @@ for x in $FAKE_LOGIN; do [[ ${x%%:*} == "$target" && ${x#*:} != "$login" ]] && {
 # FAKE_X11=1: a client whose ssh config has ForwardX11 yes, on hosts that refuse X11: every session prints the refusal on
 # stderr, ahead of the command's output, unless the call carries -o ForwardX11=no (as real ssh does)
 [[ -n $FAKE_X11 && -z $x11no ]] && echo "X11 forwarding request failed on channel 0" >&2
+# FAKE_SSHD_ERR=1: the host's sshd prints a line on every session's stderr before the command runs (the login's home is
+# missing there), whatever the client's options
+[[ -n $FAKE_SSHD_ERR ]] && echo "Could not chdir to home directory /home/$login: No such file or directory" >&2
+# FAKE_STDERR=<text>: any other line on every session's stderr (a banner the tool does not know)
+[[ -n $FAKE_STDERR ]] && echo "$FAKE_STDERR" >&2
 # passwords: $FSTATE/pw.<target> = it takes only that password, asked once through SSH_ASKPASS (BatchMode=no,
 # SSH_ASKPASS_REQUIRE=force); a call that authenticated leaves authed.<target>.<login>, the open master later calls
 # ride (BatchMode=yes is fine then). Any environment variable holding the password -> "<target> <var>" in pwenv.log.
