@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/bash
 # fabric_ferret.sh -t end to end (slice 3): a backend CIDR and two named clients, one of them unreachable. The range
 # flag is kept per type, so the backend range must not make the dead client look normal: it counts as missing.
-# checks: 24
+# checks: 25
 # secs: 55
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 # two bmc lines: 198.18.9.1 answers (fake/ipmitool), 198.18.9.2 is a dead BMC (FAKE_BMC_DOWN: no lanplus session, rc 1)
@@ -97,7 +97,7 @@ esetup; out=$(xrun en env "$EV" FAKE_NOPASSWD=198.18.0.23 FF_ITER=2 FF_UDP=0 tim
 leak=$( { printf '%s\n' "$out"; tar xzOf "$(bundle en)" 2>&1; cat $FAKE_STATE/esc.log; } | grep -cF -- "$TPWD")
 chk "NOPASSWD sudo (takes no password): the guard skips to the sentinel; no password in the output, ssh_errors.log, run.log or any bundle member; hosts=3/4" "[ $leak = 0 ] && grep -qE '^RESULT .*hosts=3/4' <<<\"\$out\" && tar tzf \"\$(bundle en)\" | grep -q 'ssh_errors.log' && grep -q '^198.18.0.23 pat sudo -S -k' $FAKE_STATE/esc.log" "leak=$leak $(grep '^RESULT' <<<"$out")"
 # planted control: the pre-fix stream (no guard: sudo -S -k ... bash -s straight) under NOPASSWD runs the password as a command
-perl -pe 's/"\$\{PRIV\[@\]\}" bash -c "\$\(sudo_guard .bash -s -- "\$@".\)" ff-sudo -- "\$@"$/"\${PRIV[@]}" bash -s -- "\$@"/' $C > $W/x_guard.sh
+perl -pe 's/"\$\{PRIV\[@\]\}" bash -c "\$\(sudo_guard .bash -s -- "\$@".\)" ff-sudo "\$@"( .*)?$/"\${PRIV[@]}" bash -s -- "\$@"/' $C > $W/x_guard.sh
 esetup; out=$(xrun eg env "$EV" FAKE_NOPASSWD=198.18.0.23 FF_ITER=2 FF_UDP=0 timeout 240 $B $W/x_guard.sh -t $W/e.csv); rc=$?
 leak=$( { printf '%s\n' "$out"; tar xzOf "$(bundle eg)" 2>&1; } | grep -cF -- "$TPWD")
 chk "planted control (no guard, the pre-fix stream) under NOPASSWD: bash runs the password line, and it lands in ssh_errors.log" "[ \$(diff $C $W/x_guard.sh | grep -c '^>') = 1 ] && [ $leak -gt 0 ] && tar xzOf \"\$(bundle eg)\" --include='*/ssh_errors.log' | grep -qF -- \"\$TPWD\"" "$(diff $C $W/x_guard.sh) leak=$leak"
@@ -106,4 +106,9 @@ esetup; out=$(xrun ec env "$EV" FAKE_SUDO_CACHED=1 FF_ITER=2 FF_UDP=0 timeout 24
 leak=$( { printf '%s\n' "$out"; tar xzOf "$(bundle ec)" 2>&1; } | grep -cF -- "$TPWD")
 chk "control: a cached sudo timestamp, no leak and hosts=3/4" "[ $leak = 0 ] && grep -qE '^RESULT .*hosts=3/4' <<<\"\$out\"" "leak=$leak $(grep '^RESULT' <<<"$out")"
 rm -f "${FAKE_STATE:?}/pw.198.18.0.23"
+# real bash, which the fake's guard copies (2026-11-18): after `bash -c <cmd> <name>` there are no options, so a -- is
+# the next $1. The tool once passed `ff-sudo -- "$@"`: every sudo -S script got -- first (iperf3 never started there)
+v=$($B -c 'printf "%s|%s" "$0" "$1"' ff-sudo -- x); v3=$(/bin/bash -c 'printf "%s|%s" "$0" "$1"' ff-sudo -- x)
+chk "real bash -c <cmd> ff-sudo -- x: \$0=ff-sudo \$1=-- (bash 5 and /bin/bash 3.2), and the collector passes no -- after ff-sudo (control: 1 ff-sudo line)" \
+    "[ \"\$v\" = 'ff-sudo|--' ] && [ \"\$v3\" = 'ff-sudo|--' ] && [ \$(grep -c 'bash -c \"\$(sudo_guard .bash -s -- \"\$@\".)\" ff-sudo \"\$@\"' $C) = 1 ] && ! grep -q 'ff-sudo -- \"\$@\"' $C" "bash5=[$v] bash3=[$v3] $(grep -n 'ff-sudo' $C | head -n 3)"
 finish

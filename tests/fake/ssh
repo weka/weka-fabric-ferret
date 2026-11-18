@@ -115,14 +115,15 @@ case ${args[0]} in
             echo "$target $login ${args[*]:0:nw}" >> "$FSTATE/esc.log"; args=("${args[@]:nw}")
         fi ;;
 esac
-# fabric_ferret's sudo guard: `bash|sh -c <%q one-liner> ff-sudo [--] cmd...`. The one-liner reads a line, reads a
+# fabric_ferret's sudo guard: `bash|sh -c <%q one-liner> ff-sudo cmd...`, ff-sudo its $0 (bash -c reads no options after it: a -- there
+# is the next $1, as real bash has it). The one-liner reads a line, reads a
 # second if the first wasn't the sentinel, then execs the rest: done here as it would be on the host
 if [[ ${args[1]} == -c && ${args[3]} == ff-sudo ]]; then
     eval "guard=${args[2]}"   # undo the %q quoting
     [[ $guard =~ \[\ \"\$l\"\ =\ \"([^\"]+)\"\ \] ]] && sent=${BASH_REMATCH[1]}
     IFS= read -r l; [[ $l == "$sent" ]] || IFS= read -r l
     [[ $l == "$sent" ]] || { echo "fake ssh: the sentinel line never came (guard: $guard)" >&2; exit 1; }
-    if [[ $guard == *"exec bash -s"* ]]; then args=(bash -s "${args[@]:4}"); else args=("${args[@]:4}"); fi
+    if [[ $guard == *"exec bash -s"* ]]; then args=(bash -s -- "${args[@]:4}"); else args=("${args[@]:4}"); fi
 fi
 # a script whose first line is the host's password (sudo took nothing from the stream): bash would run that line as a
 # command, and say so on stderr. Any other first line is the script's, kept.

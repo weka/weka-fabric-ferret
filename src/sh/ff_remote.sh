@@ -52,7 +52,7 @@ rbash() {
     if [[ ${TESC[$t]-} == S ]]; then
         [[ -n ${TPW[$t]+x} ]] || return 3   # after a crash: no password to give sudo (never saved); no blank try
         { printf '%s\n%s\n' "${TPW[$t]}" "$SENTINEL"; cat; } | rq "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" \
-            "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo -- "$@"
+            "${PRIV[@]}" bash -c "$(sudo_guard 'bash -s -- "$@"')" ff-sudo "$@"   # no -- after ff-sudo: bash -c takes no options there, a -- would be the script's $1
     else rq "${to[@]}" ssh "${SSH_OPTS[@]}" -l "${TL[$t]:-$FF_SSH_USER}" "$t" "${PRIV[@]}" bash -s -- "$@"; fi
 }
 # rcap var tag cmd...: cmd (an rbash call) with its stdout alone in var; its stderr apart, so a line the remote side
