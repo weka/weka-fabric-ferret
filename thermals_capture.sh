@@ -1183,7 +1183,8 @@ tc_run() {
     SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
-              -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+              -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15
+              -o ForwardX11=no)   # X11 off: ForwardX11 yes in the ssh config would print its refusal on stderr
     AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; write_askpass "$AUTH/askpass"
     echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$WORK/temps.txt"
     : > "$WORK/samples"; : > "$WORK/hosts"

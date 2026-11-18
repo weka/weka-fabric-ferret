@@ -24,10 +24,11 @@
 FSTATE=${FAKE_STATE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}   # default: this fake's own dir (the groups set one each)
 [[ -d $FSTATE ]] || mkdir -p "$FSTATE"
 target=""; args=(); batch=; login=$USER   # not $(id -un): one more exec on every fake call costs the whole suite
+x11no=   # -o ForwardX11=no seen (FAKE_X11 below)
 while (( $# )); do
     case $1 in
         -l) login=$2; shift 2 ;;
-        -o) [[ $2 == BatchMode=* && -z $batch ]] && batch=${2#BatchMode=}; shift 2 ;;   # ssh keeps an option's first value
+        -o) [[ $2 == BatchMode=* && -z $batch ]] && batch=${2#BatchMode=}; [[ $2 == ForwardX11=no ]] && x11no=1; shift 2 ;;   # ssh keeps an option's first value
         -O) echo "Exit request sent." >&2; exit 0 ;;
         -V) echo "${FAKE_SSH_VERSION:-OpenSSH_9.9p2, LibreSSL 3.3.6}" >&2; exit 0 ;;
         -n|-f) shift ;;
@@ -43,6 +44,9 @@ fi
 # logins: every call's "target login" -> logins.log; FAKE_LOGIN="target:login ..." = the only login those targets accept
 echo "$target $login" >> "$FSTATE/logins.log"
 for x in $FAKE_LOGIN; do [[ ${x%%:*} == "$target" && ${x#*:} != "$login" ]] && { echo "$login@$target: Permission denied (publickey,password)." >&2; exit 255; }; done
+# FAKE_X11=1: a client whose ssh config has ForwardX11 yes, on hosts that refuse X11: every session prints the refusal on
+# stderr, ahead of the command's output, unless the call carries -o ForwardX11=no (as real ssh does)
+[[ -n $FAKE_X11 && -z $x11no ]] && echo "X11 forwarding request failed on channel 0" >&2
 # passwords: $FSTATE/pw.<target> = it takes only that password, asked once through SSH_ASKPASS (BatchMode=no,
 # SSH_ASKPASS_REQUIRE=force); a call that authenticated leaves authed.<target>.<login>, the open master later calls
 # ride (BatchMode=yes is fine then). Any environment variable holding the password -> "<target> <var>" in pwenv.log.

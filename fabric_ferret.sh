@@ -1904,7 +1904,8 @@ tc_run() {
     SOCKET_DIR=$(mktemp -d /tmp/tc_ssh.XXXXXX) || die "mktemp failed"
     # BatchMode and -l are per target (rssh); ssh keeps the first value it sees for an option
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=5m -o "ControlPath=$SOCKET_DIR/%C"
-              -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15)
+              -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=5 -o ServerAliveInterval=15
+              -o ForwardX11=no)   # X11 off: ForwardX11 yes in the ssh config would print its refusal on stderr
     AUTH=$WORK/auth; mkdir -m 700 "$AUTH" || die "mkdir $AUTH failed"; write_askpass "$AUTH/askpass"
     echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$WORK/temps.txt"
     : > "$WORK/samples"; : > "$WORK/hosts"
@@ -3951,7 +3952,8 @@ main() {
     SENTINEL=ff-$(od -An -N8 -tx1 /dev/urandom 2>&1 | tr -dc 'a-f0-9'); [[ ${#SENTINEL} -ge 10 ]] || SENTINEL=ff-$RANDOM$RANDOM$RANDOM
     SSH_OPTS=(-o ControlMaster=auto -o ControlPersist=15m -o "ControlPath=$SOCKET_DIR/%C"
               -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5
-              -o ServerAliveInterval=15)   # the login is per target (TL, rsh/rbash)
+              -o ServerAliveInterval=15 -o ForwardX11=no)   # the login is per target (TL, rsh/rbash); X11 off: a
+    # ForwardX11 yes in the user's ssh config would put "X11 forwarding request failed" on stderr, where the checks read
     declare -gA T_TARGET T_HOST DISC RNIC RIP RMTU RSTATE STARTED REACH_ONLY DOWN_IP SI_CUT
     declare -gA IS_CL CN CNIC CIP CMTU CSTATE   # clients: k -> 1, data NIC count; (k,j) -> NIC, IP, MTU, state
     declare -ga RAIL_MTU=()   # per rail: highest MTU among its usable hosts
