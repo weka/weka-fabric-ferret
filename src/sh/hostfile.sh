@@ -88,8 +88,9 @@ pw_prompts() {
             bmc:*) label="BMC password for user ${k#bmc:} (the -t bmc rows whose pw is ?): " ;;
             *)     label="Password for every ssh target with no password of its own (--pw-prompt): " ;;
         esac
-        printf '%s' "$label" > /dev/tty
-        IFS= read -rs pw < /dev/tty; rc=$?
+        # read -p shows the prompt only once echo is off: a printf first left a window where a password typed at
+        # once was echoed (17 of 60 runs under load, 2026-11-18)
+        IFS= read -rs -p "$label" pw < /dev/tty 2> /dev/tty; rc=$?
         printf '\n' > /dev/tty
         (( rc == 0 )) || die "no password read (end of input): ${label%% (*}"
         [[ -n $pw ]] || die "empty password: ${label%% (*}"

@@ -3,7 +3,7 @@
 # user), --pw-prompt and FF_PW_PROMPT=1 (one password for every ssh target that has none, FF_HOSTS targets too). Each
 # run is on a pty (/usr/bin/expect, fixtures/units/pw_prompt.exp) against the fake: pw.<target> = the password that
 # host takes, through SSH_ASKPASS (askpass.log); any environment variable holding it -> pwenv.log.
-# checks: 19
+# checks: 20
 # secs: 25
 # needs: expect perl
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
@@ -152,4 +152,12 @@ pwreset; printf '%s' "$TPWD" > $FAKE_STATE/pw.198.18.0.21
 prun tr "$(ans "$TPWD")" FF_SSH_USER=ops FF_HOSTS=198.18.0.21,198.18.0.22 FF_OUT_DIR=$W/tr $TC --pw-prompt; rc=$?
 chk "thermals --pw-prompt, .22's sudo refuses the password: rc 3, 'NO TEMPERATURE DATA: h22 ipmi (sudo_refused...', data=PARTIAL hosts=2/2 nodata=1 (control: (13)'s run, where .22 takes it, is COMPLETE)" \
     "[ $rc = 3 ] && cap tr | grep -q 'NO TEMPERATURE DATA: h22 ipmi (sudo_refused' && cap tr | grep -q '^RESULT data=PARTIAL hosts=2/2 .*nodata=1'" "rc=$rc $(cap tr | grep -E '^RESULT|ERROR|NO TEMP' | tr '\n' '|')"
+
+# (16) the prompt is shown by read -rs -p, which turns echo off first; a printf of the prompt before read -s left a
+# window where a password typed at once was echoed (17 of 60 expect runs under CPU load on a23ad0d; 0 of 60 with -p).
+# The race needs load to show, so this pins the shape in both built tools (control: a23ad0d's printf form fails it)
+pwshape() { awk '/^pw_prompts\(\) \{/ {f = 1} f {print} f && /^}/ {exit}' "$1"; }
+chk "both tools show the prompt with read -rs -p \"\$label\" from /dev/tty, never a printf of it first (control: 2 pw_prompts bodies found)" \
+    "[ \$(cat <(pwshape $C) <(pwshape $TC) | grep -c '^pw_prompts() {') = 2 ] && [ \$(cat <(pwshape $C) <(pwshape $TC) | grep -cF 'read -rs -p \"\$label\" pw < /dev/tty 2> /dev/tty') = 2 ] && ! cat <(pwshape $C) <(pwshape $TC) | grep -qF '\"\$label\" > /dev/tty'" \
+    "$(pwshape $C | grep -nE 'label|read ')"
 finish
