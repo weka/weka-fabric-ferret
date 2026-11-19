@@ -3269,6 +3269,7 @@ def parse_tar_archive(filepath):
         if len(p) >= 13 and not l.startswith('#') and p[11].isdigit():
             uconf[(p[0], p[1], p[3], p[4])].append({'gbps': p[5], 'pct': p[8], 'moved': int(p[11]), 'reading': p[12]})
     udp, it, ph = [], '', ''
+    hrem = {}   # (iter, phase, host) -> its socket, NIC, backlog drops not yet placed on a run
     for line in read_file('iperf3_udp_results.txt').splitlines():
         mm = re.match(r'^###\s+iteration:(\d+)\s+phase:(\S+)', line)
         if mm:
@@ -3277,11 +3278,19 @@ def parse_tar_archive(filepath):
         m = re.match(r'^(\S+),(\S+),\[SUM\].*?([\d.]+)\s+Gbits/sec\s+([\d.]+)\s+ms\s+(\d+)/(\d+)\s+\(([\d.e+-]+)%\)\s+receiver', line)
         if m:
             dst_host = host_of_ip.get(m.group(2), '')
-            sock, back = hostc.get((it, ph, dst_host), (0, 0))
-            nic = max(0, nicd.get((it, ph, dst_host), 0) - back) + nico.get((it, ph, dst_host), 0)
+            # the host's buckets (its counters for the phase) are shared by the runs into it in that phase, taken in file
+            # order: each run takes what it can of what is left (a ring sends one run into a host per rail per phase)
+            hk = (it, ph, dst_host)
+            if hk not in hrem:
+                s0, b0 = hostc.get(hk, (0, 0))
+                hrem[hk] = [s0, max(0, nicd.get(hk, 0) - b0) + nico.get(hk, 0), b0]
             lost, sent = int(m.group(5)), int(m.group(6))
             frac, tx = uexp.get((it, ph, m.group(1), m.group(2)), (0.0, 0))
-            unacc = max(0, lost - tx - sock - nic - back)
+            left = max(0, lost - tx); take = []
+            for i in range(3):
+                t = min(hrem[hk][i], left); hrem[hk][i] -= t; left -= t; take.append(t)
+            sock, nic, back = take
+            unacc = left
             expd = round(frac * (sent - tx))
             cq = uconf.get((it, ph, m.group(1), m.group(2)))
             cfm = cq.pop(0) if cq else None
