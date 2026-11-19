@@ -870,7 +870,7 @@ th small {{ display: block; font-weight: 400; color: #8899aa; font-size: 0.7rem;
 .tab-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }}
 .nav-tabs {{ border-bottom: 1px solid #0f3460; }}
 .table {{ color: #e0e0e0; }}
-.table thead th {{ background: #0f3460; color: #4ecca3; border-bottom: 2px solid #e94560; position: sticky; top: 0; box-shadow: inset 0 -2px 0 #e94560; }}
+.table thead th {{ background: #0f3460; color: #4ecca3; border-bottom: 2px solid #e94560; position: sticky !important; top: 0; box-shadow: inset 0 -2px 0 #e94560; }}  /* !important: DataTables sets its sortable headers position: relative */
 .table-striped tbody tr:nth-of-type(odd) {{ background: rgba(15,52,96,0.3); }}
 .table-hover tbody tr:hover {{ background: rgba(78,204,163,0.1); }}
 .badge-down {{ background: #e94560; }}

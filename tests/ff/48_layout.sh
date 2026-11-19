@@ -5,7 +5,7 @@
 # the LLDP card alone in a col-12 row with its text cells nowrap, and one tab-fitting resize handler (fitTabs). The
 # interface (class "scroll", fitTabs) was agreed with the coder
 # tier: fast
-# checks: 6
+# checks: 7
 # secs: 12
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
@@ -47,5 +47,10 @@ if [[ -x $CHROME ]]; then
     pg=$(probe $W/gc.html); grep -v '^\.card-body\.scroll { padding-top: 0; }' $W/gc.html > $W/gcx.html; px=$(probe $W/gcx.html)
     chk "sticky headers in Chrome: golden-C's scrolling table boxes (4 or more) each hold their header row at the box's top edge, gap 0; control: without the padding-top rule (1 line out) the gap is 8 px" \
         "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 4 )) && [ \$(diff $W/gc.html $W/gcx.html | grep -cE '^[0-9]+d[0-9]+$') = 1 ] && [[ '$px' =~ maxgap=8\ mingap=8\$ ]]" "fixed '$pg' | control '$px'"
-else bad "sticky headers in Chrome" "Chrome not found at $CHROME: the header gap is untested"; fi
+    # every header cell (issue 13): DataTables' rule makes its sortable headers position: relative, so only the '#'
+    # cell stuck; the probe cuts each box with 3 or more rows to 120 px and measures every cell of the header row
+    sed 's/position: sticky !important; top: 0;/position: sticky; top: 0;/' $W/gc.html > $W/gcy.html; py=$(probe $W/gcy.html)
+    chk "sticky headers in Chrome: every header cell, DataTables' sortable ones too, at the box's top edge in each cut box (7 or more); control: without !important (1 line changed) a sortable header scrolls away (gap below 0)" \
+        "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 7 )) && [ \$(diff $W/gc.html $W/gcy.html | grep -c '^>') = 1 ] && [[ '$py' =~ mingap=-[0-9]+\$ ]]" "fixed '$pg' | control '$py'"
+else bad "sticky headers in Chrome" "Chrome not found at $CHROME: the header gap is untested"; bad "sticky headers in Chrome (every cell)" "Chrome not found"; fi
 finish
