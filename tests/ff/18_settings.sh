@@ -49,7 +49,7 @@ chk "control: with python3 on PATH the line is not there" "! grep -q 'running wi
 # a stub that echoes two lines and exits 3. The fake-host run keeps its rc and stdout, run.log is the plain run's
 # (timestamps and temp paths aside), and the terminal gets lines 1-2, the fallback line, then every later line.
 frun() { fresh; mkdir -p $W/$1; ( cd $W/$1 && rm -f fabric_ferret_*; shift; env PATH=$S/fake:$PATH FF_RAILS='198.19.1.0/24;198.19.2.0/24' "$@" ); }
-nrl() { sed -E 's/[0-9]{2}:[0-9]{2}:[0-9]{2}/T/g; /^# Temp: /d' "$1"; }   # a run.log without its clock times and temp paths
+nrl() { sed -E 's/[0-9]{2}:[0-9]{2}:[0-9]{2}/T/g; s/ over [0-9]+s/ over Ns/; /^# Temp: /d' "$1"; }   # a run.log without its clock times, window lengths and temp paths
 frun fp FF_HOSTS=198.18.0.21,198.18.0.22,198.18.0.23 FF_ITER=1 FF_UDP=0 FF_MESH=0 FF_TEMPS=0 timeout 240 $B $C 1 > $W/fp.out 2> $W/fp.err; prc=$?
 frun fv FF_FERRET=1 FF_VIEWER=$S/fixtures/units/stub_viewer.sh FF_HOSTS=198.18.0.21,198.18.0.22,198.18.0.23 FF_ITER=1 FF_UDP=0 FF_MESH=0 FF_TEMPS=0 timeout 240 $B $C 1 > $W/fv.out 2> $W/fv.err; vrc=$?
 bfile fp run.log > $W/fp.runlog; bfile fv run.log > $W/fv.runlog

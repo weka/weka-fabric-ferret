@@ -14,8 +14,8 @@ chk "live: a host without iperf3 is still tested" "! grep -q 'iperf3 missing' $W
 chk "live: no iperf3 run, no server started or killed (in a run that finished)" "grep -q '^RESULT coverage=PARTIAL' $W/live.out && [ ! -e $FAKE_STATE/iperf_args.log ] && [ ! -e $FAKE_STATE/pkill.log ] && ! grep -q 'starting servers' $W/live.out"
 chk "live: one observation window, in the last iteration" "[ \$(grep -c 'Observation window: 1s with no test load' $W/live.out) = 1 ] && grep -B30 'Observation window' $W/live.out | grep -q 'Iteration 2 of 2'"
 chk "live: failed path checks recorded per phase" "member live paths_excluded.txt | awk '\$2 == 1 || \$2 == 2' | grep -q 'DOWN h4'" "$(member live paths_excluded.txt | head -n 3)"
-chk "live: RESULT says iperf skipped, paths = checks passed" "grep -E '^RESULT coverage=PARTIAL hosts=5/5 paths=10/16 skipped=6 .* iperf=skipped' $W/live.out | grep -q ." "$(grep '^RESULT' $W/live.out)"
-chk "live: summary says bandwidth not tested" "grep -q 'Bandwidth not tested (FF_SKIP_IPERF=1). Path checks (route, ping, MTU no-fragment): 10 of 16 planned OK' $W/live.out && grep -q 'with a passed path check: 5' $W/live.out"
+chk "live: RESULT says iperf skipped, paths = checks passed" "grep -E '^RESULT coverage=PARTIAL hosts=5/5 paths=24/40 skipped=16 .* iperf=skipped' $W/live.out | grep -q ." "$(grep '^RESULT' $W/live.out)"
+chk "live: summary says bandwidth not tested" "grep -q 'Bandwidth not tested (FF_SKIP_IPERF=1). Path checks (route, ping, MTU no-fragment): 24 of 40 planned OK' $W/live.out && grep -q 'with a passed path check: 5' $W/live.out"
 chk "live: counters and system info still collected" "member live metadata.txt | grep -q -x 'iperf=skipped' && member live metadata.txt | grep -q -x 'sysinfo_hosts=5' && [ -n \"\$(member live host_counters.txt)\" ] && [ -n \"\$(member live fec_rates.txt)\" ]"
 chk "live: host_rx has every host, CPU '-'" "[ \$(member live host_rx.txt | awk 'NR > 1 && \$9 == \"-\"' | wc -l) = 5 ]" "$(member live host_rx.txt | head -n 3)"
 

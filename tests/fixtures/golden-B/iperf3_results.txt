@@ -1,14 +1,28 @@
 ### iteration:1 phase:1
-198.19.2.5,198.19.2.2,[SUM]  0.00-1.00  sec  3030  GBytes  303  Gbits/sec  receiver  retransmits:4   cpu:27.5/95.0
-198.19.1.3,198.19.1.4,[SUM]  0.00-1.00  sec  3170  GBytes  317  Gbits/sec  receiver  retransmits:39  cpu:21.5/95.0
-### iteration:1 phase:2
-198.19.1.2,198.19.2.5,[SUM]  0.00-1.00  sec  3510  GBytes  351  Gbits/sec  receiver  retransmits:5   cpu:38.5/95.0
-198.19.2.5,198.19.1.2,[SUM]  0.00-1.00  sec  3030  GBytes  303  Gbits/sec  receiver  retransmits:4   cpu:27.5/95.0
-198.19.2.3,198.19.1.4,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:39  cpu:21.5/95.0
-198.19.1.4,198.19.2.3,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:37  cpu:22.5/95.0
-### iteration:2 phase:1
-198.19.1.1,198.19.1.2,[SUM]  0.00-1.00  sec  3600  GBytes  360  Gbits/sec  receiver  retransmits:0   cpu:38.5/95.0
 198.19.2.2,198.19.2.1,[SUM]  0.00-1.00  sec  3890  GBytes  389  Gbits/sec  receiver  retransmits:38  cpu:36.5/95.0
+198.19.1.1,198.19.1.2,[SUM]  0.00-1.00  sec  3600  GBytes  360  Gbits/sec  receiver  retransmits:0   cpu:38.5/95.0
+198.19.1.2,198.19.1.3,[SUM]  0.00-1.00  sec  3190  GBytes  319  Gbits/sec  receiver  retransmits:12  cpu:24.5/95.0
+198.19.2.3,198.19.2.2,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:27  cpu:25.5/95.0
+198.19.1.3,198.19.1.4,[SUM]  0.00-1.00  sec  3170  GBytes  317  Gbits/sec  receiver  retransmits:39  cpu:21.5/95.0
+198.19.2.1,198.19.2.5,[SUM]  0.00-1.00  sec  3250  GBytes  325  Gbits/sec  receiver  retransmits:29  cpu:29.5/95.0
+### iteration:1 phase:2
+198.19.1.1,198.19.2.2,[SUM]  0.00-1.00  sec  3600  GBytes  360  Gbits/sec  receiver  retransmits:0   cpu:38.5/95.0
+198.19.2.2,198.19.1.1,[SUM]  0.00-1.00  sec  3890  GBytes  389  Gbits/sec  receiver  retransmits:38  cpu:36.5/95.0
+198.19.1.2,198.19.2.3,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:12  cpu:24.5/95.0
+198.19.2.3,198.19.1.2,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:27  cpu:25.5/95.0
+198.19.1.4,198.19.2.5,[SUM]  0.00-1.00  sec  3820  GBytes  382  Gbits/sec  receiver  retransmits:46  cpu:34.5/95.0
+198.19.2.5,198.19.1.4,[SUM]  0.00-1.00  sec  3010  GBytes  301  Gbits/sec  receiver  retransmits:10  cpu:39.5/95.0
+### iteration:2 phase:1
+198.19.1.1,198.19.1.3,[SUM]  0.00-1.00  sec  3260  GBytes  326  Gbits/sec  receiver  retransmits:43  cpu:36.5/95.0
+198.19.2.3,198.19.2.1,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:6   cpu:24.5/95.0
+198.19.1.2,198.19.1.4,[SUM]  0.00-1.00  sec  3890  GBytes  389  Gbits/sec  receiver  retransmits:12  cpu:27.5/95.0
+198.19.2.5,198.19.2.3,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:49  cpu:30.5/95.0
+198.19.1.4,198.19.1.1,[SUM]  0.00-1.00  sec  3590  GBytes  359  Gbits/sec  receiver  retransmits:9   cpu:32.5/95.0
+198.19.2.2,198.19.2.5,[SUM]  0.00-1.00  sec  3510  GBytes  351  Gbits/sec  receiver  retransmits:5   cpu:38.5/95.0
 ### iteration:2 phase:2
-198.19.2.1,198.19.1.2,[SUM]  0.00-1.00  sec  3600  GBytes  360  Gbits/sec  receiver  retransmits:0   cpu:38.5/95.0
-198.19.1.2,198.19.2.1,[SUM]  0.00-1.00  sec  3890  GBytes  389  Gbits/sec  receiver  retransmits:38  cpu:36.5/95.0
+198.19.1.1,198.19.2.3,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:43  cpu:36.5/95.0
+198.19.2.3,198.19.1.1,[SUM]  0.00-1.00  sec  1500  GBytes  150  Gbits/sec  receiver  retransmits:6   cpu:24.5/95.0
+198.19.1.3,198.19.2.5,[SUM]  0.00-1.00  sec  3310  GBytes  331  Gbits/sec  receiver  retransmits:36  cpu:23.5/95.0
+198.19.2.5,198.19.1.3,[SUM]  0.00-1.00  sec  3830  GBytes  383  Gbits/sec  receiver  retransmits:49  cpu:30.5/95.0
+198.19.1.4,198.19.2.1,[SUM]  0.00-1.00  sec  3590  GBytes  359  Gbits/sec  receiver  retransmits:9   cpu:32.5/95.0
+198.19.2.1,198.19.1.4,[SUM]  0.00-1.00  sec  3400  GBytes  340  Gbits/sec  receiver  retransmits:12  cpu:27.5/95.0

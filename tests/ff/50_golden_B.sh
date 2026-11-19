@@ -65,11 +65,11 @@ for a in $S/fixtures/bundles/*.tgz; do
 done
 
 # --- the run (was 04, 20) ---
-chk "golden-B: rc 3, RESULT PARTIAL hosts=5/5 paths=10/16 skipped=6 (h4's dead B no longer blocks the cross run on its A)" \
-    "[ $rc = 3 ] && grep -q '^RESULT coverage=PARTIAL hosts=5/5 paths=10/16 skipped=6 no_result=0 cross_rail=on' $W/gb.out" "rc=$rc $(grep '^RESULT' $W/gb.out)"
+chk "golden-B: rc 3, RESULT PARTIAL hosts=5/5 paths=24/40 skipped=16 (the ring: 5 links per rail and phase, 2 iterations; h4's dead B no longer blocks the cross run on its A)" \
+    "[ $rc = 3 ] && grep -q '^RESULT coverage=PARTIAL hosts=5/5 paths=24/40 skipped=16 no_result=0 cross_rail=on' $W/gb.out" "rc=$rc $(grep '^RESULT' $W/gb.out)"
 chk "golden-B: run.log in the bundle" "tar xzf \"$t\" -O --include='*/run.log' | grep -q '# Begin'"
-# 232 (was 189): a phase 2 pair uses one NIC per host, so h4 (B down) and h5 (A MTU 1500) still run cross on the other NIC
-chk "golden-B: UDP unaccounted 232" "grep -q 'unaccounted 232' $W/gb.out && grep -q 'unaccounted beyond it (likely fabric): 232' $W/gb.out" "$(grep 'Lost datagrams' $W/gb.out)"
+# 306 (232 before the ring, 189 before that): a phase 2 pair uses one NIC per host, so h4 (B down) and h5 (A MTU 1500) still run cross on the other NIC
+chk "golden-B: UDP unaccounted 306" "grep -q 'unaccounted 306' $W/gb.out && grep -q 'unaccounted beyond it (likely fabric): 306' $W/gb.out" "$(grep 'Lost datagrams' $W/gb.out)"
 chk "golden-B: pause counter seen" "grep -q 'rx_prio3_pause' $W/gb.out"
 chk "golden-B: traffic by priority per rail" "grep -q 'Traffic by priority in iteration 1 (rx+tx bytes): rail A: prio3 42.0GB' $W/gb.out" "$(grep 'Traffic by priority' $W/gb.out | head -n 1)"
 chk "golden-B: RDMA counter rose (packets name kept)" "grep -q -E 'h1_enp5s0np0 +rdma:np_ecn_marked_roce_packets +42' $W/gb.out"
@@ -128,12 +128,20 @@ render gb; prc=$?
 chk "golden-B: parser rc 3 (PARTIAL) with the INCOMPLETE banner" "[ $prc = 3 ] && grep -q 'INCOMPLETE RESULT' $W/gb.html" "rc=$prc $(tail -n 3 $W/gb.pout)"
 # (from 14, on a fresh render now that golden-B declares its uplinks) the card says the run declared them
 chk "golden-B: dashboard uplink card: declared by the run, 1 x 1 x 300G" "grep -q 'Leaf uplinks, declared by the run: 1 spines x 1 links x 300G = 300.0 G per leaf' $W/gb.html" "$(grep -oE 'Leaf uplink[^<]*' $W/gb.html | head -n 2)"
-chk "golden-B: dashboard: unaccounted beyond expected 232; uniform rails, no per-rail note" "grep -q 'unaccounted beyond expected (likely fabric) 232' $W/gb.html && ! grep -q 'rails differ' $W/gb.html"
+chk "golden-B: dashboard: unaccounted beyond expected 306; uniform rails, no per-rail note" "grep -q 'unaccounted beyond expected (likely fabric) 306' $W/gb.html && ! grep -q 'rails differ' $W/gb.html"
 chk "golden-B: dashboard: flap is a problem" "grep -q 'Rail links went down during the run' $W/gb.html"
 chk "golden-B: dashboard: FEC card: 1 uncorrectable, 1 watch" "python3 -c \"import re;h=open('$W/gb.html').read();m=re.search(r'FEC during this run.*?</div>',h,re.S);t=re.sub(r'<[^>]+>','',m.group(0));exit(0 if re.search(r'1\s*uncorrectable.*0\s*over the FEC limit.*1\s*watch',t,re.S) else 1)\""
 chk "golden-B: dashboard: FEC card: FEC off shown, not ok" "grep -q '(1 with FEC off)' $W/gb.html && grep -q 'h4_enp5s0np0</td><td><span class=.badge .>FEC off' $W/gb.html"
 chk "golden-B: dashboard: slow link diagnosis from FEC rate" "grep -q 'Uncorrectable FEC blocks during the run' $W/gb.html && ! grep -q 'marginal fiber or dirty connector' $W/gb.html"
-chk "golden-B: dashboard: IP with only cross-rail runs judged on them, marked" "grep -q '\"ip\": \"198.19.2.3\", \"avg\": 150.0, \"samples\": [0-9]*, \"cross_only\": true' $W/gb.html"
+# the ring gives every rail NIC a same-rail run, so a fresh run has no cross-only IP: the edge comes from golden-B's
+# bundle with 198.19.2.3's phase 1 runs taken out (the fresh page, with them, is the control)
+mkdir -p $W/xo $W/xo_x && tar -xzf "$t" -C $W/xo_x && xd=$(ls -d $W/xo_x/*/ | head -n 1) && \
+    awk '/^### / { p1 = ($0 ~ /phase:1$/) } !(p1 && /(^|,)198\.19\.2\.3,/) ' "$xd/iperf3_results.txt" > $W/xo_r && mv $W/xo_r "$xd/iperf3_results.txt" && \
+    tar -czf $W/xo/fabric_ferret_xo.tgz -C $W/xo_x "$(basename "$xd")"
+render xo; xprc=$?
+chk "golden-B: dashboard: IP with only cross-rail runs judged on them, marked (198.19.2.3 without its phase 1 runs: cross_only true; the fresh page: false)" \
+    "grep -q '\"ip\": \"198.19.2.3\", \"avg\": 150.0, \"samples\": [0-9]*, \"cross_only\": true' $W/xo.html && grep -q '\"ip\": \"198.19.2.3\", \"avg\": 150.0, \"samples\": [0-9]*, \"cross_only\": false' $W/gb.html && [ \$(grep -cE '(^|,)198\\.19\\.2\\.3,' <<<\"\$(awk '/^### / { p1 = (\$0 ~ /phase:1\$/) } p1' $xd/iperf3_results.txt)\") = 0 ]" \
+    "rc=$xprc xo: $(grep -o '"ip": "198.19.2.3", "avg"[^d]*' $W/xo.html | head -n 1); gb: $(grep -o '"ip": "198.19.2.3", "avg"[^d]*' $W/gb.html | head -n 1)"
 chk "golden-B: dashboard: mesh in card" "grep -q 'did not answer 7 of 7' $W/gb.html && grep -q 'mesh: 7 of 64 pairs unreachable, 0 lossy' $W/gb.html"
 chk "golden-B: no clients: dashboard card has no client count (control)" "grep -qE 'Host-side receive: [0-9]+ of 5 hosts flagged<' $W/gb.html" "$(grep -oE 'Host-side receive: [^<]*' $W/gb.html)"
 chk "golden-B: dashboard: card counts flagged hosts, flags shown" "grep -q 'Host-side receive: 4 of 5 hosts flagged' $W/gb.html && grep -q 'pcieA&lt;max, softnet_drop, tcp_rcv_drop' $W/gb.html"

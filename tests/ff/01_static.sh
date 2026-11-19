@@ -66,9 +66,9 @@ printf '%s\n' '# a plain host list' '198.18.0.1' '198.18.0.2' '198.18.0.0/30' > 
 out=$(env -u FF_HOSTS $B -s -- -t $W/plain.lst --list < $C 2>&1); chk "stdin launch with -t: a plain host list (2 named + a /30 overlapping them) = 2 targets" "[[ \"$out\" == *'# 2 targets'* ]] && ! grep -q '^client' <<<\"\$out\"" "got: $out"
 
 # --- round robin ---
-out=$($B $S/test_rr.sh 2>&1); chk "round-robin full coverage 2..9" "! grep -q 'dup=[1-9]' <<<\"\$out\" && [ \$(grep -c 'distinct=\([0-9]*\) of \1' <<<\"\$out\") = 8 ]" "$out"
-chk "round-robin, two rail groups: each its own circle and bye, no pair across; the second cycle swaps client and server" \
-    "grep -qx 'two groups t=0: a1>a4(AB) a2>a3(AB) c2>c3(C) sits=c1' <<<\"\$out\" && grep -qx 'two groups t=3: a4>a1(AB) a3>a2(AB) c3>c2(C) sits=c1' <<<\"\$out\" && [ \$(grep -c '^two groups' <<<\"\$out\") = 4 ] && ! grep -E '^two groups' <<<\"\$out\" | grep -q 'a[0-9]>c\|c[0-9]>a'" "$(grep '^two groups' <<<"$out" | tr '\n' '|')"
+out=$($B $S/test_rr.sh 2>&1); chk "ring 2..9 hosts: n-1 strides run every directed host pair once (no repeat), every host sends one link and receives one in every round" "! grep -q 'dup=[1-9]' <<<\"\$out\" && ! grep -q 'not_one_each=[1-9]' <<<\"\$out\" && [ \$(grep -c 'distinct=\\([0-9]*\\) of \\1 ' <<<\"\$out\") = 8 ]" "$out"
+chk "ring, two rail groups: each its own ring, no link across; round 0 stride 1, round 1 stride 2" \
+    "grep -qx 'two groups t=0: a1>a2(AB) a2>a3(AB) a3>a4(AB) a4>a1(AB) c1>c2(C) c2>c3(C) c3>c1(C)' <<<\"\$out\" && grep -qx 'two groups t=1: a1>a3(AB) a2>a4(AB) a3>a1(AB) a4>a2(AB) c1>c3(C) c2>c1(C) c3>c2(C)' <<<\"\$out\" && ! grep -E '^two groups' <<<\"\$out\" | grep -q 'a[0-9]>c\\|c[0-9]>a'" "$(grep '^two groups' <<<"$out" | tr '\n' '|')"
 
 # --- dashboard: every CDN library at an exact version (an unpinned URL changes dashboards on its own) ---
 cdn=$(grep -oE '<(script|link) [^>]*https?://[^"]+' $P | sed -E 's/.*(https?:)/\1/'); unp=$(grep -vE '@[0-9]+\.[0-9]+\.[0-9]+/|/[0-9]+\.[0-9]+\.[0-9]+/|-[0-9]+\.[0-9]+\.[0-9]+\.min\.js$' <<<"$cdn")

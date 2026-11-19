@@ -18,10 +18,10 @@ out=$(xrun r4 FF_RETR_PCT=abc $CL timeout 60 $B $C 1); rc=$?
 chk "FF_RETR_PCT=abc refused (rc 2)" "[ $rc = 2 ] && grep -q 'FF_RETR_PCT must be a number' <<<\"\$out\"" "rc=$rc $(grep ERROR <<<"$out")"
 
 # h22 has no IPv4 on rail B: its rail B row stays, IP '-', Status its rail state; 4 backend rows, not 3
-out=$(xrun na FAKE_NOIP_B=h22 FF_HOSTS=198.18.0.21,198.18.0.22,198.18.0.23 FF_ITER=1 FF_UDP=0 FF_MESH=0 timeout 240 $B $C 1); rc=$?
+out=$(xrun na FAKE_NOIP_B=h22 FAKE_NOLISTEN=h21 FF_HOSTS=198.18.0.21,198.18.0.22,198.18.0.23 FF_ITER=1 FF_UDP=0 FF_MESH=0 timeout 240 $B $C 1); rc=$?
 # rails by subnet: a rail NIC without an address in the rail's subnets is "no address in <subnets>", NIC unknown ('-')
 chk "no address on h22 rail B: a row for it, NIC and IP '-', Status its rail state" "tbl \"\$out\" | grep -qE '^ +backend +h22 +- +- +.* no_address_in_198\\.19\\.2\\.0/24\$'" "$(tbl "$out")"
-chk "h21 sat out (3 hosts, 1 iteration): its two rows show no_result, not dropped" "[ \$(tbl \"\$out\" | grep -cE '^ +backend +h21 .* no_result\$') = 2 ]" "$(tbl "$out")"
+chk "h21 without results (its iperf3 servers never listened, FAKE_NOLISTEN: every path to it skipped; 2026-11-19: the ring leaves no host out, so this stands in for the sit-out): its two rows stay, Status naming the server that never listened" "[ \$(tbl \"\$out\" | grep -cE '^ +backend +h21 .* iperf3_server_not_listening_on_198\\.19\\.[12]\\.21:5201\$') = 2 ]" "$(tbl "$out")"
 # rail groups: h22 holds rail A only; it pairs within the A,B hosts and only its rail A is planned (said in the planning log)
 chk "h22 lacks rail B: it pairs within the A,B group on rail A only, said in the planning log; its rail A run has a result" \
     "grep -q '^# 1 host lacks a rail and pairs within the hosts holding the rails it has: h22: rail B not addressed, tested on A only$' <<<\"\$out\" && tbl \"\$out\" | grep -qE '^ +backend +h22 +enp5s0np0 +198\.19\.1\.22 +[0-9.]+ .* OK\$'" "$(grep 'lacks a rail' <<<"$out") $(tbl "$out" | grep ' h22 ')"

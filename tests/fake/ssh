@@ -161,7 +161,8 @@ case $script in
     # 0 and 1), rail C is card 0000:41:00; a FAKE_BOND_LLDP host's rail A bond reads its members ens1np0 (05:00.0) and
     # ens3np0 (06:00.0). Gen4 x16 links. Each read adds 1 MB each way per port; FAKE_CARD_HOT=h: h's card 0000:05:00
     # adds 1 TB each way per port per read and its discards and pause counters rise; FAKE_CARD_SLOW=h: h's links run at
-    # 8.0 GT/s x8 (below their 16.0 x16 maximum)
+    # 8.0 GT/s x8 (below their 16.0 x16 maximum); FAKE_CARD_DELAY=s: each read takes s seconds
+    [[ -n $FAKE_CARD_DELAY ]] && sleep "$FAKE_CARD_DELAY"   # a slow read: the time between reads grows, the phase does not
     for nic in "$@"; do
         [[ $nic == - ]] && continue
         ps="$nic"; inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == enp5s0np0 || $nic == bond0 ]] && { [[ $kind == c ]] && ps="ens1f0 ens1f1" || ps="ens1np0 ens3np0"; }
@@ -501,6 +502,7 @@ case $script in
     port=$1; shift; cnt=1
     [[ $1 =~ ^[0-9]+$ ]] && { cnt=$1; shift; }
     : > "$FSTATE/listen.$h"
+    inlist "$h" "$FAKE_NOLISTEN" && exit 0   # FAKE_NOLISTEN=h: its iperf3 servers never listen (the run skips its paths)
     for ip in "$@"; do for (( j = 0; j < cnt; j++ )); do echo "$ip:$(( port + j ))" >> "$FSTATE/listen.$h"; done; done ;;
 *"pfc|pause|xon|xoff|ecn|cnp"*)
     for nic in "$@"; do
@@ -521,7 +523,9 @@ case $script in
 *"-u -b 0"*)
     [[ " $FAKE_IPERF_NOROUTE " == *" $2 "* ]] && { echo "ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: No route to host"; exit 0; }
     echo "UDP $*" >> $FSTATE/iperf_args.log
-    lost=10; [[ $2 == 198.19.1.2 || $2 == 198.19.2.2 ]] && lost=1050
+    # h2 loses 1050 on its rail A NIC (in a ring it receives on both rails every phase; its +1000 socket drops per read
+    # match one lossy run per phase, as the pairs had it)
+    lost=10; [[ $2 == 198.19.1.2 ]] && lost=1050
     g=250; [[ -n $FAKE_UDP_LOST ]] && { lost=$FAKE_UDP_LOST; g=$(awk -v l=$lost 'BEGIN {printf "%.1f", 250 * (1000000 - l) / 1000000}'); }   # below h2's +1000 socket drops: host counters exceed the loss; the sender keeps 250, the receiver gets the rest
     ps=$(upath "$2"); l=$(pval loss)
     [[ -n $ps ]] && read -r lost g <<<"$(awk -v c="$(pval cap)" -v l="${l:-0}" 'BEGIN { d = 1000000; if (c != "") d = d * c / 250; d = int(d * (1 - l / 1000000) + 0.5); printf "%d %.1f", 1000000 - d, 250 * d / 1000000 }')"
@@ -550,6 +554,7 @@ case $script in
         echo "$*" >> $FSTATE/iperf_refused.log
         echo "ERROR rc=1 iperf3: error - unable to connect to server - server may have stopped running or use a different port, firewall issue, etc.: Connection refused"; exit 0
     fi
+    [[ -n $FAKE_IPERF_SECS ]] && sleep "$FAKE_IPERF_SECS"   # a TCP run that takes this long (68: the phase run time)
     echo "$*" >> $FSTATE/iperf_args.log
     # deterministic per (src, dst, port): the same run gives the same Gbps, retransmits and cpu every time, so a
     # golden bundle can be compared with a stored one (10-26, fixture freshness)

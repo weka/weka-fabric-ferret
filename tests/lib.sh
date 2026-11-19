@@ -20,6 +20,7 @@ done
 # number: the collector prints the bundle's absolute path, and a word like "uplinks" there trips negative greps.
 if [[ -n $RUN_DIR ]]; then W=$(mktemp -d "$RUN_DIR/${G%%_*}.XXXX"); else W=$(mktemp -d "$S/regress.${G%%_*}.XXXX"); fi || exit 2
 export FAKE_STATE=$W/fake; mkdir -p "$FAKE_STATE" || exit 2
+export FF_SHUFFLE=0   # the ring in the order given, so pairs and results are reproducible (a test of the shuffle sets 1)
 cd "$W" || exit 2
 pass=0; fail=0
 ok()  { echo "PASS  $1"; pass=$((pass+1)); }
