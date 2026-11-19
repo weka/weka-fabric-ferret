@@ -203,8 +203,8 @@ die() { echo "ERROR: $*" >&2; echo "RESULT ${RES_KEY:-coverage}=STOPPED ($*)" >&
 log() { echo "# $*" >&2; }
 # phase_start / phase_end name / phase_skip name: phase_times.txt rows "iter phase start end" (UTC), to line
 # the tool's counters up with switch and monitoring data
-phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); }
-phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }
+phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); PT0S=$(date +%s); }
+phase_end() { PT1S=$(date +%s); echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }   # PT0S/PT1S: epoch seconds, the card rates' base
 phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 # err_hist file...: the ERROR rows ("src,dst,ERROR rc=N iperf3: error - <reason>") grouped by the reason, as
 # '<runs> x "<reason>" to <N> destination(s) (<first 4> ...)', one line per reason, most runs first; a row without
@@ -213,7 +213,9 @@ phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 err_hist() {
     cat "$@" | tr -s ' ' | awk -F, '$3 ~ /^ *ERROR/ {
         s = $0; sub(/^[^,]*,[^,]*, */, "", s); i = index(s, "iperf3: error - ")
+        r = s; sub(/^ERROR */, "", r); sub(/ .*/, "", r)
         if (i) s = substr(s, i + 16); else sub(/^ERROR *(rc=[0-9]+)? */, "", s)
+        if (s == "") s = r ", no error text"   # a bundle from before the signal was named
         sub(/ share:[0-9]+$/, "", s)
         if (!(s in n)) ord[++no] = s
         n[s]++; if (!(($2, s) in seen)) { seen[$2, s] = 1; nd[s]++; if (nd[s] <= 4) dl[s] = dl[s] " " $2 } }
@@ -976,9 +978,9 @@ main() {
     # a host pair's directed NIC paths (8 with two rails): the ring runs them over its strides, each once per cycle of
     # m-1 iterations; with more rails, each further cycle covers one more rail pair
     log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
-    (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped$( (( ng > 1 )) && echo " (largest group; a smaller group swaps sooner)")"
-    (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
-    (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
+    local drounds=0; for (( g = 0; g < ng; g++ )); do (( GROUNDS[g] > drounds )) && drounds=${GROUNDS[g]}; done
+    (( NUP > 1 && drounds > 0 && FF_ITER > drounds )) && log "Iterations past $drounds run the ring's strides again with the next rail pair for the cross-rail phase ($NUP rail pairs)"
+    (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the ring's strides from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
     if (( FF_RDMA )); then   # before any load, every mode: the backend paths, then each client NIC to its backends
         local -a dpl=(); for t in "${!pl[@]}"; do dpl+=("b $t"); done

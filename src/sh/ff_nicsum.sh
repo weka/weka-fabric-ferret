@@ -53,7 +53,7 @@ bond_member_deltas() {
 # card_sample [iterN phase]: every NIC card's ports read now (CARD_SCRIPT); with a label and an earlier read, the change
 # since that read appended to card_load.txt as "iterN phase host card ports tx_Gbps rx_Gbps slot_Gbps
 # link(cur_GTsxW/max_GTsxW) d_rx_discards_phy d_rx_out_of_buffer d_rx_buffer_passed_thres_phy d_tx_pause_ctrl_phy
-# d_pcie_errors flags" (a card = the ports on one PCIe device; Gb/s over the time between the reads; slot = the link's
+# d_pcie_errors flags" (a card = the ports on one PCIe device; Gb/s over the phase's run time; slot = the link's
 # raw rate after line encoding; flags: near_slot = tx or rx at 80% or more of it, backpressure = the NIC's discard,
 # out-of-buffer, buffer-threshold or pause counters rose, pcie_degraded = link below its maximum speed or width,
 # pcie_errors = signal-integrity or stall counters rose; - = none). The phase's busiest card is logged, and every
@@ -61,12 +61,15 @@ bond_member_deltas() {
 card_sample() {
     local now; collect_counters "$CARD_SCRIPT" "$WORK/card.cur"; now=$(date +%s)
     if [[ -n $1 && -s $WORK/card.prev ]]; then
-        local it=${1%% *} ph=${1#* }
-        awk -v it="$it" -v ph="$ph" -v s=$(( now - CARD_T > 0 ? now - CARD_T : 1 )) -v near=80 '#@awk ff_card_load' \
-            "$WORK/card.prev" "$WORK/card.cur" > "$WORK/card.delta"
+        local it=${1%% *} ph=${1#* } secs=$(( now - CARD_T ))
+        # the bytes moved between the reads are the phase's own (path checks and counter reads add next to nothing),
+        # so the rate is over the phase's run time (phase_start..phase_end), not the longer time between the reads
+        [[ -n $PT0S && -n $PT1S ]] && (( PT1S > PT0S && PT0S >= CARD_T )) && secs=$(( PT1S - PT0S ))
+        awk -v it="$it" -v ph="$ph" -v s=$(( secs > 0 ? secs : 1 )) -v near=80 '#@awk ff_card_load' \
+            "$WORK/card.prev" "$WORK/card.cur" | sort -k3,3 -k4,4 > "$WORK/card.delta"   # by host and card: a tie goes to the first
         if [[ -s $WORK/card.delta ]]; then
             cat "$WORK/card.delta" >> "$COLLECT_DIR/card_load.txt"
-            log "  NIC cards in phase $ph ($(wc -l < "$WORK/card.delta" | tr -d ' '); card_load.txt): busiest $(awk '{t = $6 > $7 ? $6 : $7; if (t >= m) {m = t; r = $3 " " $4 " (" $5 "): tx " $6 " / rx " $7 " Gb/s of a " $8 " Gb/s slot"}} END {print r}' "$WORK/card.delta")"
+            log "  NIC cards in phase $ph ($(wc -l < "$WORK/card.delta" | tr -d ' '); card_load.txt): busiest $(awk '{t = $6 > $7 ? $6 : $7; if (NR == 1 || t > m) {m = t; r =$3 " " $4 " (" $5 "): tx " $6 " / rx " $7 " Gb/s of a " $8 " Gb/s slot"}} END {print r}' "$WORK/card.delta")"
             local bad; bad=$(awk '$15 != "-" {printf "#   %s %s (%s): %s (tx %s / rx %s Gb/s of %s; link %s; discards %s, out-of-buffer %s, buffer threshold %s, pause sent %s, PCIe errors %s)\n", $3, $4, $5, $15, $6, $7, $8, $9, $10, $11, $12, $13, $14}' "$WORK/card.delta")
             [[ -n $bad ]] && { log "  WARNING: NIC cards flagged in phase $ph ($(wc -l <<<"$bad" | tr -d ' ')):"; head -n 10 <<<"$bad" >&2; }
         fi

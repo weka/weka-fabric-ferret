@@ -452,7 +452,11 @@ rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 cpu=$(echo "$out" | awk '/CPU Utilization/ {for (i = 1; i < NF; i++) {if ($i == "local/sender") s = $(i+1); if ($i == "remote/receiver") r = $(i+1)}}
     END {gsub(/[%,]/, "", s); gsub(/[%,]/, "", r); print (s == "" ? "na" : s) "/" (r == "" ? "na" : r)}')
 if [ -n "$rcv" ]; then echo "$rcv retransmits:${retr:-0} cpu:$cpu"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # One UDP run, no rate cap: src dst port streams secs len [tos] -> "[SUM] ... receiver" or "ERROR ..."
@@ -460,7 +464,11 @@ read -r -d '' UDP_SCRIPT <<'EOF'
 out=$(iperf3 --connect-timeout 5000 -u -b 0 -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${7:+-S $7} 2>&1); rc=$?
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # One paced UDP run (a confirm run, udp_confirm): src dst port streams secs len bits_per_s_per_stream [tos] -> as UDP_SCRIPT
@@ -468,7 +476,11 @@ read -r -d '' UDPC_SCRIPT <<'EOF'
 out=$(iperf3 --connect-timeout 5000 -u -b "$7" -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${8:+-S $8} 2>&1); rc=$?
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # Sender-side packet counts per data NIC: "host_nic ip kernel_tx wire_tx". kernel_tx = packets the kernel handed

@@ -204,8 +204,8 @@ die() { echo "ERROR: $*" >&2; echo "RESULT ${RES_KEY:-coverage}=STOPPED ($*)" >&
 log() { echo "# $*" >&2; }
 # phase_start / phase_end name / phase_skip name: phase_times.txt rows "iter phase start end" (UTC), to line
 # the tool's counters up with switch and monitoring data
-phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); }
-phase_end() { echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }
+phase_start() { PT0=$(date -u +%Y-%m-%dT%H:%M:%SZ); PT0S=$(date +%s); }
+phase_end() { PT1S=$(date +%s); echo "$ITER $1 $PT0 $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$COLLECT_DIR/phase_times.txt"; }   # PT0S/PT1S: epoch seconds, the card rates' base
 phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 # err_hist file...: the ERROR rows ("src,dst,ERROR rc=N iperf3: error - <reason>") grouped by the reason, as
 # '<runs> x "<reason>" to <N> destination(s) (<first 4> ...)', one line per reason, most runs first; a row without
@@ -214,7 +214,9 @@ phase_skip() { echo "$ITER $1 - -" >> "$COLLECT_DIR/phase_times.txt"; }
 err_hist() {
     cat "$@" | tr -s ' ' | awk -F, '$3 ~ /^ *ERROR/ {
         s = $0; sub(/^[^,]*,[^,]*, */, "", s); i = index(s, "iperf3: error - ")
+        r = s; sub(/^ERROR */, "", r); sub(/ .*/, "", r)
         if (i) s = substr(s, i + 16); else sub(/^ERROR *(rc=[0-9]+)? */, "", s)
+        if (s == "") s = r ", no error text"   # a bundle from before the signal was named
         sub(/ share:[0-9]+$/, "", s)
         if (!(s in n)) ord[++no] = s
         n[s]++; if (!(($2, s) in seen)) { seen[$2, s] = 1; nd[s]++; if (nd[s] <= 4) dl[s] = dl[s] " " $2 } }
@@ -1096,7 +1098,11 @@ rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 cpu=$(echo "$out" | awk '/CPU Utilization/ {for (i = 1; i < NF; i++) {if ($i == "local/sender") s = $(i+1); if ($i == "remote/receiver") r = $(i+1)}}
     END {gsub(/[%,]/, "", s); gsub(/[%,]/, "", r); print (s == "" ? "na" : s) "/" (r == "" ? "na" : r)}')
 if [ -n "$rcv" ]; then echo "$rcv retransmits:${retr:-0} cpu:$cpu"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # One UDP run, no rate cap: src dst port streams secs len [tos] -> "[SUM] ... receiver" or "ERROR ..."
@@ -1104,7 +1110,11 @@ read -r -d '' UDP_SCRIPT <<'EOF'
 out=$(iperf3 --connect-timeout 5000 -u -b 0 -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${7:+-S $7} 2>&1); rc=$?
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # One paced UDP run (a confirm run, udp_confirm): src dst port streams secs len bits_per_s_per_stream [tos] -> as UDP_SCRIPT
@@ -1112,7 +1122,11 @@ read -r -d '' UDPC_SCRIPT <<'EOF'
 out=$(iperf3 --connect-timeout 5000 -u -b "$7" -l "$6" -c "$2" -B "$1" -p "$3" -P "$4" -t "$5" -f g ${8:+-S $8} 2>&1); rc=$?
 rcv=$(echo "$out" | grep -m1 'SUM.*receiver')
 if [ -n "$rcv" ]; then echo "$rcv"
-else echo "ERROR rc=$rc $(echo "$out" | grep -i -m1 error | tr -s ' ')"; fi
+else e=$(echo "$out" | grep -i -m1 error | tr -s ' ')
+    # no error text: a signal (rc above 128, 139 = SIGSEGV) is named; else the output's last line
+    if [ -z "$e" ] && [ "$rc" -gt 128 ]; then e="iperf3 killed by signal $((rc - 128)) (SIG$(kill -l $((rc - 128)) 2>&1))"; fi
+    [ -n "$e" ] || e="iperf3 gave no error text ($(echo "$out" | tail -n 1 | tr -s ' ' | cut -c1-100))"
+    echo "ERROR rc=$rc $e"; fi
 EOF
 
 # Sender-side packet counts per data NIC: "host_nic ip kernel_tx wire_tx". kernel_tx = packets the kernel handed
@@ -3789,7 +3803,7 @@ bond_member_deltas() {
 # card_sample [iterN phase]: every NIC card's ports read now (CARD_SCRIPT); with a label and an earlier read, the change
 # since that read appended to card_load.txt as "iterN phase host card ports tx_Gbps rx_Gbps slot_Gbps
 # link(cur_GTsxW/max_GTsxW) d_rx_discards_phy d_rx_out_of_buffer d_rx_buffer_passed_thres_phy d_tx_pause_ctrl_phy
-# d_pcie_errors flags" (a card = the ports on one PCIe device; Gb/s over the time between the reads; slot = the link's
+# d_pcie_errors flags" (a card = the ports on one PCIe device; Gb/s over the phase's run time; slot = the link's
 # raw rate after line encoding; flags: near_slot = tx or rx at 80% or more of it, backpressure = the NIC's discard,
 # out-of-buffer, buffer-threshold or pause counters rose, pcie_degraded = link below its maximum speed or width,
 # pcie_errors = signal-integrity or stall counters rose; - = none). The phase's busiest card is logged, and every
@@ -3797,8 +3811,11 @@ bond_member_deltas() {
 card_sample() {
     local now; collect_counters "$CARD_SCRIPT" "$WORK/card.cur"; now=$(date +%s)
     if [[ -n $1 && -s $WORK/card.prev ]]; then
-        local it=${1%% *} ph=${1#* }
-        awk -v it="$it" -v ph="$ph" -v s=$(( now - CARD_T > 0 ? now - CARD_T : 1 )) -v near=80 'function d(a, b) { return (a ~ /^[0-9]+$/ && b ~ /^[0-9]+$/ && a + 0 >= b + 0) ? a - b : -1 }
+        local it=${1%% *} ph=${1#* } secs=$(( now - CARD_T ))
+        # the bytes moved between the reads are the phase's own (path checks and counter reads add next to nothing),
+        # so the rate is over the phase's run time (phase_start..phase_end), not the longer time between the reads
+        [[ -n $PT0S && -n $PT1S ]] && (( PT1S > PT0S && PT0S >= CARD_T )) && secs=$(( PT1S - PT0S ))
+        awk -v it="$it" -v ph="$ph" -v s=$(( secs > 0 ? secs : 1 )) -v near=80 'function d(a, b) { return (a ~ /^[0-9]+$/ && b ~ /^[0-9]+$/ && a + 0 >= b + 0) ? a - b : -1 }
              $1 != "@@CARD" {next}
              FILENAME == ARGV[1] {for (i = 9; i <= 18; i++) p[$2, $3, i] = $i; next}
              !(($2, $3, 9) in p) {next}
@@ -3824,10 +3841,10 @@ card_sample() {
                      printf "%s %s %s %s %s %.1f %.1f %.0f %s %d %d %d %d %d %s\n", it, ph, host[k], card[k], ports[k], tg, rg, sl, lk[k], bp[k, 11], bp[k, 12], bp[k, 13], bp[k, 14], pe[k], (f == "" ? "-" : substr(f, 2))
                  }
              }' \
-            "$WORK/card.prev" "$WORK/card.cur" > "$WORK/card.delta"
+            "$WORK/card.prev" "$WORK/card.cur" | sort -k3,3 -k4,4 > "$WORK/card.delta"   # by host and card: a tie goes to the first
         if [[ -s $WORK/card.delta ]]; then
             cat "$WORK/card.delta" >> "$COLLECT_DIR/card_load.txt"
-            log "  NIC cards in phase $ph ($(wc -l < "$WORK/card.delta" | tr -d ' '); card_load.txt): busiest $(awk '{t = $6 > $7 ? $6 : $7; if (t >= m) {m = t; r = $3 " " $4 " (" $5 "): tx " $6 " / rx " $7 " Gb/s of a " $8 " Gb/s slot"}} END {print r}' "$WORK/card.delta")"
+            log "  NIC cards in phase $ph ($(wc -l < "$WORK/card.delta" | tr -d ' '); card_load.txt): busiest $(awk '{t = $6 > $7 ? $6 : $7; if (NR == 1 || t > m) {m = t; r =$3 " " $4 " (" $5 "): tx " $6 " / rx " $7 " Gb/s of a " $8 " Gb/s slot"}} END {print r}' "$WORK/card.delta")"
             local bad; bad=$(awk '$15 != "-" {printf "#   %s %s (%s): %s (tx %s / rx %s Gb/s of %s; link %s; discards %s, out-of-buffer %s, buffer threshold %s, pause sent %s, PCIe errors %s)\n", $3, $4, $5, $15, $6, $7, $8, $9, $10, $11, $12, $13, $14}' "$WORK/card.delta")
             [[ -n $bad ]] && { log "  WARNING: NIC cards flagged in phase $ph ($(wc -l <<<"$bad" | tr -d ' ')):"; head -n 10 <<<"$bad" >&2; }
         fi
@@ -4678,9 +4695,9 @@ main() {
     # a host pair's directed NIC paths (8 with two rails): the ring runs them over its strides, each once per cycle of
     # m-1 iterations; with more rails, each further cycle covers one more rail pair
     log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
-    (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped$( (( ng > 1 )) && echo " (largest group; a smaller group swaps sooner)")"
-    (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
-    (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the pairings from the start"
+    local drounds=0; for (( g = 0; g < ng; g++ )); do (( GROUNDS[g] > drounds )) && drounds=${GROUNDS[g]}; done
+    (( NUP > 1 && drounds > 0 && FF_ITER > drounds )) && log "Iterations past $drounds run the ring's strides again with the next rail pair for the cross-rail phase ($NUP rail pairs)"
+    (( FF_ITER > cyc )) && log "Iterations past $cyc repeat the ring's strides from the start"
     [[ -n $FF_TOS ]] && log "Marking: iperf3 -S $FF_TOS = DSCP $(( FF_TOS >> 2 )), ECN bits $(( FF_TOS & 3 )) (TCP: the kernel owns the ECN bits)"
     if (( FF_RDMA )); then   # before any load, every mode: the backend paths, then each client NIC to its backends
         local -a dpl=(); for t in "${!pl[@]}"; do dpl+=("b $t"); done
