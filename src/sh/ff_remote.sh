@@ -298,16 +298,26 @@ for nic in "$@"; do
 done
 EOF
 
-# Mesh: src_a src_b dst... -> "MESHFAIL src dst" for each rail IP pair that does not answer one ping.
-# 64 pings at a time; "none" skips a missing rail.
+# Mesh: src_a src_b count dst... (a source is ip@nic; "none" skips a missing rail). Per pair: when the route to dst
+# from src leaves another NIC than src's own (as the path check judges it), no ping: "MESHROUTE src dst <dev>"; else
+# count pings 0.2 s apart, and when any is lost: "MESHLOSS src dst <lost> <count>". 64 pairs at a time.
 read -r -d '' MESH_SCRIPT <<'EOF'
-a=$1 b=$2; shift 2
-n=0
-for s in $a $b; do
-    [ "$s" = none ] && continue
+a=$1 b=$2 c=$3; shift 3
+k=0
+for sn in $a $b; do
+    [ "$sn" = none ] && continue
+    s=${sn%@*} nic=${sn#*@}
     for d in "$@"; do
-        ( out=$(ping -c1 -W1 -I "$s" "$d" 2>&1) || echo "MESHFAIL $s $d" ) &
-        n=$(( n + 1 )); [ $(( n % 64 )) = 0 ] && wait
+        (
+            r=$(ip -o route get "$d" from "$s" 2>&1); r=${r%%$'\n'*}
+            case " $r " in *" dev $nic "*) ;; *) echo "MESHROUTE $s $d $(echo "$r" | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i+1); exit}}')"; exit 0 ;; esac
+            out=$(ping -c "$c" -i 0.2 -W 1 -I "$s" "$d" 2>&1)
+            got=$(printf '%s\n' "$out" | sed -n 's/.*transmitted, \([0-9][0-9]*\) \(packets \)\{0,1\}received.*/\1/p' | head -n 1)
+            [ -n "$got" ] || got=0
+            [ "$got" -lt "$c" ] && echo "MESHLOSS $s $d $(( c - got )) $c"
+            exit 0
+        ) &
+        k=$(( k + 1 )); [ $(( k % 64 )) = 0 ] && wait
     done
 done
 wait

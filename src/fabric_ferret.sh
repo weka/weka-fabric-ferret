@@ -113,9 +113,12 @@ Optional (default)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
                    kill each other's iperf3 servers and both get garbage)
   FF_MESH (1)      before load, ping every tested host's rail IPs from every other one's (same rail and
-                   cross-rail), and every backend rail IP from every client data NIC (clients never
-                   ping each other); tested hosts only, so other clusters on shared subnets are never
-                   probed. Failures go to mesh_failures.txt and the Preflight card. 0 = off.
+                   cross-rail; same rail only with FF_CROSS_RAIL=0), and every backend rail IP from every
+                   client data NIC (clients never ping each other); tested hosts only, so other clusters on
+                   shared subnets are never probed. 5 pings per pair: all lost = unreachable
+                   (mesh_failures.txt), some lost = lossy (mesh_lossy.txt). A pair whose route leaves
+                   another NIC than the source's own is not pinged (mesh_unrouted.txt). Findings go to the
+                   Preflight card. 0 = off.
   FF_CROSS_RAIL=0  the rails are separate fabrics by design: skip the cross-rail phase and leave it
                    out of the coverage count. Default: test it; unrouted cross-rail paths count
                    as skipped (PARTIAL), since missing inter-rail routes can be the fault. When every
@@ -1371,6 +1374,10 @@ main() {
         echo "mesh_failures=${MESH_FAILS:-}"
         echo "mesh_client_pings=${MESH_CPINGS:-}"
         echo "mesh_client_failures=${MESH_CFAILS:-}"
+        echo "mesh_count=${MESH_PINGS:+$MESH_COUNT}"
+        echo "mesh_lossy=${MESH_LOSSY:-}"
+        echo "mesh_client_lossy=${MESH_CLOSSY:-}"
+        echo "mesh_unrouted=${MESH_UNROUTED:-}"
         echo "tool=fabric_ferret"
     } > "$COLLECT_DIR/metadata.txt"
     for k in "${ELIG[@]}"; do

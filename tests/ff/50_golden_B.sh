@@ -47,10 +47,10 @@ fi
 amembers() { tar tzf "$1" | sed -E 's#^[^/]*/##; /\/$/d; /^$/d; s#^raw_per_host/.*#raw_per_host/*#; s#^sysinfo/[^/]*/#sysinfo/*/#' | sort -u; }
 aheader() { tar xzOf "$1" --include="*/$2" | awk 'NF {$1 = $1; print; exit}' | awk '/^### / || /^[A-Z][A-Za-z_]*( |$)/' | sed -E 's/[0-9]+/N/g'; }
 # members FF writes only when the run has that case: an unreachable and an excluded host (golden-B has both, the archives
-# don't), UDP (udp_*, iperf3_udp_results), the mesh (mesh_failures), clients (clients, client_*, their sysinfo NICs):
+# don't), UDP (udp_*, iperf3_udp_results), the mesh (mesh_failures, mesh_lossy, mesh_unrouted), clients (clients, client_*, their sysinfo NICs):
 # 14_where and 14_clean (10-29) run with UDP and the mesh off, 14_where with clients. Headers are still compared where
 # a member is in both; metadata's client_* keys are the clients' own; the DSCP check (dscp_check, FF_TOS: golden-B only)
-COND_RX='^[<>] (excluded|unreachable|udp_[a-z_]+|iperf3_udp_results|mesh_failures|clients|client_[a-z_]+|dscp_check)\.txt$|^> sysinfo/\*/nic-'
+COND_RX='^[<>] (excluded|unreachable|udp_[a-z_]+|iperf3_udp_results|mesh_failures|mesh_lossy|mesh_unrouted|clients|client_[a-z_]+|dscp_check)\.txt$|^> sysinfo/\*/nic-'
 akeys() { tar xzOf "$1" --include='*/metadata.txt' | sed -n 's/=.*//p' | grep -v '^clients\?_' | sort -u; }   # client keys: a run with clients only
 gm=$(amembers "$t"); gk=$(akeys "$t")
 for a in $S/fixtures/bundles/*.tgz; do
@@ -90,7 +90,7 @@ chk "golden-B: FEC off counted" "grep -q 'rail NICs; FEC off on 1' $W/gb.out"
 chk "golden-B: FEC uncorrectable warned" "grep -q 'uncorrectable FEC blocks .*h3_enp196s0np0(5)' $W/gb.out"
 
 # --- mesh (was 24): on by default, one dead IP ---
-chk "golden-B: mesh on by default; dead IP 198.19.2.3: 64 pings, 7 failed" "grep -q 'Mesh: 64 pings, 7 failed' $W/gb.out"
+chk "golden-B: mesh on by default; dead IP 198.19.2.3: 64 pairs, 7 unreachable" "grep -q 'Mesh: 64 pairs pinged (5 pings each), 7 unreachable, 0 lossy' $W/gb.out"
 
 # --- host side (was 27's "bad" run) ---
 rx() { bfile gb host_rx.txt | awk -v h=$1 -v c="$2" 'NR == 1 {for (i = 1; i <= NF; i++) if ($i == c) k = i} $1 == h {print $k}'; }
@@ -134,7 +134,7 @@ chk "golden-B: dashboard: FEC card: 1 uncorrectable, 1 watch" "python3 -c \"impo
 chk "golden-B: dashboard: FEC card: FEC off shown, not ok" "grep -q '(1 with FEC off)' $W/gb.html && grep -q 'h4_enp5s0np0</td><td><span class=.badge .>FEC off' $W/gb.html"
 chk "golden-B: dashboard: slow link diagnosis from FEC rate" "grep -q 'Uncorrectable FEC blocks during the run' $W/gb.html && ! grep -q 'marginal fiber or dirty connector' $W/gb.html"
 chk "golden-B: dashboard: IP with only cross-rail runs judged on them, marked" "grep -q '\"ip\": \"198.19.2.3\", \"avg\": 150.0, \"samples\": [0-9]*, \"cross_only\": true' $W/gb.html"
-chk "golden-B: dashboard: mesh in card" "grep -q 'did not answer 7 of 7' $W/gb.html && grep -q 'mesh: 7 of 64 pings failed' $W/gb.html"
+chk "golden-B: dashboard: mesh in card" "grep -q 'did not answer 7 of 7' $W/gb.html && grep -q 'mesh: 7 of 64 pairs unreachable, 0 lossy' $W/gb.html"
 chk "golden-B: no clients: dashboard card has no client count (control)" "grep -qE 'Host-side receive: [0-9]+ of 5 hosts flagged<' $W/gb.html" "$(grep -oE 'Host-side receive: [^<]*' $W/gb.html)"
 chk "golden-B: dashboard: card counts flagged hosts, flags shown" "grep -q 'Host-side receive: 4 of 5 hosts flagged' $W/gb.html && grep -q 'pcieA&lt;max, softnet_drop, tcp_rcv_drop' $W/gb.html"
 finish

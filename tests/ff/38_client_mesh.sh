@@ -22,10 +22,10 @@ chk "dashboard: the client no-replies finding has its label" "grep -q 'Client IP
 
 # clients never ping each other (a dead client IP fails nothing) and backends never ping clients
 out=$(xrun mn FAKE_MESHFAIL=198.19.10.2 $CL timeout 240 $B $C 1); rc=$?
-chk "a client IP that answers nobody: 0 failed (nothing pings a client)" "grep -q 'Mesh: 28 pings, 0 failed (from clients: 0 of 20)' <<<\"\$out\"" "$(grep 'Mesh' <<<"$out")"
+chk "a client IP that answers nobody: 0 failed (nothing pings a client)" "grep -q 'Mesh: 28 pairs pinged (5 pings each), 0 unreachable, 0 lossy (from clients: 0 of 20 unreachable, 0 lossy)' <<<\"\$out\"" "$(grep 'Mesh' <<<"$out")"
 chk "metadata: mesh_client_pings=20, mesh_client_failures=0" "bfile mn metadata.txt | grep -qx 'mesh_client_pings=20' && bfile mn metadata.txt | grep -qx 'mesh_client_failures=0'" "$(bfile mn metadata.txt | grep mesh)"
 
 # no clients: the backend mesh as before, no client counts
 out=$(xrun m0 FF_HOSTS=198.18.0.21,198.18.0.22 FF_ITER=1 FF_UDP=0 timeout 240 $B $C 1); rc=$?
-chk "no clients: 'Mesh: 8 pings, 0 failed' with no client part; metadata client pings empty" "grep -qE 'Mesh: 8 pings, 0 failed\$' <<<\"\$out\" && bfile m0 metadata.txt | grep -qx 'mesh_client_pings=0'" "$(grep 'Mesh' <<<"$out") $(bfile m0 metadata.txt | grep mesh_client)"
+chk "no clients: 'Mesh: 8 pairs pinged ..., 0 lossy' with no client part; metadata client pings empty" "grep -qE 'Mesh: 8 pairs pinged \(5 pings each\), 0 unreachable, 0 lossy\$' <<<\"\$out\" && bfile m0 metadata.txt | grep -qx 'mesh_client_pings=0'" "$(grep 'Mesh' <<<"$out") $(bfile m0 metadata.txt | grep mesh_client)"
 finish

@@ -11,7 +11,7 @@ WEKA pre-install/offline (stopped I/O) data plane investigation and performance 
 - **Fabric evidence:** LLDP neighbours (which leaf each NIC, or each member of a bond, lands on), link speed, optics, FEC rate, priority and pause counters, NIC and kernel drops, link flaps, rail gateways, and NICs that are swapped between rails.
 - **Host side:** system info per host (OS, CPU, PCIe, NIC rings, IRQs and QoS, routes, sysctls, the kernel log over the run) and a receive-side table (drops, softnet, iperf3 CPU) with flags.
 - **UDP pass:** after the TCP phases, the same backend and client runs over UDP at no rate cap, with loss split by where it happened. Loss that no counter explains is re-tested at a paced rate, to tell a rate limit from a lossy path (`FF_UDP=0` turns it off).
-- **Ping mesh:** before load, every backend rail IP from every other backend's and from every client data NIC (`FF_MESH=0` turns it off).
+- **Ping mesh:** before load, every backend rail IP from every other backend's and from every client data NIC, 5 pings per pair: a pair that loses all of them is unreachable, one that loses some is lossy. A pair whose route leaves another NIC than the source's own is not pinged (`FF_MESH=0` turns it off).
 - **Optional:** leaf-spine uplink totals, and a run that skips the bandwidth tests and still does every other check.
 
 ## Before you run it
@@ -122,7 +122,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 | `FF_UDP_DURATION` (`FF_DURATION`) | seconds per UDP run |
 | `FF_UDP_CONFIRM` (`1`; `0` with `FF_UDP=0`) | `0` = off. `1` = when a UDP phase leaves a receiving host with unaccounted loss beyond the expected floor, and that loss is at least `FF_UDP_CONFIRM_PCT` % of the datagrams sent to the host in the phase, each run into that host is repeated once for 5 s at 80 % of the rate it delivered (same pair, datagram size, streams and TOS; runs that were at once are at once again). Loss that is gone at the paced rate was overload against a rate limit between the hosts that no host counter shows (a provider's per-VM cap, a shaper, an oversubscribed uplink): it is reported as "rate limit between the hosts (paced run)" with the limit in Gb/s, and is no longer flagged. Loss that persists at the paced rate stays flagged (likely fabric). A confirm run with no result moves nothing and is named in the log. One line per confirm run in `udp_confirm.txt`. It adds about 5 s to each UDP phase or wave that triggers it, and nothing to a run that does not |
 | `FF_UDP_CONFIRM_PCT` (`1`) | whole number from 0 to 100: the unaccounted loss beyond expected, as a % of the datagrams sent to a host in a phase, at which the paced confirm run is made (`0` = on any such loss) |
-| `FF_MESH` (`1`) | `0` = off. `1` = before load, ping every tested host's rail IPs from every other tested host (same rail and cross-rail), and every backend rail IP from every client data NIC (clients never ping each other) |
+| `FF_MESH` (`1`) | `0` = off. `1` = before load, ping every tested host's rail IPs from every other tested host (same rail and cross-rail; same rail only with `FF_CROSS_RAIL=0`), and every backend rail IP from every client data NIC (clients never ping each other). 5 pings per pair: all lost = unreachable (`mesh_failures.txt`), some lost = lossy (`mesh_lossy.txt`); a pair whose route leaves another NIC than the source's own is not pinged (`mesh_unrouted.txt`) |
 
 ### Judging results
 
@@ -195,7 +195,7 @@ RESULT coverage=COMPLETE|PARTIAL|NONE hosts=t/e paths=r/p ... [clients=t/e clien
 
 COMPLETE describes coverage, not health. A COMPLETE run can still have slow or critical hosts; read the summary and the dashboard.
 
-The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `pairing.txt` (only when a host has no partner sharing its rails or is tested on fewer rails), `metadata.txt`, `phase_times.txt` (each phase's start and end, UTC, to line up with switch and monitoring data), `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt`, `client_routes.txt` and `client_rx.txt`.
+The bundle (`fabric_ferret_<label>_<timestamp>.tgz`) holds the run log, per-host raw output, and parsed files such as `host_list.txt`, `rails.txt`, `pairs.txt`, `pairing.txt` (only when a host has no partner sharing its rails or is tested on fewer rails), `metadata.txt`, `phase_times.txt` (each phase's start and end, UTC, to line up with switch and monitoring data), `host_rx.txt`, `fec_rates.txt`, `rail_anomalies.txt`, `link_flaps.txt`, `gateways.txt`, `mesh_failures.txt`, `mesh_lossy.txt`, `mesh_unrouted.txt` and `sysinfo/<host>/`; with clients also `clients.txt`, `client_results.txt`, `client_routes.txt` and `client_rx.txt`.
 
 ## Dashboard
 

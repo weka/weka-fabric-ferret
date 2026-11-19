@@ -153,11 +153,11 @@ chk "golden-C: dashboard renders" "{ [ $prc = 0 ] || [ $prc = 3 ]; }" "rc=$prc $
 chk "golden-C: dashboard: UDP card has a UC2 row to c1 with its socket drops" "grep -qE '<td>iter1 UC2</td><td>h2[12] [0-9.]+</td><td>c1 [0-9.]+</td>(<td>[^<]*</td>){3}<td[^>]*>[0-9,]+</td><td>[1-9][0-9,]{3,}</td>' $W/gc.html" "$(grep -oE '<td>iter1 UC2</td><td>[^<]*</td><td>c1[^<]*</td>(<td>[^<]*</td>){4}' $W/gc.html | head -n 2)"
 
 # --- from 38_client_mesh.sh ---
-chk "golden-C: dead rail IP: 7 failed, 5 of them from clients" "grep -q 'Mesh: 28 pings, 7 failed (from clients: 5 of 20)' <<<\"\$out\"" "$(grep 'Mesh' <<<"$out")"
+chk "golden-C: dead rail IP: 7 failed, 5 of them from clients" "grep -q 'Mesh: 28 pairs pinged (5 pings each), 7 unreachable, 0 lossy (from clients: 5 of 20 unreachable, 0 lossy)' <<<\"\$out\"" "$(grep 'Mesh' <<<"$out")"
 mf=$(bfile gc mesh_failures.txt)
 chk "golden-C: mesh_failures.txt: 5 client rows (5th column client), 2 backend rows" "[ \$(awk '\$5 == \"client\"' <<<\"\$mf\" | wc -l) = 5 ] && [ \$(awk 'NF == 4' <<<\"\$mf\" | wc -l) = 2 ]" "$mf"
 chk "golden-C: finding: h21 rail IP did not answer 5 of 5 client IPs; backend finding kept" "grep -q 'h21 mesh_client_unreachable rail IP 198.19.1.21 did not answer 5 of 5 client IPs' <<<\"\$out\" && grep -q 'h21 mesh_unreachable rail IP 198.19.1.21' <<<\"\$out\"" "$(grep mesh_ <<<"$out")"
-chk "golden-C: dashboard: Preflight names the client finding and the client ping count" "grep -q 'Rail IP unreachable from clients in the mesh' $W/gc.html && grep -q 'mesh: 7 of 28 pings failed (from clients: 5 of 20)' $W/gc.html" "rc=$prc $(grep -oE 'mesh: [^<]*' $W/gc.html)"
+chk "golden-C: dashboard: Preflight names the client finding and the client ping count" "grep -q 'Rail IP unreachable from clients in the mesh' $W/gc.html && grep -q 'mesh: 7 of 28 pairs unreachable, 0 lossy (from clients: 5 of 20)' $W/gc.html" "rc=$prc $(grep -oE 'mesh: [^<]*' $W/gc.html)"
 
 # --- from 40_sender_tx.sh ---
 # golden-C runs 2 iterations: the 500000 shortfall is per phase, so sum iteration 1's UC1

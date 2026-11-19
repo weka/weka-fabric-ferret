@@ -1,6 +1,6 @@
 label=h21
-timestamp=20261110T002643Z
-end_timestamp=20261110T002656Z
+timestamp=20261119T044322Z
+end_timestamp=20261119T044340Z
 duration=1
 iterations=2
 parallel_streams=16
@@ -69,4 +69,8 @@ mesh_pings=28
 mesh_failures=7
 mesh_client_pings=20
 mesh_client_failures=5
+mesh_count=5
+mesh_lossy=0
+mesh_client_lossy=0
+mesh_unrouted=0
 tool=fabric_ferret

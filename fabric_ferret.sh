@@ -114,9 +114,12 @@ Optional (default)
   FF_IGNORE_LOCK=1 run even if another fabric_ferret run holds a host (two runs on the same hosts
                    kill each other's iperf3 servers and both get garbage)
   FF_MESH (1)      before load, ping every tested host's rail IPs from every other one's (same rail and
-                   cross-rail), and every backend rail IP from every client data NIC (clients never
-                   ping each other); tested hosts only, so other clusters on shared subnets are never
-                   probed. Failures go to mesh_failures.txt and the Preflight card. 0 = off.
+                   cross-rail; same rail only with FF_CROSS_RAIL=0), and every backend rail IP from every
+                   client data NIC (clients never ping each other); tested hosts only, so other clusters on
+                   shared subnets are never probed. 5 pings per pair: all lost = unreachable
+                   (mesh_failures.txt), some lost = lossy (mesh_lossy.txt). A pair whose route leaves
+                   another NIC than the source's own is not pinged (mesh_unrouted.txt). Findings go to the
+                   Preflight card. 0 = off.
   FF_CROSS_RAIL=0  the rails are separate fabrics by design: skip the cross-rail phase and leave it
                    out of the coverage count. Default: test it; unrouted cross-rail paths count
                    as skipped (PARTIAL), since missing inter-rail routes can be the fault. When every
@@ -936,16 +939,26 @@ for nic in "$@"; do
 done
 EOF
 
-# Mesh: src_a src_b dst... -> "MESHFAIL src dst" for each rail IP pair that does not answer one ping.
-# 64 pings at a time; "none" skips a missing rail.
+# Mesh: src_a src_b count dst... (a source is ip@nic; "none" skips a missing rail). Per pair: when the route to dst
+# from src leaves another NIC than src's own (as the path check judges it), no ping: "MESHROUTE src dst <dev>"; else
+# count pings 0.2 s apart, and when any is lost: "MESHLOSS src dst <lost> <count>". 64 pairs at a time.
 read -r -d '' MESH_SCRIPT <<'EOF'
-a=$1 b=$2; shift 2
-n=0
-for s in $a $b; do
-    [ "$s" = none ] && continue
+a=$1 b=$2 c=$3; shift 3
+k=0
+for sn in $a $b; do
+    [ "$sn" = none ] && continue
+    s=${sn%@*} nic=${sn#*@}
     for d in "$@"; do
-        ( out=$(ping -c1 -W1 -I "$s" "$d" 2>&1) || echo "MESHFAIL $s $d" ) &
-        n=$(( n + 1 )); [ $(( n % 64 )) = 0 ] && wait
+        (
+            r=$(ip -o route get "$d" from "$s" 2>&1); r=${r%%$'\n'*}
+            case " $r " in *" dev $nic "*) ;; *) echo "MESHROUTE $s $d $(echo "$r" | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i+1); exit}}')"; exit 0 ;; esac
+            out=$(ping -c "$c" -i 0.2 -W 1 -I "$s" "$d" 2>&1)
+            got=$(printf '%s\n' "$out" | sed -n 's/.*transmitted, \([0-9][0-9]*\) \(packets \)\{0,1\}received.*/\1/p' | head -n 1)
+            [ -n "$got" ] || got=0
+            [ "$got" -lt "$c" ] && echo "MESHLOSS $s $d $(( c - got )) $c"
+            exit 0
+        ) &
+        k=$(( k + 1 )); [ $(( k % 64 )) = 0 ] && wait
     done
 done
 wait
@@ -2254,92 +2267,131 @@ lock_all() {  # touch | release on every tested host and client (only our own lo
     wait
 }
 
-# FF_MESH=1: every usable rail IP of each tested host pings every other tested host's usable rail IPs,
-# and every usable client data NIC IP pings every backend rail IP.
+# FF_MESH=1: every usable rail IP of each tested host pings every other tested host's usable rail IPs (its own rail
+# only with FF_CROSS_RAIL=0), and every usable client data NIC IP pings every backend rail IP. A pair whose route
+# leaves another NIC than the source's own is not pinged (counted as not routed: on rails that are separate fabrics
+# every cross-rail pair is one); every other pair gets MESH_COUNT pings: all lost = unreachable, some lost = lossy.
+MESH_COUNT=5
+# mesh_call k out plan src_a src_b dst...: one remote mesh run (sources ip@nic; "none" = no second source) in the
+# background; its planned pairs ("src dst") go to plan first
+mesh_call() {
+    local k=$1 out=$2 plan=$3 a=$4 b=$5 s d; shift 5
+    for s in "$a" "$b"; do [[ $s == none ]] && continue; for d in "$@"; do echo "${s%@*} $d"; done; done >> "$plan"
+    throttle
+    ( rbash "${T_TARGET[$k]}" "$a" "$b" "$MESH_COUNT" "$@" <<<"$MESH_SCRIPT" > "$out" 2>&1 ) &
+}
 mesh_check() {
-    local k j r total=0 a b
-    local -A host_of=()
-    for j in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $j $r && host_of[${RIP[$j,$r]}]=${T_HOST[$j]}; done; done
-    log "Mesh: every rail IP pings the ${#host_of[@]} rail IPs of the other tested hosts..."
+    local k j r q
+    local -A host_of=() chost_of=()
+    local -a bdst=() dst=() src=()
+    : > "$WORK/mesh_plan_b"; : > "$WORK/mesh_plan_c"; : > "$WORK/meshmap"
+    for j in "${ELIG[@]}"; do for r in "${RAILS[@]}"; do rail_ok $j $r || continue
+        host_of[${RIP[$j,$r]}]=${T_HOST[$j]}; bdst+=("${RIP[$j,$r]}"); echo "${RIP[$j,$r]} ${T_HOST[$j]} $r" >> "$WORK/meshmap"
+    done; done
+    if [[ $FF_CROSS_RAIL == 0 ]]; then log "Mesh: every rail IP pings the other tested hosts' rail IPs on its own rail (FF_CROSS_RAIL=0), $MESH_COUNT pings each..."
+    else log "Mesh: every rail IP pings the ${#host_of[@]} rail IPs of the other tested hosts, $MESH_COUNT pings each..."; fi
     for k in "${ELIG[@]}"; do
-        local -a dst=() src=()
+        if [[ $FF_CROSS_RAIL == 0 ]]; then
+            for r in "${RAILS[@]}"; do rail_ok $k $r || continue
+                dst=(); for j in "${ELIG[@]}"; do [[ $j != "$k" ]] && rail_ok $j $r && dst+=("${RIP[$j,$r]}"); done
+                (( ${#dst[@]} )) && mesh_call "$k" "$WORK/mesh.$k.$r" "$WORK/mesh_plan_b" "${RIP[$k,$r]}@${RNIC[$k,$r]}" none "${dst[@]}"
+            done
+            continue
+        fi
+        dst=(); src=()
         for j in "${ELIG[@]}"; do [[ $j != "$k" ]] || continue; for r in "${RAILS[@]}"; do rail_ok $j $r && dst+=("${RIP[$j,$r]}"); done; done
-        for r in "${RAILS[@]}"; do rail_ok $k $r && src+=("${RIP[$k,$r]}"); done
-        (( ${#src[@]} )) || continue
-        total=$(( total + ${#src[@]} * ${#dst[@]} ))
+        for r in "${RAILS[@]}"; do rail_ok $k $r && src+=("${RIP[$k,$r]}@${RNIC[$k,$r]}"); done
+        (( ${#src[@]} && ${#dst[@]} )) || continue
         # the script takes two sources ("none" = no such rail): one call per two rails
-        local q
-        for (( q = 0; q < ${#src[@]}; q += 2 )); do
-            a=${src[q]}; b=${src[q+1]:-none}
-            throttle
-            ( rbash "${T_TARGET[$k]}" "$a" "$b" "${dst[@]}" <<<"$MESH_SCRIPT" > "$WORK/mesh.$k.$q" 2>&1 ) &
-        done
+        for (( q = 0; q < ${#src[@]}; q += 2 )); do mesh_call "$k" "$WORK/mesh.$k.$q" "$WORK/mesh_plan_b" "${src[q]}" "${src[q+1]:-none}" "${dst[@]}"; done
     done
     # clients: every usable client data NIC pings every backend rail IP (clients never ping each other)
-    local ctotal=0; local -A chost_of=(); local -a bdst=("${!host_of[@]}")
     for k in "${CLI[@]}"; do
-        local -a src=()
-        for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j && { src+=("${CIP[$k,$j]}"); chost_of[${CIP[$k,$j]}]=${T_HOST[$k]}; }; done
+        src=()
+        for (( j = 0; j < CN[$k]; j++ )); do cl_ok $k $j && { src+=("${CIP[$k,$j]}@${CNIC[$k,$j]}"); chost_of[${CIP[$k,$j]}]=${T_HOST[$k]}; echo "${CIP[$k,$j]} ${T_HOST[$k]} c" >> "$WORK/meshmap"; }; done
         (( ${#src[@]} && ${#bdst[@]} )) || continue
-        ctotal=$(( ctotal + ${#src[@]} * ${#bdst[@]} ))
-        for (( q = 0; q < ${#src[@]}; q += 2 )); do
-            a=${src[q]}; b=${src[q+1]:-none}
-            throttle
-            ( rbash "${T_TARGET[$k]}" "$a" "$b" "${bdst[@]}" <<<"$MESH_SCRIPT" > "$WORK/cmesh.$k.$q" 2>&1 ) &
-        done
+        for (( q = 0; q < ${#src[@]}; q += 2 )); do mesh_call "$k" "$WORK/cmesh.$k.$q" "$WORK/mesh_plan_c" "${src[q]}" "${src[q+1]:-none}" "${bdst[@]}"; done
     done
     (( ${#CLI[@]} )) && log "Mesh: and the ${#chost_of[@]} client data NIC IPs ping every backend rail IP..."
     wait
-    cat "$WORK"/mesh.* 2>&1 | awk '$1 == "MESHFAIL" {print $2, $3}' | while read -r s d; do
-        echo "${host_of[$s]:-?} $s ${host_of[$d]:-?} $d"
-    done | sort -V > "$WORK/mesh_b"
-    : > "$WORK/mesh_c"
-    if (( ${#CLI[@]} )); then
-        cat "$WORK"/cmesh.* 2>&1 | awk '$1 == "MESHFAIL" {print $2, $3}' | while read -r s d; do
-            echo "${chost_of[$s]:-?} $s ${host_of[$d]:-?} $d client"
-        done | sort -V > "$WORK/mesh_c"
-    fi
+    # remote lines -> unreachable (mesh_b/mesh_c: "hs s hd d [client]"), lossy ("... lost count [client]"), not routed
+    # ("hs s hd d dev cross|same|client"); probed pairs = planned minus not routed
+    local w
+    for w in b c; do
+        : > "$WORK/mesh_$w"; : > "$WORK/mesh_l$w"; : > "$WORK/mesh_u$w"; : > "$WORK/mesh_x$w"
+        local pre=mesh sfx=""; [[ $w == c ]] && { pre=cmesh; sfx=" client"; }
+        cat "$WORK"/$pre.* > "$WORK/mesh_out_$w" 2>&1   # no such file (no clients): its one error line matches nothing
+        awk -v sfx="$sfx" -v fb="$WORK/mesh_$w.u" -v fl="$WORK/mesh_l$w.u" -v fu="$WORK/mesh_u$w.u" -v fx="$WORK/mesh_x$w" \
+            'FILENAME == ARGV[1] {h[$1] = $2; rl[$1] = $3; next}
+                 {hs = ($2 in h) ? h[$2] : "?"; hd = ($3 in h) ? h[$3] : "?"}
+                 $1 == "MESHLOSS" && $4 >= $5 {print hs, $2, hd, $3 sfx > fb; next}
+                 $1 == "MESHLOSS" {print hs, $2, hd, $3, $4, $5 sfx > fl; next}
+                 $1 == "MESHROUTE" {cls = (sfx != "") ? "client" : ((rl[$2] == rl[$3]) ? "same" : "cross")
+                     print hs, $2, hd, $3, ($4 == "" ? "-" : $4), cls > fu; print $2, $3 > fx}' "$WORK/meshmap" "$WORK/mesh_out_$w"
+        local x; for x in "$w" "l$w" "u$w"; do [[ -f $WORK/mesh_$x.u ]] && sort -V "$WORK/mesh_$x.u" > "$WORK/mesh_$x"; done
+        awk 'FILENAME == ARGV[1] {x[$1 " " $2] = 1; next} !(($1 " " $2) in x)' "$WORK/mesh_x$w" "$WORK/mesh_plan_$w" > "$WORK/mesh_probed_$w"
+    done
     cat "$WORK/mesh_b" "$WORK/mesh_c" > "$COLLECT_DIR/mesh_failures.txt"
-    local fails cfails; fails=$(wc -l < "$COLLECT_DIR/mesh_failures.txt" | tr -d ' '); cfails=$(wc -l < "$WORK/mesh_c" | tr -d ' ')
-    total=$(( total + ctotal ))
-    log "Mesh: $total pings, $fails failed$( (( ${#CLI[@]} )) && echo " (from clients: $cfails of $ctotal)")"
-    MESH_PINGS=$total; MESH_FAILS=$fails; MESH_CPINGS=$ctotal; MESH_CFAILS=$cfails
-    (( fails )) || return 0
+    cat "$WORK/mesh_lb" "$WORK/mesh_lc" > "$COLLECT_DIR/mesh_lossy.txt"
+    cat "$WORK/mesh_ub" "$WORK/mesh_uc" > "$COLLECT_DIR/mesh_unrouted.txt"
+    local fails cfails lossy clossy probed cprobed unr ux us uc
+    fails=$(wc -l < "$COLLECT_DIR/mesh_failures.txt" | tr -d ' '); cfails=$(wc -l < "$WORK/mesh_c" | tr -d ' ')
+    lossy=$(wc -l < "$COLLECT_DIR/mesh_lossy.txt" | tr -d ' '); clossy=$(wc -l < "$WORK/mesh_lc" | tr -d ' ')
+    probed=$(( $(wc -l < "$WORK/mesh_probed_b") + $(wc -l < "$WORK/mesh_probed_c") )); cprobed=$(wc -l < "$WORK/mesh_probed_c" | tr -d ' ')
+    unr=$(wc -l < "$COLLECT_DIR/mesh_unrouted.txt" | tr -d ' ')
+    ux=$(awk '$6 == "cross"' "$COLLECT_DIR/mesh_unrouted.txt" | wc -l | tr -d ' '); us=$(awk '$6 == "same"' "$COLLECT_DIR/mesh_unrouted.txt" | wc -l | tr -d ' ')
+    uc=$(awk '$6 == "client"' "$COLLECT_DIR/mesh_unrouted.txt" | wc -l | tr -d ' ')
+    log "Mesh: $probed pairs pinged ($MESH_COUNT pings each), $fails unreachable, $lossy lossy$( (( ${#CLI[@]} )) && echo " (from clients: $cfails of $cprobed unreachable, $clossy lossy)")"
+    (( unr )) && log "Mesh: $unr pairs not pinged, their route leaves another NIC than the source's own (mesh_unrouted.txt): $ux cross-rail, $us same-rail$( (( ${#CLI[@]} )) && echo ", $uc from clients")"
+    MESH_PINGS=$probed; MESH_FAILS=$fails; MESH_CPINGS=$cprobed; MESH_CFAILS=$cfails
+    MESH_LOSSY=$lossy; MESH_CLOSSY=$clossy; MESH_UNROUTED=$unr
+    (( fails + lossy + us )) || return 0
     : > "$WORK/mesh_anom"
     if (( cfails )); then
-        # A client IP failing to every backend rail IP gets no replies at all; otherwise a backend rail IP
+        # A client IP failing to every backend rail IP it pinged gets no replies at all; otherwise a backend rail IP
         # failing from many client IPs points at that rail as clients reach it
-        local ip; for ip in "${!chost_of[@]}"; do echo "$ip ${chost_of[$ip]}"; done > "$WORK/cmeship"
-        awk -v nb=${#bdst[@]} 'FNR == 1 {f++}
-             f == 1 {hof[$1] = $2; nc++; next}
+        awk 'FILENAME == ARGV[1] {hof[$1] = $2; next}
+             FILENAME == ARGV[2] {np++; ps[np] = $1; pd[np] = $2; psrc[$1]++; next}
              {m++; s[m] = $2; d[m] = $4; dh[$4] = $3; fs[$2]++}
              END {
-                 for (x in fs) if (fs[x] >= nb) {dead[x] = 1; nd++}
-                 for (x in dead) printf "%s mesh_client_no_replies client IP %s got no reply from any of the %d backend rail IPs (inbound ICMP blocked, or no route to the rails)\n", hof[x], x, nb
+                 for (x in fs) if (fs[x] >= psrc[x]) dead[x] = 1
+                 for (x in dead) printf "%s mesh_client_no_replies client IP %s got no reply from any of the %d backend rail IPs (inbound ICMP blocked, or no route to the rails)\n", hof[x], x, psrc[x]
                  for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
-                 for (x in n) printf "%s mesh_client_unreachable rail IP %s did not answer %d of %d client IPs\n", dh[x], x, n[x], nc - nd
-             }' "$WORK/cmeship" "$WORK/mesh_c" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
+                 for (i = 1; i <= np; i++) if (!(ps[i] in dead)) den[pd[i]]++
+                 for (x in n) printf "%s mesh_client_unreachable rail IP %s did not answer %d of %d client IPs\n", dh[x], x, n[x], den[x]
+             }' "$WORK/meshmap" "$WORK/mesh_probed_c" "$WORK/mesh_c" | sort -k2,2 -k7,7rn > "$WORK/mesh_anom"
     fi
     if [[ -s $WORK/mesh_b ]]; then
-        local ip; for ip in "${!host_of[@]}"; do echo "$ip ${host_of[$ip]}"; done > "$WORK/meship"   # backends only
-        # A source whose pings fail to every peer gets no replies at all (its inbound ICMP or rail is
+        # A source whose pings fail to every peer it pinged gets no replies at all (its inbound ICMP or rail is
         # blocked): report it once as the source and keep its failures out of the destination counts.
-        # Otherwise a destination failing from many sources points at that rail.
-        # Peers of an IP = every rail IP except its own host's; sources of a destination likewise,
-        # minus the silent sources on other hosts.
-        awk 'FNR == 1 {f++}
-             f == 1 {hof[$1] = $2; c[$2]++; all++; next}
+        # Otherwise a destination failing from many sources points at that rail. Peers and sources count the
+        # pairs pinged (mesh_probed_b), so pairs not routed out the source's NIC never count.
+        awk 'FILENAME == ARGV[1] {hof[$1] = $2; next}
+             FILENAME == ARGV[2] {np++; ps[np] = $1; pd[np] = $2; psrc[$1]++; next}
              {m++; s[m] = $2; d[m] = $4; fs[$2]++}
              END {
-                 for (x in fs) if (fs[x] >= all - c[hof[x]]) {dead[x] = 1; nd++; deadon[hof[x]]++}
-                 for (x in dead) printf "%s mesh_no_replies rail IP %s got no reply from any of its %d peers (inbound ICMP blocked or rail down on that host)\n", hof[x], x, all - c[hof[x]]
+                 for (x in fs) if (fs[x] >= psrc[x]) dead[x] = 1
+                 for (x in dead) printf "%s mesh_no_replies rail IP %s got no reply from any of its %d peers (inbound ICMP blocked or rail down on that host)\n", hof[x], x, psrc[x]
                  for (i = 1; i <= m; i++) if (!(s[i] in dead)) n[d[i]]++
-                 for (x in n) printf "%s mesh_unreachable rail IP %s did not answer %d of %d pinging rail IPs\n", hof[x], x, n[x], all - c[hof[x]] - (nd - deadon[hof[x]])
-             }' "$WORK/meship" "$WORK/mesh_b" | sort -k2,2 -k7,7rn > "$WORK/mesh_banom"
+                 for (i = 1; i <= np; i++) if (!(ps[i] in dead)) den[pd[i]]++
+                 for (x in n) printf "%s mesh_unreachable rail IP %s did not answer %d of %d pinging rail IPs\n", hof[x], x, n[x], den[x]
+             }' "$WORK/meshmap" "$WORK/mesh_probed_b" "$WORK/mesh_b" | sort -k2,2 -k7,7rn > "$WORK/mesh_banom"
         cat "$WORK/mesh_banom" "$WORK/mesh_anom" > "$WORK/mesh_all"; mv "$WORK/mesh_all" "$WORK/mesh_anom"
     fi
+    # lossy: a destination that lost some (not all) of its pings, from how many of the IPs that pinged it
+    awk -v kind=mesh_lossy -v who="pinging rail IPs" 'FILENAME == ARGV[1] {hof[$1] = $2; next}
+         FILENAME == ARGV[2] {den[$2]++; next}
+         {n[$4]++; l[$4] += $5; t[$4] += $6}
+         END {for (x in n) printf "%s %s rail IP %s lost pings from %d of %d %s (%d of %d pings lost)\n", hof[x], kind, x, n[x], den[x], who, l[x], t[x]}' "$WORK/meshmap" "$WORK/mesh_probed_b" "$WORK/mesh_lb" | sort -k9,9rn >> "$WORK/mesh_anom"
+    awk -v kind=mesh_client_lossy -v who="client IPs" 'FILENAME == ARGV[1] {hof[$1] = $2; next}
+         FILENAME == ARGV[2] {den[$2]++; next}
+         {n[$4]++; l[$4] += $5; t[$4] += $6}
+         END {for (x in n) printf "%s %s rail IP %s lost pings from %d of %d %s (%d of %d pings lost)\n", hof[x], kind, x, n[x], den[x], who, l[x], t[x]}' "$WORK/meshmap" "$WORK/mesh_probed_c" "$WORK/mesh_lc" | sort -k9,9rn >> "$WORK/mesh_anom"
+    # same-rail pairs whose route leaves another NIC: a routing fault on that host (cross-rail ones are the rails' design)
+    awk '$6 == "same" {k = $1 " " $2 " " $5; n[k]++} END {for (k in n) {split(k, a, " "); printf "%s mesh_no_route rail IP %s routes %d same-rail peers out %s, not its own NIC\n", a[1], a[2], n[k], (a[3] == "-" ? "nowhere (no route)" : a[3])}}' \
+        "$COLLECT_DIR/mesh_unrouted.txt" | sort -V >> "$WORK/mesh_anom"
     cat "$WORK/mesh_anom" >> "$COLLECT_DIR/rail_anomalies.txt"
-    log "WARNING: mesh findings (silent sources first, then destinations, worst first):"
+    log "WARNING: mesh findings (silent sources first, then unreachable and lossy destinations, worst first):"
     sed 's/^/#   /' "$WORK/mesh_anom" | head -n 10 >&2
 }
 
@@ -4893,6 +4945,10 @@ main() {
         echo "mesh_failures=${MESH_FAILS:-}"
         echo "mesh_client_pings=${MESH_CPINGS:-}"
         echo "mesh_client_failures=${MESH_CFAILS:-}"
+        echo "mesh_count=${MESH_PINGS:+$MESH_COUNT}"
+        echo "mesh_lossy=${MESH_LOSSY:-}"
+        echo "mesh_client_lossy=${MESH_CLOSSY:-}"
+        echo "mesh_unrouted=${MESH_UNROUTED:-}"
         echo "tool=fabric_ferret"
     } > "$COLLECT_DIR/metadata.txt"
     for k in "${ELIG[@]}"; do

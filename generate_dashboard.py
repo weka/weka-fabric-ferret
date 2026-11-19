@@ -514,6 +514,9 @@ def generate_html(data, output_path):
                  'mesh_no_replies': 'Rail IP gets no replies in the mesh',
                  'mesh_client_unreachable': 'Rail IP unreachable from clients in the mesh',
                  'mesh_client_no_replies': 'Client IP gets no replies from the backends in the mesh',
+                 'mesh_lossy': 'Rail IP loses some pings in the mesh',
+                 'mesh_client_lossy': 'Rail IP loses some pings from clients in the mesh',
+                 'mesh_no_route': 'Rail IP routes same-rail peers out another NIC',
                  'client_route_undeclared': 'Client reaches a backend by an undeclared NIC',
                  'shared_leaf': 'Leaf shared by clients and backends (judged as a backend leaf)',
                  'client_mtu_mismatch': 'Client MTU differs from the backends'}
@@ -523,7 +526,11 @@ def generate_html(data, output_path):
         pf_bad = bad
         mp = data['metadata'].get('mesh_pings')
         cmp = data['metadata'].get('mesh_client_pings')
-        mesh_txt = (f" | mesh: {data['metadata'].get('mesh_failures', '?')} of {mp} pings failed"
+        md = data['metadata']
+        # mesh_count: several pings per pair (unreachable = all lost, lossy = some); bundles before it: one ping each
+        mesh_head = (f" | mesh: {md.get('mesh_failures', '?')} of {mp} pairs unreachable, {md.get('mesh_lossy') or 0} lossy"
+                     if md.get('mesh_count') else f" | mesh: {md.get('mesh_failures', '?')} of {mp} pings failed")
+        mesh_txt = (mesh_head
                     + (f" (from clients: {data['metadata'].get('mesh_client_failures', '?')} of {cmp})" if cmp and cmp != '0' else '')) if mp else ''
         preflight_html = f"""<div class="card mb-3"><div class="card-header">Preflight: rail layout and gateways |
 <b class="{'stat-bad' if bad else 'stat-good'}">{bad}</b> findings | gateways: {gw_ok} answered a full-MTU ping, {len(gw_bad)} failed, {gw_direct} rails on-link{mesh_txt}</div>

@@ -373,10 +373,21 @@ case $script in
         touch) echo OK ;;
         release) [[ -f $f ]] && grep -q "^$2 " "$f" && rm -f "$f"; echo OK ;;
     esac ;;
-*"MESHFAIL"*)
-    # FAKE_MESHFAIL=<ip>: that rail IP answers nobody
-    a=$1 b=$2; shift 2
-    for s in $a $b; do [[ $s == none ]] && continue; for d in "$@"; do if [[ $d == "$FAKE_MESHFAIL" || $d == "$FAKE_ICMP_BLOCK" || $s == "$FAKE_ICMP_BLOCK" ]]; then echo "MESHFAIL $s $d"; fi; done; done ;;
+*"MESHLOSS"*)
+    # src_a src_b count dst... (sources ip@nic). FAKE_NOXROUTE: a pair across subnets is not routed out the source's
+    # NIC (as the path check's fake has it). FAKE_MESHFAIL=<ip>: that rail IP answers nobody; FAKE_MESHLOSSY=<ip>: it
+    # loses 2 of each pair's pings; FAKE_MESHNOROUTE=<ip>: that source routes every peer out eno1. FAKE_MESHLOG: each pair
+    # pinged is logged ("src dst") to mesh_pairs.log
+    a=$1 b=$2 c=$3; shift 3
+    for sn in $a $b; do [[ $sn == none ]] && continue; s=${sn%@*}
+        for d in "$@"; do
+            if [[ -n $FAKE_NOXROUTE && ${s%.*} != "${d%.*}" ]]; then echo "MESHROUTE $s $d eno1"; continue; fi
+            [[ $s == "$FAKE_MESHNOROUTE" ]] && { echo "MESHROUTE $s $d eno1"; continue; }   # that source routes every peer out eno1
+            [[ -n $FAKE_MESHLOG ]] && echo "$s $d" >> "$FSTATE/mesh_pairs.log"
+            if [[ $d == "$FAKE_MESHFAIL" || $d == "$FAKE_ICMP_BLOCK" || $s == "$FAKE_ICMP_BLOCK" ]]; then echo "MESHLOSS $s $d $c $c"
+            elif [[ $d == "$FAKE_MESHLOSSY" ]]; then echo "MESHLOSS $s $d 2 $c"; fi
+        done
+    done ;;
 *"show-fec"*)
     # per second since the previous call (the state keeps its epoch; at least 1 s), so the rate the collector
     # computes does not move with the Mac's load: h1 A 5e-7 (ok); h2 A 5e-5 at 400G (watch); h3 B uncorrectable
