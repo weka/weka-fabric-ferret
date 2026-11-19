@@ -325,6 +325,8 @@ def generate_html(data, output_path):
             v, why = r['bits'], f"{r['bits']:,} during the test ({r['secs']} s)"
         fec_during.append(v if v else None)   # a log axis has no 0: a 0 shows as no bar, the hover says 0
         fec_note.append(why)
+    fec_title = ("Top 50 FEC Corrected Bits: during the test (narrow bar) over the total since the counters last reset (wide bar)" if fec_rate_by
+                 else "Top 50 FEC Corrected Bits (cumulative since the counters last reset; not a rate)")   # no fec_rates.txt: totals only
     fec_during, fec_note = json.dumps(fec_during), json.dumps(fec_note)
 
     # Optics data — color intensity reflects deviation from ideal
@@ -1119,7 +1121,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     {'<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header text-danger" style="display:flex; justify-content:space-between; align-items:center;">Packet Drops During Testing (' + str(nics_with_drops) + ' NICs affected)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv(&#39;dropsTable&#39;,&#39;packet_drops.csv&#39;)">Download CSV</button></div><div class="card-body scroll"><table class="table table-sm table-striped table-hover" id="dropsTable"><thead><tr><th>#</th><th>Host/NIC</th><th>IP</th><th>Rx Dropped<small>ideal 0</small></th><th>Tx Dropped<small>ideal 0</small></th><th>Rx OOB<small>ideal 0</small></th><th>Phases</th></tr></thead><tbody>' + "".join(f"<tr><td></td><td>{d['host_nic']}</td><td>{d['ip']}</td><td>{d['rx_drop']:,}</td><td>{d['tx_drop']:,}</td><td>{d['rx_oob']:,}</td><td>{d['phases']}</td></tr>" for d in drops) + '</tbody></table></div></div></div></div>' if drops else '<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header">Packet Drops</div><div class="card-body">' + no_drops_msg + '</div></div></div></div>'}
     <div class="row g-3 mt-1">
         <div class="col-md-6">
-            <div class="card"><div class="card-header">Top 50 FEC Corrected Bits: during the test (narrow bar) over the total since the counters last reset (wide bar)</div>
+            <div class="card"><div class="card-header">{fec_title}</div>
             <div class="card-body"><div id="fecChart" style="height:400px;"></div></div></div>
         </div>
         <div class="col-md-6">
