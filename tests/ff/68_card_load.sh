@@ -4,7 +4,7 @@
 # card and flagged cards, the rate over the phase's run time; and the remote CARD_SCRIPT itself on a fake sysfs.
 # Fake: rails A and B share card 0000:05:00, Gen4 x16; FAKE_CARD_HOT=h: 1 TB each way per port per read and rising
 # discard and pause counters on h's 05:00 card; FAKE_CARD_SLOW=h: h's links at 8.0 GT/s x8.
-# checks: 6
+# checks: 7
 # secs: 45
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 
@@ -29,6 +29,12 @@ used=$(bfile rt card_load.txt | awk '$2 == 1 && $3 == "h21" && $6 > 0 {printf "%
 chk "rate over the phase's run time: h21's phase 1 tx gives the seconds it used (16000 Gb / tx = $used) within 1 s of the phase's $want s (2 s or more), not the 5 s or more between the reads" \
     "[[ \"$want\" =~ ^[0-9]+\$ && \"$used\" =~ ^[0-9.]+\$ ]] && [ $want -ge 2 ] && awk -v u=$used -v w=$want 'BEGIN {d = u - w; exit !(d <= 1 && d >= -1)}'" \
     "phase 1 secs '$want', used '$used'; h21 row: $(bfile rt card_load.txt | awk '$2 == 1 && $3 == "h21"')"
+# tie: with no hot card every card moves the same bytes, so the busiest is a tie; the rows are sorted by host and card
+# and a tie keeps the first (strict >), so the log names h21 in every phase whatever order the hosts answered in
+out=$(xrun tie FF_HOSTS=198.18.0.21-24 FF_ITER=1 FF_UDP=0 timeout 120 $B $C 1)
+chk "tie: 4 hosts, no hot card: card_load.txt sorted by host and card, and each phase's busiest card is h21's (the first) in both phases" \
+    "[ \"\$(bfile tie card_load.txt | awk '{print \$2, \$3, \$4}')\" = \"\$(bfile tie card_load.txt | awk '{print \$2, \$3, \$4}' | sort -s -k1,1 -k2,2 -k3,3)\" ] && [ \$(grep -cE '^#   NIC cards in phase [12] \\(4; card_load.txt\\): busiest h21 ' <<<\"\$out\") = 2 ]" \
+    "$(grep 'NIC cards in phase' <<<"$out" | cut -c1-120 | tr '\n' '|')"
 # unit: CARD_SCRIPT on a fake sysfs (FF_SYSFS) with a stub ethtool: a bond expands to its members, the bus is the
 # device link's name, link speed and width come from "16.0 GT/s PCIe" / "16", a counter ethtool lacks reads na,
 # a port with no sysfs entry prints nothing

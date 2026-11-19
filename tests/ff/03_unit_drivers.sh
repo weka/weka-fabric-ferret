@@ -2,7 +2,7 @@
 # unit drivers on mlx5-shaped text (tools/mkmlx5.sh; step b, 10-29: was a real host's under FFT_SITE_DATA): diag parsing
 # (mawk vs gawk), prio filter, DAC/optic temps, RDMA sysfs reader
 # tier: fast
-# checks: 16
+# checks: 17
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/mlx5 && $B $S/tools/mkmlx5.sh raw $W/mlx5/s001.txt s001 && $B $S/tools/mkmlx5.sh dump $W/mlx5/dump.txt && $B $S/tools/mkmlx5.sh ethtool $W/mlx5/ethtool_S.txt || exit 2
 
@@ -43,4 +43,11 @@ for v in bsd mawk gawk; do
     out=$(PATH=$S/awkbin/$v:$PATH err_hist $U/errrows.txt 2>&1)
     chk "err_hist unit, awk=$v: 5 x No route to 5 destinations (4 named ...), 3 x refused to 1 (one row's share:2 dropped), 1 x timeout; most runs first" "[ \"\$out\" = \"\$(cat $U/errrows.expected)\" ]" "$(diff <(cat $U/errrows.expected) <(echo "$out"))"
 done
+# --- IPERF_SCRIPT (src/sh/ff_remote.sh) when iperf3 dies on a signal with no error text (11-19, a field run's two
+# SIGSEGV runs read "ERROR rc=139" and nothing else): a stub iperf3 that kills itself with SEGV ---
+mkdir -p $W/sigbin && printf '%s\n' '#!/usr/bin/env bash' 'echo "Connecting to host"; kill -SEGV $$' > $W/sigbin/iperf3 && chmod +x $W/sigbin/iperf3
+is=$(sed -n "/^read -r -d '' IPERF_SCRIPT <<'EOF'\$/,/^EOF\$/p" $C | sed '1d;$d')
+so=$(PATH=$W/sigbin:$PATH bash -s 198.19.1.21 198.19.1.22 5201 16 1 <<<"$is" 2>&1)
+chk "IPERF_SCRIPT unit: iperf3 killed by SEGV with no error text gives 'ERROR rc=139 iperf3 killed by signal 11 (SIGSEGV)' (control: the stub exits 139)" \
+    "[ \"\$so\" = 'ERROR rc=139 iperf3 killed by signal 11 (SIGSEGV)' ] && { $W/sigbin/iperf3 > $W/sig.out 2>&1; [ \$? = 139 ]; }" "got '$so'"
 finish

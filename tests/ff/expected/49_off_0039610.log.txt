@@ -1,0 +1,18 @@
+  c1    20.0      1840000/2000000  92.000   0.000
+  c2    250.0     20/2000000       0.001    0.000
+  Expected from overload: 0; unaccounted beyond it (likely fabric): 10862020
+  h21   50.0      2400000/3000000  80.000   0.000
+  h22   212.5     600000/4000000   15.000   0.000
+  h23   49.0      2412000/3000000  80.400   0.000
+  h24   50.0      1600000/2000000  80.000   0.000
+  h25   248.8     10000/2000000    0.500    0.000
+  h26   0.0       2000000/2000000  100.000  0.000
+  Lost datagrams 10862020 of 20000000: sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 10862020
+#   U1 expected from overload: 0 (0.000%); unaccounted beyond it (likely fabric): 3559000
+#   U1 loss: 3559000 of 6000000 datagrams lost (59.317%): sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 3559000
+#   U2 expected from overload: 0 (0.000%); unaccounted beyond it (likely fabric): 3559000
+#   U2 loss: 3559000 of 6000000 datagrams lost (59.317%): sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 3559000
+#   UC1 expected from overload: 0 (0.000%); unaccounted beyond it (likely fabric): 1904000
+#   UC1 loss: 1904000 of 4000000 datagrams lost (47.600%): sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 1904000
+#   UC2 expected from overload: 0 (0.000%); unaccounted beyond it (likely fabric): 1840020
+#   UC2 loss: 1840020 of 4000000 datagrams lost (46.001%): sender TX 0, receiver socket 0, NIC 0, kernel backlog 0, unaccounted 1840020

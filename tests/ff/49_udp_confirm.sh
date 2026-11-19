@@ -7,7 +7,10 @@
 # checks: 17
 # secs: 45
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
-X=$S/ff/expected/49_off.log.txt
+X=$S/ff/expected/49_off_0039610.log.txt   # the pre-scope-6 tool's lines (0039610, the pairs): their shape is the oracle
+# mask: numbers out, then sorted (the shape of a line set); fold: a confirm run's bucket put back into "likely fabric"
+mask() { sed -E 's/[0-9]+(\.[0-9]+)?/N/g' | sort; }
+fold() { perl -pe 's/; rate limit between the hosts \(paced run\): (\d+); unaccounted beyond it \(likely fabric\): (\d+)/"; unaccounted beyond it (likely fabric): " . ($1 + $2)/e' | sort; }
 PATHS='h21:cap=50 h22:loss=150000 h23:cap=50,loss=20000 h24:cap=50,cfail=1 h25:loss=5000 h26:loss=1000000 c1:cap=20'
 RUN="FAKE_NOSPEED=1 FAKE_CLIENT_NOSPEED=c1,c2 FF_HOSTS=198.18.0.21-26 FF_CLIENTS=198.18.1.1-2 FF_CLIENT_NETS=198.19.10.0/24,198.19.11.0/24 FF_ITER=1"
 # the log's UDP loss lines (per phase and in the summary) and the summary's host rows
@@ -19,6 +22,7 @@ npaced() { paced $1 | wc -l | tr -d ' '; }
 # cf: every case in one run (6 backends, 2 clients, no line speed anywhere)
 out=$(xrun cf FAKE_UDP_PATH="$PATHS" $RUN timeout 300 $B $C 1); rc=$?
 cp $FAKE_STATE/iperf_args.log $W/cf.args; lm_on=$(cat $FAKE_STATE/lockmax.h21 2>&1)
+cfu=$(udplines <<<"$out")
 ue=$(bfile cf udp_expected.txt); uc=$(bfile cf udp_confirm.txt 2>&1)
 rows=$(grep -v '^#' <<<"$uc" | grep -E '^iter[0-9]+ ')
 # the paced runs a correct tool makes, from the original runs: every run into h21, h22, h23, h24 and c1
@@ -85,17 +89,19 @@ chk "line speed known, a limit under it: confirm runs happen (the same 22) and t
     "[ \$(npaced lk) = 22 ] && [ \$(grep -c '^UDP ' $W/lk.args) = 32 ] && [ \"\$(awk '\$5 == \"198.19.10.1\" {print \$(NF-1), \$NF}' <<<\"\$lrows\" | sort | uniq -c | awk '{print \$1, \$2, \$3}')\" = '2 720000 gone' ] && [ \"\$(awk '\$5 ~ /^198\\.19\\.[12]\\.21\$/ {print \$(NF-1)}' <<<\"\$lrows\" | sort -u)\" = 800000 ] && [ \$(paced lk | awk '\$2 == \"198.19.10.2\"' | wc -l) = 0 ] && [ \$(awk '\$5 == \"198.19.10.2\"' <<<\"\$lrows\" | grep -c .) = 0 ] && [ \$(awk '\$5 == \"198.19.10.2\" && \$9 == 150000' <<<\"\$(bfile lk udp_expected.txt)\" | grep -c .) = 2 ]" \
     "paced $(npaced lk); rc=$rc; c1: $(awk '$5 == "198.19.10.1" {print $(NF-1) ":" $NF}' <<<"$lrows" | tr '\n' ' ') h21: $(awk '$5 ~ /\.21$/ {print $(NF-1)}' <<<"$lrows" | tr '\n' ' ') c2 paced $(paced lk | awk '$2 == "198.19.10.2"' | wc -l | tr -d ' ')"
 
-# off: FF_UDP_CONFIRM=0 on the first run's input: no confirm run, the UDP loss lines as the tool wrote them before scope 6
-# (expected/49_off.log.txt: first made on 0039610, the tool before scope 6; remade with the ring (it doubles the runs into each
-# backend), with FF_UDP_CONFIRM=0; the rates and percents are the old ones, only the counts doubled)
+# off: FF_UDP_CONFIRM=0 on the first run's input: no confirm run, and the UDP loss lines as the tool wrote them before
+# scope 6. Two oracles, neither the off run itself: (1) the shape of each line (numbers masked) equals the pre-scope-6
+# tool's (expected/49_off_0039610.log.txt, made on 0039610 with the pairs, so its numbers differ: the ring doubles the
+# runs into each backend); (2) the numbers equal the confirm-on run's with its rate-limit bucket folded back into
+# "likely fabric" (confirm runs move loss between the two buckets and change nothing else)
 OFF=FF_UDP_CONFIRM=0
 out=$(xrun off FAKE_UDP_PATH="$PATHS" $RUN $OFF timeout 300 $B $C 1); rc=$?
 cp $FAKE_STATE/iperf_args.log $W/off.args; lm_off=$(cat $FAKE_STATE/lockmax.h21 2>&1)
-[[ -n $FIXTURE_UPDATE ]] && { udplines <<<"$out" > $X; echo "WRITTEN  $X ($(wc -l < $X | tr -d ' ') lines)"; }
+ofu=$(udplines <<<"$out")
 render off; prc=$?
-chk "FF_UDP_CONFIRM=0: 0 paced runs, no udp_confirm.txt, metadata udp_confirm=0, and the log's UDP loss lines (4 phases x 2, the summary's 2, 8 host rows) equal expected/49_off.log.txt (the pre-scope-6 lines, counts at the ring's); its page has 0 'Paced run' and 0 'paced run' (control: the first page has both)" \
-    "[ \$(npaced off) = 0 ] && [ \$(grep -c '^UDP ' $W/off.args) = 32 ] && [ \$(tar -tzf \$(bundle off) | grep -c 'udp_confirm') = 0 ] && bfile off metadata.txt | grep -qx 'udp_confirm=0' && [ \$(wc -l < $X) = 18 ] && [ \"\$(udplines <<<\"\$out\")\" = \"\$(cat $X)\" ] && [ \$(grep -c -i 'paced run' $W/off.html) = 0 ] && [ \$(grep -c -i 'paced run' $W/cf.html) -ge 1 ]" \
-    "paced $(npaced off); rc=$rc prc=$prc; $(diff $X <(udplines <<<"$out") 2>&1 | head -n 4 | cut -c1-160 | tr '\n' '|'); page 'paced run' lines $(grep -c -i 'paced run' $W/off.html)"
+chk "FF_UDP_CONFIRM=0: 0 paced runs, no udp_confirm.txt, metadata udp_confirm=0; the log's UDP loss lines (4 phases x 2, the summary's 2, 8 host rows) have the pre-scope-6 tool's shape (expected/49_off_0039610.log.txt, numbers masked) and the confirm-on run's numbers with its bucket folded back; its page has 0 'Paced run' and 0 'paced run' (control: the first page has both)" \
+    "[ \$(npaced off) = 0 ] && [ \$(grep -c '^UDP ' $W/off.args) = 32 ] && [ \$(tar -tzf \$(bundle off) | grep -c 'udp_confirm') = 0 ] && bfile off metadata.txt | grep -qx 'udp_confirm=0' && [ \$(wc -l < $X) = 18 ] && [ \"\$(mask <<<\"\$ofu\")\" = \"\$(mask < $X)\" ] && [ \"\$(sort <<<\"\$ofu\")\" = \"\$(fold <<<\"\$cfu\")\" ] && [ \"\$(sort <<<\"\$cfu\")\" != \"\$(fold <<<\"\$cfu\")\" ] && [ \$(grep -c -i 'paced run' $W/off.html) = 0 ] && [ \$(grep -c -i 'paced run' $W/cf.html) -ge 1 ]" \
+    "paced $(npaced off); rc=$rc prc=$prc; shape: $(diff <(mask < $X) <(mask <<<"$ofu") 2>&1 | head -n 3 | cut -c1-140 | tr '\n' '|'); numbers: $(diff <(fold <<<"$cfu") <(sort <<<"$ofu") 2>&1 | head -n 3 | cut -c1-140 | tr '\n' '|'); page 'paced run' lines $(grep -c -i 'paced run' $W/off.html)"
 chk "run lock: the max age the run asks for covers the confirm time: with confirm runs on it is 5 s or more above FF_UDP_CONFIRM=0's (the fake keeps take's max age)" \
     "[[ \"$lm_on\" =~ ^[0-9]+\$ && \"$lm_off\" =~ ^[0-9]+\$ ]] && [ \$(( ${lm_on:-0} - ${lm_off:-0} )) -ge 5 ]" "on '$lm_on' off '$lm_off'"
 

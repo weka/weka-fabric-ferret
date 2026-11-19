@@ -96,12 +96,12 @@ chk "planted bug (the IP-keyed awk of 46c0374 on the old iprail): the 112 IP-les
 G=$S/fixtures/golden-B
 ux() { uf "udp_attr $2 $3 $4" "$1" -v t= -- $G/udp_expected.txt $U/uipmap_B.txt $U/unicmap_B.txt "$2" "$3" "$4"; }
 o=$(ux $A/ff_udp_attr.awk $G/iperf3_udp_results.txt $G/udp_host_counters.txt $G/udp_nic_drops.txt)
-chk "udp_attr unit: golden-B's UDP: lost 4260 of 10000000, socket 4000, NIC 28, backlog 0, unaccounted 232" "[ \"$o\" = '4260 10000000 4000 28 0 232 0 0 232 0' ]" "$o"
+chk "udp_attr unit: golden-B's UDP (the ring: 24 runs of 1000000, 10 lost each, 1050 on the 2 into h2's rail A): lost 2320 of 24000000, socket 2000 (h2's +1000 in each of its 2 lossy phases), NIC 14, backlog 0, unaccounted 306" "[ \"$o\" = '2320 24000000 2000 14 0 306 0 0 306 0' ]" "$o"
 o=$(ux $A/ff_udp_attr.awk $G/iperf3_udp_results.txt $U/udp_host_counters_kern.txt $U/udp_nic_drops_kern.txt)
-chk "udp_attr unit: h2's backlog drops also in rx_dropped (the kernel's way): NIC stays 28, backlog 4000" "[ \"$(cut -d' ' -f4,5 <<<"$o")\" = '28 4000' ]" "$o"
+chk "udp_attr unit: h2's backlog drops also in rx_dropped (the kernel's way): NIC stays 14, backlog 2000" "[ \"$(cut -d' ' -f4,5 <<<"$o")\" = '14 2000' ]" "$o"
 sed 's/nk = DR\[k\] - BK\[k\]/nk = DR[k]/' $A/ff_udp_attr.awk > $W/udp_attr.bug.awk
 o=$(ux $W/udp_attr.bug.awk $G/iperf3_udp_results.txt $U/udp_host_counters_kern.txt $U/udp_nic_drops_kern.txt)
-chk "planted bug (backlog not taken out of rx_dropped): the NIC bucket counts them twice" "[ \"$(cut -d' ' -f4 <<<"$o")\" != 28 ]" "$o"
+chk "planted bug (backlog not taken out of rx_dropped): the NIC bucket counts them twice" "[ \"$(cut -d' ' -f4 <<<"$o")\" != 14 ]" "$o"
 o=$(ux $A/ff_udp_attr.awk $U/udp_results_lost1.txt $G/udp_host_counters.txt $G/udp_nic_drops.txt)
 chk "udp_attr unit: host counters above the loss (1 lost per run, h2's socket +1000): 'over' says so" "[ \"$(cut -d' ' -f7 <<<"$o")\" -gt 0 ]" "$o"
 awkagree "udp_attr $G/iperf3_udp_results.txt $G/udp_host_counters.txt $G/udp_nic_drops.txt"
