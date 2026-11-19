@@ -4,8 +4,8 @@
 # line; the CSV holds the visible columns in their order. tests/cols_probe.js in headless Chrome on 14_where and
 # golden-C (synthetic fixtures).
 # tier: fast
-# checks: 3
-# secs: 40
+# checks: 4
+# secs: 45
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
 python3 $P $S/fixtures/bundles/14_where.tgz $W/uw.html > $W/uw.pout 2>&1
@@ -29,5 +29,10 @@ if [[ -x $CHROME ]]; then
     chk "hide a column in Chrome: the first DataTable with a menu, its first box cleared: the column's cells go (N/0/N) and come back; the CSV loses that column (8 -> 7 on both pages, its name gone); the results table's CSV drops Src IP when it is hidden (11/10/0)" \
         "[[ \"\$(kv '$cu' hide)\" =~ ^([1-9][0-9]*)/0/([0-9]+)/8/7/0\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [[ \"\$(kv '$cg' hide)\" =~ ^([1-9][0-9]*)/0/([0-9]+)/8/7/0\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [ \"\$(kv '$cu' rcsv)\" = 11/10/0 ] && [ \"\$(kv '$cg' rcsv)\" = 11/10/0 ] && [ \"\$(kv '$cx' hide)\" = - ]" \
         "uw '$cu' | gc '$cg' | control '$cx'"
-else for c in "Columns menu" "column widths" "hide a column"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
+    # narrowing: control without the line that adds the handles (1 line out) nothing is dragged
+    grep -v 'tcGrip(t, th); });$' $W/uw.html > $W/uwg.html; cn=$(probe $W/uwg.html cols_probe.js)
+    chk "narrow a column in Chrome: the first DataTable's widest column dragged 40 px left by its header's handle is 40 px narrower, its neighbour unchanged, the table 40 px narrower, a cell cut with its full text on hover; dragged 100 px right it is back at its first width and no wider (40/0/40/1/1/0, both pages); control: without the handles (1 line out) nothing to drag" \
+        "[ \"\$(kv '$cu' narrow)\" = 40/0/40/1/1/0 ] && [ \"\$(kv '$cg' narrow)\" = 40/0/40/1/1/0 ] && [ \$(diff $W/uw.html $W/uwg.html | grep -c '^< .*tcGrip(t, th)') = 1 ] && [ \"\$(kv '$cn' narrow)\" = - ]" \
+        "uw '$cu' | gc '$cg' | control '$cn'"
+else for c in "Columns menu" "column widths" "hide a column" "narrow a column"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
 finish

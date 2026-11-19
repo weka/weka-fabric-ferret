@@ -160,6 +160,9 @@ function tcCols(t) {
     t._tcs = st; t.classList.add('tc-cols');
     if (!document.getElementById('tcs-' + t.id)) { var css = document.createElement('style'); css.id = 'tcs-' + t.id; document.head.appendChild(css); }
     if ($.fn.DataTable.isDataTable(t) && !t._tcHook) { $(t).on('draw.dt', function () { tcApply(t); }); t._tcHook = 1; }
+    ths.forEach(function (th, i) { if (!(st.hash && i === 0)) tcGrip(t, th); });
+    if (!t._tcTip) { t._tcTip = 1; t.addEventListener("mouseover", function (ev) {   // a cut-off cell shows its full text on hover
+        var c = ev.target.closest && ev.target.closest("td, th"); if (c && !c.title && c.scrollWidth > c.clientWidth + 1) c.title = tcLabel(c); }); }
     tcApply(t); tcColMenu(t);
 }
 // put every row's cells in the state's order and write the table's rules (hidden columns)
@@ -178,6 +181,7 @@ function tcApply(t) {
 function tcCss(t) {
     var st = t._tcs, id = '#' + t.id, s = [];
     Object.keys(st.hidden).forEach(function (i) { if (st.hidden[i]) s.push(id + ' .tcc' + i + ' { display: none; }'); });
+    Object.keys(st.narrow).forEach(function (i) { s.push(id + ' .tcc' + i + ' { box-sizing: border-box; max-width: ' + st.narrow[i] + 'px; overflow: hidden; text-overflow: ellipsis; }'); });
     document.getElementById('tcs-' + t.id).textContent = s.join('\n');
 }
 // the Columns menu: one checkbox per column but '#', beside the row-count menu (the card's header when the card holds
@@ -208,6 +212,25 @@ function tcCsvIdx(t, n) {
     if (st && !Array.isArray(st.rest)) st = null;   // not a table this code set up
     if (!st) { for (var i = 0; i < n; i++) all.push(i); return all; }
     return tcOrder(st).filter(function (i) { return !(st.hash && i === 0) && !st.hidden[i]; });
+}
+// a handle on the right border of a header cell: dragged left it narrows that column (its cells end in "..."); the
+// column next to it keeps its width. It never makes a column wider than its longest value
+function tcGrip(t, th) {
+    var old = th.querySelector(".tc-grip"); if (old) old.remove();
+    var g = document.createElement("div"); g.className = "tc-grip"; g.title = "Drag to narrow this column";
+    ["click", "dblclick"].forEach(function (e) { g.addEventListener(e, function (ev) { ev.stopPropagation(); ev.preventDefault(); }); });
+    g.addEventListener("mousedown", function (ev) {
+        if (ev.button !== 0) return; ev.preventDefault(); ev.stopPropagation();
+        var st = t._tcs, i = th._tci, had = st.narrow[i];
+        delete st.narrow[i]; tcCss(t); var nat = th.getBoundingClientRect().width;   // its width with no limit
+        if (had) { st.narrow[i] = had; tcCss(t); }
+        var w0 = th.getBoundingClientRect().width, x0 = ev.clientX;
+        var mv = function (e) { var w = Math.round(Math.min(nat, Math.max(30, w0 + e.clientX - x0)));
+            if (w >= Math.floor(nat)) delete st.narrow[i]; else st.narrow[i] = w; tcCss(t); };
+        var up = function () { document.removeEventListener("mousemove", mv); document.removeEventListener("mouseup", up); t._tcGripEnd = Date.now(); };
+        document.addEventListener("mousemove", mv); document.addEventListener("mouseup", up);
+    });
+    th.appendChild(g);
 }
 function tcColsAll() { document.querySelectorAll('.tab-pane:not(#tab-topology) table.table').forEach(tcCols); }
 '''
@@ -1105,6 +1128,10 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 table.tc-cols {{ width: auto !important; }}
 table.tc-cols th, table.tc-cols td {{ white-space: nowrap; }}
 table.tc-cols td.dt-row-num {{ width: auto; }}
+table.tc-cols thead th {{ user-select: none; }}
+table.tc-cols th small {{ overflow: hidden; text-overflow: ellipsis; }}
+.tc-grip {{ position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; z-index: 2; }}
+.tc-grip:hover {{ background: rgba(78,204,163,0.35); }}
 table.tc-cols .col-filter {{ width: 0; min-width: 100%; }}
 table.tc-cols .col-filter select, table.tc-cols .col-filter input {{ min-width: 0; }}
 .tc-colmenu {{ display: inline-block; margin-left: auto; }}

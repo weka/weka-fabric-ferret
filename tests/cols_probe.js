@@ -10,10 +10,12 @@
 //   hide=<cells shown in the column>/<after its box is cleared>/<after it is set again>/<CSV columns>/<CSV columns
 //        with it hidden>/<its name in that CSV 0|1>  on the first DataTable with a menu
 //   rcsv=<CSV columns>/<with Src IP hidden>/<Src IP in it 0|1>  the results table (resultsCsvText)
+//   narrow=<px narrower>/<neighbour's change>/<table's px narrower>/<a cell cut 0|1>/<its full text on hover 0|1>/<px past
+//        its first width after a 100 px drag wider>  its widest column dragged 40 px narrower by the header's handle
 var tcpErr = 0; window.addEventListener('error', function () { tcpErr++; });
 window.addEventListener('load', function () { setTimeout(tcpProbe, 1500); });
 function tcpProbe() {
-    var r = { err: 0, elig: 0, menubad: 0, menusmall: 0, fitcols: 0, fitbad: 0, fitfirst: '-', hide: '-', rcsv: '-' };
+    var r = { err: 0, elig: 0, menubad: 0, menusmall: 0, fitcols: 0, fitbad: 0, fitfirst: '-', hide: '-', rcsv: '-', narrow: '-' };
     var show = function (p) { document.querySelectorAll('.tab-pane').forEach(function (x) { x.classList.remove('active', 'show'); }); p.classList.add('active', 'show'); };
     var lab = function (c) { var x = c.cloneNode(true); x.querySelectorAll('small, .col-filter, .tc-grip').forEach(function (e) { e.remove(); }); return (x.textContent || '').replace(/\s+/g, ' ').trim(); };
     var vis = function (c) { return getComputedStyle(c).display !== 'none'; };
@@ -55,6 +57,27 @@ function tcpProbe() {
         var c1 = cells(), csv1 = window.tableCsvText(t.id), v1 = csvCols(csv1), has = csv1.split('\n')[0].split(',').indexOf(name) >= 0 ? 1 : 0;
         cb.checked = true; cb.dispatchEvent(new Event('change'));
         r.hide = [c0, c1, cells(), v0, v1, has].join('/');
+    }
+    // narrowing: on that table its widest column but '#' is dragged 40 px narrower by the handle on its header's right
+    // border, then 100 px wider
+    if (firstDT) {
+        var t = firstDT, hr = t.tHead.rows[0], ths = [].filter.call(hr.cells, vis), best = null;
+        show(t.closest('.tab-pane'));
+        ths.forEach(function (th, k) { if (k < ths.length - 1 && th.querySelector('.tc-grip') && (!best || th.offsetWidth > best.offsetWidth)) best = th; });
+        if (best) {
+            var nb = ths[ths.indexOf(best) + 1], W = function (e) { return e.getBoundingClientRect().width; }, g = best.querySelector('.tc-grip');
+            var drag = function (dx) { var x = g.getBoundingClientRect().right - 2, y = g.getBoundingClientRect().top + 2;
+                g.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: x, clientY: y }));
+                document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: x + dx, clientY: y }));
+                document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x + dx, clientY: y })); };
+            var nat = W(best), n0 = W(nb), t0 = W(t);
+            drag(-40);
+            var got = W(best), n1 = W(nb), t1 = W(t), k = [].indexOf.call(hr.cells, best);
+            var cut = [hr].concat([].slice.call(t.tBodies[0].rows)).filter(function (x) { var c = x.cells[k]; return c && c.scrollWidth > c.clientWidth + 1; });
+            var tip = 0; if (cut.length) { var c = cut[0].cells[k]; c.dispatchEvent(new MouseEvent('mouseover', { bubbles: true })); tip = c.title && c.title === lab(c) ? 1 : 0; }
+            drag(100);
+            r.narrow = [Math.round(nat - got), Math.round(n1 - n0), Math.round(t0 - t1), cut.length ? 1 : 0, tip, Math.round(W(best) - nat)].join('/');
+        }
     }
     var rt = document.getElementById('resultsTable'), rm = rt && document.getElementById('tcc-' + rt.id);
     if (rm && window.resultsCsvText) {
