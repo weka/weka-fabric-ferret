@@ -157,7 +157,7 @@ function tcCols(t) {
     var ths = [].slice.call(hr.cells), labels = ths.map(tcLabel), key = t.id + '|' + labels.join('|');
     var st = tcStates[key] || (tcStates[key] = { n: ths.length, hash: labels[0] === '#', labels: labels, frozen: [], rest: [], hidden: {}, narrow: {} });
     if (!st.rest.length && !st.frozen.length) for (var i = st.hash ? 1 : 0; i < st.n; i++) st.rest.push(i);
-    t._tcs = st; t.classList.add('tc-cols');
+    t._tcs = st; t.classList.add("tc-cols"); tcWrap(t);
     if (!document.getElementById('tcs-' + t.id)) { var css = document.createElement('style'); css.id = 'tcs-' + t.id; document.head.appendChild(css); }
     if ($.fn.DataTable.isDataTable(t) && !t._tcHook) { $(t).on('draw.dt', function () { tcApply(t); }); t._tcHook = 1; }
     ths.forEach(function (th, i) { if (!(st.hash && i === 0)) tcGrip(t, th); });
@@ -182,7 +182,18 @@ function tcCss(t) {
     var st = t._tcs, id = '#' + t.id, s = [];
     Object.keys(st.hidden).forEach(function (i) { if (st.hidden[i]) s.push(id + ' .tcc' + i + ' { display: none; }'); });
     Object.keys(st.narrow).forEach(function (i) { s.push(id + ' .tcc' + i + ' { box-sizing: border-box; max-width: ' + st.narrow[i] + 'px; overflow: hidden; text-overflow: ellipsis; }'); });
+    // "#" and the frozen columns stay put while the slider moves the rest: they move back by the slider's offset, over the rest
+    var pin = (st.hash ? [0] : []).concat(st.frozen);
+    pin.forEach(function (i) {
+        s.push(id + " .tcc" + i + " { transform: translateX(var(--tcx, 0px)); }");
+        s.push(id + " td.tcc" + i + " { position: relative; z-index: 1; background-color: #16213e; }");
+        s.push(id + " tbody tr:nth-of-type(odd) > td.tcc" + i + " { background-image: linear-gradient(rgba(15,52,96,0.3), rgba(15,52,96,0.3)); }");
+        s.push(id + " th.tcc" + i + " { z-index: 3; }");
+    });
+    if (pin.length) { var e = pin[pin.length - 1];
+        s.push(id + ".tc-need td.tcc" + e + " { box-shadow: inset -2px 0 0 #0f3460; }", id + ".tc-need th.tcc" + e + " { box-shadow: inset 0 -2px 0 #e94560, inset -2px 0 0 #4ecca3; }"); }
     document.getElementById('tcs-' + t.id).textContent = s.join('\n');
+    tcSlide(t);   // a column hidden or narrowed changes the table's width
 }
 // the Columns menu: one checkbox per column but '#', beside the row-count menu (the card's header when the card holds
 // this one table, else a bar above the table)
@@ -213,6 +224,42 @@ function tcCsvIdx(t, n) {
     if (!st) { for (var i = 0; i < n; i++) all.push(i); return all; }
     return tcOrder(st).filter(function (i) { return !(st.hash && i === 0) && !st.hidden[i]; });
 }
+// a table wider than its box: the box clips it sideways and a slider under it (it stays at the window's bottom) moves
+// every column but '#' and the frozen ones, which are moved back by the same amount (--tcx). The header row is the
+// table's own, so it stays at the window's top and follows the slider. Sideways wheel or trackpad moves the slider
+function tcWrap(t) {
+    var w = t.parentElement;
+    if (!w.classList.contains('tc-x')) { w = document.createElement('div'); w.className = 'tc-x'; t.parentNode.insertBefore(w, t); w.appendChild(t); }
+    var s = w.nextElementSibling;
+    if (!s || !s.classList.contains('tc-slide')) {
+        s = document.createElement('div'); s.className = 'tc-slide'; s.innerHTML = '<div></div>'; w.parentNode.insertBefore(s, w.nextSibling);
+        s.addEventListener('scroll', function () { tcX(t, s.scrollLeft); });
+    }
+    t._tcw = w; t._tcsl = s;
+    if (!w._tcWheel) { w._tcWheel = 1; w.addEventListener('wheel', function (ev) {
+        var dx = ev.deltaX || (ev.shiftKey ? ev.deltaY : 0);
+        if (!t.classList.contains('tc-need') || !dx || (!ev.shiftKey && Math.abs(dx) < Math.abs(ev.deltaY))) return;
+        ev.preventDefault(); s.scrollLeft += dx; }, { passive: false }); }
+    if (window.ResizeObserver) {
+        if (!t._tcRO) { t._tcRO = new ResizeObserver(function () { tcSlide(t); }); t._tcRO.observe(t); }
+        if (t._tcROw !== w) { t._tcRO.observe(w); t._tcROw = w; }
+    }
+}
+// is the slider needed (a table in a hidden tab measures 0 and waits for its tab), its range, and the offset in it
+function tcSlide(t) {
+    var w = t._tcw, s = t._tcsl; if (!w || !w.isConnected) return;
+    var ww = w.clientWidth; if (!ww) return;
+    var tw = t.offsetWidth, need = tw > ww + 1;
+    t.classList.toggle('tc-need', need); s.style.display = need ? 'block' : 'none'; s.firstChild.style.width = tw + 'px';
+    var x = need ? Math.min(s.scrollLeft, tw - ww) : 0;
+    if (need && s.scrollLeft !== x) s.scrollLeft = x;
+    tcX(t, x);
+}
+function tcX(t, x) { t.style.setProperty('--tcx', x + 'px'); t.style.transform = x ? 'translateX(' + (-x) + 'px)' : ''; }
+// a tab shown or the window resized (the ↔ button resizes too): measure its tables again (ResizeObserver does this too
+// where the browser runs it)
+document.addEventListener("shown.bs.tab", function (ev) { var p = document.querySelector(ev.target.getAttribute("href")); if (p) p.querySelectorAll("table.tc-cols").forEach(tcSlide); });
+window.addEventListener("resize", function () { document.querySelectorAll("table.tc-cols").forEach(tcSlide); });
 // a handle on the right border of a header cell: dragged left it narrows that column (its cells end in "..."); the
 // column next to it keeps its width. It never makes a column wider than its longest value
 function tcGrip(t, th) {
@@ -1132,6 +1179,15 @@ table.tc-cols thead th {{ user-select: none; }}
 table.tc-cols th small {{ overflow: hidden; text-overflow: ellipsis; }}
 .tc-grip {{ position: absolute; top: 0; right: 0; width: 7px; height: 100%; cursor: col-resize; z-index: 2; }}
 .tc-grip:hover {{ background: rgba(78,204,163,0.35); }}
+/* a table wider than its box: the box clips it sideways (clip, not a scroll box, so the header row still sticks to the
+   window's top) and the slider under it stays at the window's bottom */
+.tc-x {{ overflow-x: clip; }}
+table.tc-cols thead th {{ z-index: 2; }}
+.tc-slide {{ display: none; overflow-x: auto; overflow-y: hidden; position: sticky; bottom: 0; z-index: 4; background: #16213e; }}
+.tc-slide > div {{ height: 1px; }}
+.tc-slide::-webkit-scrollbar {{ height: 12px; }}
+.tc-slide::-webkit-scrollbar-track {{ background: #0f3460; border-radius: 6px; }}
+.tc-slide::-webkit-scrollbar-thumb {{ background: #4ecca3; border-radius: 6px; }}
 table.tc-cols .col-filter {{ width: 0; min-width: 100%; }}
 table.tc-cols .col-filter select, table.tc-cols .col-filter input {{ min-width: 0; }}
 .tc-colmenu {{ display: inline-block; margin-left: auto; }}

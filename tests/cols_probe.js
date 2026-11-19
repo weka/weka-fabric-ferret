@@ -12,6 +12,9 @@
 //   rcsv=<CSV columns>/<with Src IP hidden>/<Src IP in it 0|1>  the results table (resultsCsvText)
 //   narrow=<px narrower>/<neighbour's change>/<table's px narrower>/<a cell cut 0|1>/<its full text on hover 0|1>/<px past
 //        its first width after a 100 px drag wider>  its widest column dragged 40 px narrower by the header's handle
+//   need=<tables wider than their box>/<those with the slider shown>/<the rest>/<those with it hidden>
+//   scr=<'#' header px moved>/<'#' cell px moved>/<last header px moved>/<'#' cell on top 0|1>/<slider after a 30 px
+//        sideways wheel>  the first wide table with '#', its slider set to 60 px
 var tcpErr = 0; window.addEventListener('error', function () { tcpErr++; });
 window.addEventListener('load', function () { setTimeout(tcpProbe, 1500); });
 function tcpProbe() {
@@ -88,5 +91,38 @@ function tcpProbe() {
         r.rcsv = [a0, h.length, h.indexOf('Src IP') >= 0 ? 1 : 0].join('/');
     }
     r.err = tcpErr;
-    document.body.setAttribute('data-probe', Object.keys(r).map(function (k) { return k + '=' + r[k]; }).join(' '));
+    tcpLater(r, show, vis, lab);
+}
+// the slider (after each tab is shown, a frame later: the page measures a table when its tab shows): shown under each
+// table wider than its box, hidden under the rest; on the first such table with '#' the slider is set to 60 px, then
+// a sideways wheel of 30 px
+function tcpLater(r, show, vis, lab) {
+    var panes = [].slice.call(document.querySelectorAll('.tab-pane:not(#tab-topology)')), nd = [0, 0, 0, 0], ft = null;
+    var done = function () {
+        r.need = nd.join('/'); r.scr = '-';
+        if (ft && ft.parentElement.nextElementSibling && ft.parentElement.nextElementSibling.classList.contains('tc-slide')) {
+            var w = ft.parentElement, s = w.nextElementSibling, hr = ft.tHead.rows[0], h0 = hr.cells[0], d0 = ft.tBodies[0].rows[0].cells[0], hl = [].filter.call(hr.cells, vis).pop();
+            d0.scrollIntoView({ block: 'center', behavior: 'instant' });
+            var L = function (e) { return e.getBoundingClientRect().left; }, a = [L(h0), L(d0), L(hl)];
+            s.scrollLeft = 60; s.dispatchEvent(new Event('scroll'));
+            var b = [L(h0), L(d0), L(hl)], dr = d0.getBoundingClientRect();
+            var top = document.elementFromPoint(dr.left + dr.width / 2, dr.top + dr.height / 2), on = top && (top === d0 || d0.contains(top)) ? 1 : 0;
+            w.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaX: 30 }));
+            r.scr = [Math.round(b[0] - a[0]), Math.round(b[1] - a[1]), Math.round(b[2] - a[2]), on, s.scrollLeft].join('/');
+            s.scrollLeft = 0; s.dispatchEvent(new Event('scroll'));
+        }
+        document.body.setAttribute('data-probe', Object.keys(r).map(function (k) { return k + '=' + r[k]; }).join(' '));
+    };
+    var step = function (k) {
+        if (k >= panes.length) { if (ft) { show(ft.closest('.tab-pane')); setTimeout(done, 100); } else done(); return; }
+        var a = document.querySelector('.nav-tabs a[href="#' + panes[k].id + '"]'); if (a) a.click(); else show(panes[k]);   // through Bootstrap, as a click would
+        setTimeout(function () {
+            panes[k].querySelectorAll('table.tc-cols').forEach(function (t) {
+                var w = t.parentElement, s = w.nextElementSibling, on = !!(s && s.classList.contains('tc-slide') && vis(s));
+                if (t.offsetWidth > w.clientWidth + 1) { nd[0]++; if (on) nd[1]++; if (!ft && lab(t.tHead.rows[0].cells[0]) === '#') ft = t; } else { nd[2]++; if (!on) nd[3]++; }
+            });
+            step(k + 1);
+        }, 400);
+    };
+    step(0);
 }
