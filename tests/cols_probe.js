@@ -111,7 +111,7 @@ function tcpLater(r, show, vis, lab) {
             r.scr = [Math.round(b[0] - a[0]), Math.round(b[1] - a[1]), Math.round(b[2] - a[2]), on, s.scrollLeft].join('/');
             s.scrollLeft = 0; s.dispatchEvent(new Event('scroll'));
         }
-        document.body.setAttribute('data-probe', Object.keys(r).map(function (k) { return k + '=' + r[k]; }).join(' '));
+        tcpFreeze(r, vis, lab, function () { document.body.setAttribute('data-probe', Object.keys(r).map(function (k) { return k + '=' + r[k]; }).join(' ')); });
     };
     var step = function (k) {
         if (k >= panes.length) { if (ft) { show(ft.closest('.tab-pane')); setTimeout(done, 100); } else done(); return; }
@@ -125,4 +125,69 @@ function tcpLater(r, show, vis, lab) {
         }, 400);
     };
     step(0);
+}
+// freeze and move, on the first DataTable wider than its box with '#' (its tab shown): frz = 1 for each of
+//   f1 a double-click on its 3rd column freezes it next to '#'; f2 a 2nd one goes after it; rows each body row's cells
+//   follow the header's order; pin with the slider at 80 px both frozen headers and cells stay put; nosort the two
+//   double-clicks did not sort; back a double-click on the 1st frozen one puts it back in its first place among the
+//   rest, the other stays frozen; sort1 a single click sorts (a moment later); drag a drag puts the 4th rest column
+//   first among the rest; grp a rest column dragged left of the frozen ones stays first among the rest; fdrag a frozen
+//   column dragged left of the other frozen one goes first; csv the CSV's first columns are the frozen ones in order;
+//   page on page 2 the rows follow the header too (1 when one page); nofreeze a double-click on a table that needs no slider freezes nothing
+function tcpFreeze(r, vis, lab, fin) {
+    r.frz = '-';
+    var t = null, calm = null;
+    document.querySelectorAll('.tab-pane:not(#tab-topology) table.tc-cols').forEach(function (x) {
+        if (!x._tcs) return;
+        if (!t && x.classList.contains('tc-need') && x._tcs.hash && $.fn.DataTable.isDataTable(x) && x._tcs.rest.length > 4) t = x;
+        if (!calm && !x.classList.contains('tc-need') && x._tcs.rest.length > 2 && x.offsetWidth) calm = x;
+    });
+    if (!t) { fin(); return; }
+    var p = t.closest('.tab-pane'), a = document.querySelector('.nav-tabs a[href="#' + p.id + '"]'); a.click();
+    var st = t._tcs, dt = $(t).DataTable(), hr = t.tHead.rows[0], cell = function (i) { return tcCell(hr, i); };
+    var ev = function (el, type, o) { var b = el.getBoundingClientRect(); o = o || {};
+        el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, detail: o.detail || 0, clientX: o.x !== undefined ? o.x : b.left + b.width / 2, clientY: b.top + b.height / 2 })); };
+    var dbl = function (el) { ev(el, 'click', { detail: 1 }); ev(el, 'click', { detail: 2 }); ev(el, 'dblclick', { detail: 2 }); };
+    var drag = function (el, x) { var b = el.getBoundingClientRect(), y = b.top + b.height / 2;
+        el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0, clientX: b.left + b.width / 2, clientY: y }));
+        document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+        document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, clientX: x, clientY: y })); };
+    var order = function (row) { return [].map.call(row.cells, function (c) { return c._tci; }).join(); };
+    var rowsOk = function () { var h = order(hr); return [].every.call(t.tBodies[0].rows, function (x) { return x.cells.length !== st.n || order(x) === h; }) ? 1 : 0; };
+    var L = function (e) { return Math.round(e.getBoundingClientRect().left); };
+    setTimeout(function () {
+        var o = {}, ord0 = JSON.stringify(dt.order()), A = st.rest[2], B = st.rest[4];
+        dbl(cell(A)); o.f1 = st.frozen.join() === String(A) && order(hr).split(',')[1] === String(A) ? 1 : 0;
+        dbl(cell(B)); o.f2 = st.frozen.join() === A + ',' + B && order(hr).split(',').slice(1, 3).join() === A + ',' + B ? 1 : 0;
+        o.rows = rowsOk();
+        var s = t.parentElement.nextElementSibling, d = t.tBodies[0].rows[0], before = [L(cell(A)), L(cell(B)), L(tcCell(d, A)), L(tcCell(d, B))];
+        s.scrollLeft = 80; s.dispatchEvent(new Event('scroll'));
+        var after = [L(cell(A)), L(cell(B)), L(tcCell(d, A)), L(tcCell(d, B))];
+        o.pin = s.scrollLeft === 80 && before.join() === after.join() ? 1 : 0;
+        s.scrollLeft = 0; s.dispatchEvent(new Event('scroll'));
+        setTimeout(function () {
+            o.nosort = JSON.stringify(dt.order()) === ord0 ? 1 : 0;
+            dbl(cell(A));
+            var sorted = st.rest.every(function (v, k) { return k === 0 || st.rest[k - 1] < v; });
+            o.back = st.frozen.join() === String(B) && sorted && st.rest.indexOf(A) >= 0 ? 1 : 0;
+            var sc = [].filter.call(hr.cells, function (c) { return c.classList.contains('sorting') && vis(c); })[0];
+            ev(sc, 'click', { detail: 1 });
+            setTimeout(function () {
+                o.sort1 = JSON.stringify(dt.order()) !== ord0 ? 1 : 0;
+                var X = st.rest[3], first = cell(st.rest[0]);
+                drag(cell(X), first.getBoundingClientRect().left + 2); o.drag = st.rest[0] === X && rowsOk() ? 1 : 0;
+                var Y = st.rest[2]; drag(cell(Y), cell(B).getBoundingClientRect().left + 2);
+                o.grp = st.rest[0] === Y && st.frozen.join() === String(B) && order(hr).split(',')[1] === String(B) ? 1 : 0;
+                dbl(cell(A)); drag(cell(A), cell(B).getBoundingClientRect().left + 2);
+                o.fdrag = st.frozen.join() === A + ',' + B && order(hr).split(',').slice(1, 3).join() === A + ',' + B ? 1 : 0;
+                var h = window.tableCsvText(t.id).split('\n')[0].split(',');
+                o.csv = h[0] === lab(cell(A)) && h[1] === lab(cell(B)) ? 1 : 0;
+                o.page = 1; if (dt.page.info().pages > 1) { dt.page(1).draw('page'); o.page = rowsOk() && t.tBodies[0].rows.length > 0 ? 1 : 0; dt.page(0).draw('page'); }
+                o.nofreeze = 1;
+                if (calm) { var c0 = calm._tcs.rest[1]; dbl(tcCell(calm.tHead.rows[0], c0)); o.nofreeze = calm._tcs.frozen.length === 0 ? 1 : 0; }
+                r.frz = ['f1', 'f2', 'rows', 'pin', 'nosort', 'back', 'sort1', 'drag', 'grp', 'fdrag', 'csv', 'page', 'nofreeze'].map(function (k) { return o[k]; }).join('');
+                fin();
+            }, 500);
+        }, 500);
+    }, 400);
 }

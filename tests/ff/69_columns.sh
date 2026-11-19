@@ -4,8 +4,8 @@
 # line; the CSV holds the visible columns in their order. tests/cols_probe.js in headless Chrome on 14_where and
 # golden-C (synthetic fixtures).
 # tier: fast
-# checks: 5
-# secs: 55
+# checks: 6
+# secs: 65
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
 python3 $P $S/fixtures/bundles/14_where.tgz $W/uw.html > $W/uw.pout 2>&1
@@ -29,9 +29,9 @@ if [[ -x $CHROME ]]; then
     chk "hide a column in Chrome: the first DataTable with a menu, its first box cleared: the column's cells go (N/0/N) and come back; the CSV loses that column (8 -> 7 on both pages, its name gone); the results table's CSV drops Src IP when it is hidden (11/10/0)" \
         "[[ \"\$(kv '$cu' hide)\" =~ ^([1-9][0-9]*)/0/([0-9]+)/8/7/0\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [[ \"\$(kv '$cg' hide)\" =~ ^([1-9][0-9]*)/0/([0-9]+)/8/7/0\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [ \"\$(kv '$cu' rcsv)\" = 11/10/0 ] && [ \"\$(kv '$cg' rcsv)\" = 11/10/0 ] && [ \"\$(kv '$cx' hide)\" = - ]" \
         "uw '$cu' | gc '$cg' | control '$cx'"
-    # narrowing: control without the line that adds the handles (1 line out) nothing is dragged
-    grep -v 'tcGrip(t, th); });$' $W/uw.html > $W/uwg.html; cn=$(probe $W/uwg.html cols_probe.js)
-    chk "narrow a column in Chrome: the first DataTable's widest column dragged 40 px left by its header's handle is 40 px narrower, its neighbour unchanged, the table 40 px narrower, a cell cut with its full text on hover; dragged 100 px right it is back at its first width and no wider (40/0/40/1/1/0, both pages); control: without the handles (1 line out) nothing to drag" \
+    # narrowing: control without the tcGrip call (1 line changed) nothing is dragged
+    sed 's/ tcGrip(t, th);//' $W/uw.html > $W/uwg.html; cn=$(probe $W/uwg.html cols_probe.js)
+    chk "narrow a column in Chrome: the first DataTable's widest column dragged 40 px left by its header's handle is 40 px narrower, its neighbour unchanged, the table 40 px narrower, a cell cut with its full text on hover; dragged 100 px right it is back at its first width and no wider (40/0/40/1/1/0, both pages); control: without the handles (1 line changed) nothing to drag" \
         "[ \"\$(kv '$cu' narrow)\" = 40/0/40/1/1/0 ] && [ \"\$(kv '$cg' narrow)\" = 40/0/40/1/1/0 ] && [ \$(diff $W/uw.html $W/uwg.html | grep -c '^< .*tcGrip(t, th)') = 1 ] && [ \"\$(kv '$cn' narrow)\" = - ]" \
         "uw '$cu' | gc '$cg' | control '$cn'"
     # the slider: control without the tcWrap(t) call (1 line changed) no table has one
@@ -39,5 +39,11 @@ if [[ -x $CHROME ]]; then
     chk "sideways slider in Chrome: each table wider than its box at 1280 px (5 or more on each page) has the slider shown, every other table (5 or more) has it hidden; on the first wide table with '#' the slider at 60 px moves the last header cell 60 px left while the '#' header and cell stay put and on top; a sideways wheel of 30 px moves the slider to 90 (0/0/-60/1/90); control: without the tcWrap(t) call (1 line changed) no slider is shown" \
         "[[ \"\$(kv '$cu' need)\" =~ ^([0-9]+)/([0-9]+)/([0-9]+)/([0-9]+)\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [ \${BASH_REMATCH[3]} = \${BASH_REMATCH[4]} ] && (( \${BASH_REMATCH[1]} >= 5 && \${BASH_REMATCH[3]} >= 5 )) && [[ \"\$(kv '$cg' need)\" =~ ^([0-9]+)/([0-9]+)/([0-9]+)/([0-9]+)\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && [ \${BASH_REMATCH[3]} = \${BASH_REMATCH[4]} ] && (( \${BASH_REMATCH[1]} >= 5 && \${BASH_REMATCH[3]} >= 5 )) && [ \"\$(kv '$cu' scr)\" = 0/0/-60/1/90 ] && [ \"\$(kv '$cg' scr)\" = 0/0/-60/1/90 ] && [ \$(diff $W/gc.html $W/gcw.html | grep -c '^< .*tcWrap(t);$') = 1 ] && [[ \"\$(kv '$cw' need)\" =~ ^[1-9][0-9]*/0/ ]] && [ \"\$(kv '$cw' scr)\" = - ]" \
         "uw '$cu' | gc '$cg' | control '$cw'"
-else for c in "Columns menu" "column widths" "hide a column" "narrow a column" "sideways slider"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
+    # freeze and move (tests/cols_probe.js tcpFreeze): control without the tcClicks(t) call (1 line out) the two clicks of
+    # a double-click sort the table (the 5th digit 0)
+    grep -v '^    tcClicks(t);$' $W/uw.html > $W/uwc.html; cc=$(probe $W/uwc.html cols_probe.js)
+    chk "freeze and move in Chrome (the first wide DataTable with '#' on each page): double-clicks freeze two columns next to '#' in that order, body rows follow, both stay put under the slider, no sort; a double-click unfreezes the first back to its place, the other stays; a click still sorts; drags move a column within its group only (rest, frozen); the CSV follows the order; page 2 follows; a table that needs no slider freezes nothing (13 ones on both pages); control: without the tcClicks(t) call (1 line out) a double-click sorts" \
+        "[ \"\$(kv '$cu' frz)\" = 1111111111111 ] && [ \"\$(kv '$cg' frz)\" = 1111111111111 ] && [ \$(diff $W/uw.html $W/uwc.html | grep -c '^< .*tcClicks(t);$') = 1 ] && [ \"\$(kv '$cc' frz)\" = 1111011111111 ]" \
+        "uw '$cu' | gc '$cg' | control '$cc'"
+else for c in "Columns menu" "column widths" "hide a column" "narrow a column" "sideways slider" "freeze and move"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
 finish

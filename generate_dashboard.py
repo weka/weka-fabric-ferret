@@ -160,7 +160,8 @@ function tcCols(t) {
     t._tcs = st; t.classList.add("tc-cols"); tcWrap(t);
     if (!document.getElementById('tcs-' + t.id)) { var css = document.createElement('style'); css.id = 'tcs-' + t.id; document.head.appendChild(css); }
     if ($.fn.DataTable.isDataTable(t) && !t._tcHook) { $(t).on('draw.dt', function () { tcApply(t); }); t._tcHook = 1; }
-    ths.forEach(function (th, i) { if (!(st.hash && i === 0)) tcGrip(t, th); });
+    ths.forEach(function (th, i) { if (!(st.hash && i === 0)) { tcGrip(t, th); tcHead(t, th); } });
+    tcClicks(t);
     if (!t._tcTip) { t._tcTip = 1; t.addEventListener("mouseover", function (ev) {   // a cut-off cell shows its full text on hover
         var c = ev.target.closest && ev.target.closest("td, th"); if (c && !c.title && c.scrollWidth > c.clientWidth + 1) c.title = tcLabel(c); }); }
     tcApply(t); tcColMenu(t);
@@ -260,6 +261,56 @@ function tcX(t, x) { t.style.setProperty('--tcx', x + 'px'); t.style.transform =
 // where the browser runs it)
 document.addEventListener("shown.bs.tab", function (ev) { var p = document.querySelector(ev.target.getAttribute("href")); if (p) p.querySelectorAll("table.tc-cols").forEach(tcSlide); });
 window.addEventListener("resize", function () { document.querySelectorAll("table.tc-cols").forEach(tcSlide); });
+// a header cell: a double-click freezes its column next to '#' after the last one frozen (only while the table needs
+// the slider), or unfreezes it back to its first place among the rest; the other frozen columns keep their order. A
+// drag moves a column within its own group: frozen columns stay next to '#' and never mix with the rest
+function tcHead(t, th) {
+    th.addEventListener('dblclick', function (ev) {
+        if (ev.target.closest('.col-filter, .tc-grip')) return;
+        var st = t._tcs, i = th._tci, f = st.frozen.indexOf(i);
+        if (window.getSelection) window.getSelection().removeAllRanges();
+        if (f >= 0) { st.frozen.splice(f, 1); var k = 0; while (k < st.rest.length && st.rest[k] < i) k++; st.rest.splice(k, 0, i); }
+        else { if (!t.classList.contains('tc-need')) return; st.rest.splice(st.rest.indexOf(i), 1); st.frozen.push(i); }
+        tcApply(t);
+    });
+    th.addEventListener('mousedown', function (ev) {
+        if (ev.button !== 0 || ev.target.closest('.col-filter, .tc-grip')) return;
+        var st = t._tcs, i = th._tci, x0 = ev.clientX, on = false, mark = null, tgt = null;
+        var mv = function (e) {
+            if (!on) { if (Math.abs(e.clientX - x0) < 6) return; on = true; th.classList.add('tc-drag');
+                mark = document.createElement('div'); mark.className = 'tc-mark'; document.body.appendChild(mark); }
+            e.preventDefault();
+            var grp = st.frozen.indexOf(i) >= 0 ? st.frozen : st.rest, hr = t.tHead.rows[0];
+            var cells = grp.filter(function (j) { return !st.hidden[j]; }).map(function (j) { return tcCell(hr, j); }), pos = cells.length;
+            for (var k = 0; k < cells.length; k++) { var b = cells[k].getBoundingClientRect(); if (e.clientX < b.left + b.width / 2) { pos = k; break; } }
+            tgt = { grp: grp, before: pos < cells.length ? cells[pos]._tci : null };
+            var ref = pos < cells.length ? cells[pos].getBoundingClientRect().left : cells[cells.length - 1].getBoundingClientRect().right;
+            var hb = hr.getBoundingClientRect(), tb = t.getBoundingClientRect();
+            mark.style.left = (ref - 1) + 'px'; mark.style.top = Math.max(0, hb.top) + 'px'; mark.style.height = Math.max(hb.height, Math.min(tb.bottom, window.innerHeight) - Math.max(0, hb.top)) + 'px';
+        };
+        var up = function () {
+            document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up);
+            if (!on) return;
+            th.classList.remove('tc-drag'); mark.remove(); t._tcDragEnd = Date.now();
+            if (tgt && tgt.before !== i) { var g = tgt.grp; g.splice(g.indexOf(i), 1); g.splice(tgt.before === null ? g.length : g.indexOf(tgt.before), 0, i); tcApply(t); }
+        };
+        document.addEventListener('mousemove', mv); document.addEventListener('mouseup', up);
+    });
+}
+// a click on a header cell sorts a moment later, so the two clicks of a double-click (freeze) or the click that ends a
+// drag do not sort
+function tcClicks(t) {
+    if (t._tcClick) return; t._tcClick = 1;
+    t.addEventListener('click', function (ev) {
+        if (ev._tcPass) return;
+        var th = ev.target.closest && ev.target.closest('thead th'); if (!th || ev.target.closest('.col-filter, .tc-grip')) return;
+        ev.stopPropagation(); clearTimeout(t._tcClk); t._tcClk = 0;
+        var now = Date.now();
+        if (ev.detail > 1 || now - (t._tcDragEnd || 0) < 300 || now - (t._tcGripEnd || 0) < 300) return;
+        var sk = ev.shiftKey;
+        t._tcClk = setTimeout(function () { t._tcClk = 0; var e = new MouseEvent('click', { bubbles: true, cancelable: true, shiftKey: sk }); e._tcPass = true; th.dispatchEvent(e); }, 280);
+    }, true);
+}
 // a handle on the right border of a header cell: dragged left it narrows that column (its cells end in "..."); the
 // column next to it keeps its width. It never makes a column wider than its longest value
 function tcGrip(t, th) {
@@ -1188,6 +1239,9 @@ table.tc-cols thead th {{ z-index: 2; }}
 .tc-slide::-webkit-scrollbar {{ height: 12px; }}
 .tc-slide::-webkit-scrollbar-track {{ background: #0f3460; border-radius: 6px; }}
 .tc-slide::-webkit-scrollbar-thumb {{ background: #4ecca3; border-radius: 6px; }}
+/* moving a column: the header cell dragged and the line where it will go */
+.tc-drag {{ opacity: 0.6; }}
+.tc-mark {{ position: fixed; width: 3px; background: #e94560; z-index: 1000; pointer-events: none; }}
 table.tc-cols .col-filter {{ width: 0; min-width: 100%; }}
 table.tc-cols .col-filter select, table.tc-cols .col-filter input {{ min-width: 0; }}
 .tc-colmenu {{ display: inline-block; margin-left: auto; }}
