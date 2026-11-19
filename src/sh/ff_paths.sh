@@ -75,10 +75,10 @@ pair_rails() {
 # further pair of cycles takes the group's next rail pair for phase 2. Sets, per pair p: PC/PS (client/
 # server), PI (pair slot), PR (the round), PG (group), PRAILS (the rails both hosts hold), PXA/PXB (phase 2
 # rail pair when both hold it, else empty), PPATHS (its paths this iteration); SITOUT the hosts (one per odd
-# group) that sit this iteration out; GXA/GXB per group for the log.
+# group) left without a partner, SITG their groups (odd_pass runs them last); GXA/GXB per group for the log.
 round_pairs() {
     local t=$1 g m i a b rr cyc
-    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=(); GXA=(); GXB=(); SITOUT=""; XA=; XB=
+    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=(); GXA=(); GXB=(); SITOUT=""; SITG=""; XA=; XB=
     for (( g = 0; g < ${#GKEYS[@]}; g++ )); do
         local -a rot=(${GROT[g]}) up=()
         m=${#rot[@]}; (( m > 1 )) || continue
@@ -95,8 +95,8 @@ round_pairs() {
         for (( i = 0; i < m / 2; i++ )); do
             a=${arr[i]}; b=${arr[m - 1 - i]}
             (( cyc % 2 )) && { local tmp=$a; a=$b; b=$tmp; }
-            if [[ $a == - ]]; then SITOUT+=" $b"
-            elif [[ $b == - ]]; then SITOUT+=" $a"
+            if [[ $a == - ]]; then SITOUT+=" $b"; SITG+=" $g"
+            elif [[ $b == - ]]; then SITOUT+=" $a"; SITG+=" $g"
             else
                 pair_rails $a $b
                 local pxa=$xa pxb=$xb
@@ -122,6 +122,70 @@ round_pairs() {
             PPATHS+=("$(( 2 * nrl * nrs ))")
         done
     done
+}
+
+# odd_pass: an odd group's left-over host (SITOUT and SITG, from round_pairs) runs last in the iteration, after its
+# phases, alone on the fabric, with the group's first host (already tested in this iteration): the iteration's phases
+# again for that pair only (1; 2 when cross-rail is on; U1 and U2 with FF_UDP; path checks only with FF_SKIP_IPERF).
+# Its marker lines carry "wave:odd", so no total adds its runs to the main ones; phase_times.txt names its phases
+# 1-odd, U1-odd and so on. Its UDP runs count in the per-host UDP table, with no counter breakdown or paced confirm
+# of their own. The iteration's own pairs are set again at the end.
+odd_pass() {
+    local -a sks=($SITOUT) sgs=($SITG)
+    (( ${#sks[@]} )) || return 0
+    local i ck sk g a m p r u desc="" bad nchk errs np pxa pxb
+    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=()
+    for (( i = 0; i < ${#sks[@]}; i++ )); do
+        sk=${sks[i]}; g=${sgs[i]}; a=""
+        for m in ${GROT[g]}; do [[ $m != - && $m != "$sk" ]] && { a=$m; break; }; done
+        [[ -n $a ]] || continue
+        pair_rails $a $sk
+        pxa=${GXA[g]}; pxb=${GXB[g]}
+        [[ -n $pxa && " $PRL " == *" $pxa "* && " $PRL " == *" $pxb "* ]] || { pxa=""; pxb=""; }
+        PC+=("$a"); PS+=("$sk"); PI+=(0); PR+=(0); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb"); PXG+=(""); PSHARE+=(1)
+        np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np"); PATHS_PLANNED=$(( PATHS_PLANNED + np ))
+        desc+="${desc:+; }${T_HOST[$sk]} with ${T_HOST[$a]}"
+    done
+    if (( ${#PC[@]} )); then
+        log "Odd host count: the left-over host runs last, alone, with a host this iteration already tested: $desc"
+        for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
+        PATHS=$WORK/paths.$ITER.odd; mkdir -p "$PATHS"
+        for (( p = 0; p < ${#PC[@]}; p++ )); do
+            ck=${PC[p]}; sk=${PS[p]}
+            p1_paths $p check
+            [[ -n ${PXA[p]} ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
+            for r in ${PRAILS[p]}; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
+        done
+        wait
+        bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' '); nchk=$(ls "$PATHS" | wc -l | tr -d ' ')
+        log "Path checks, odd host (egress route, ping, MTU no-fragment): $(( nchk - bad )) OK, $bad excluded"
+        if (( FF_SKIP_IPERF )); then
+            for (( p = 0; p < ${#PC[@]}; p++ )); do
+                PHASE=1; p1_paths $p run check
+                [[ -n ${PXA[p]} ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
+            done
+        else
+            for u in 1 2 U1 U2; do
+                [[ $u == U* && $FF_UDP != 1 ]] && continue
+                [[ $u == *2 ]] && { [[ $CROSS == on && -n ${PXA[*]// /} ]] || continue; }
+                PHASE=$u; PHASE_OUT=$WORK/phase.$ITER.$u.odd; : > "$PHASE_OUT"
+                phase_start
+                log "Phase $u, odd host: $( [[ $u == U* ]] && echo "UDP ")$( [[ $u == *1 ]] && same_desc || cross_desc )$( [[ $u == U* ]] && echo " (-b 0)"), start $PT0"
+                local res=$RESULTS mode=; [[ $u == U* ]] && { res=$UDP_RESULTS; mode=udp; }
+                echo "### iteration:${ITER} phase:${u} wave:odd" >> "$res"
+                for (( p = 0; p < ${#PC[@]}; p++ )); do
+                    if [[ $u == *1 ]]; then p1_paths $p run $mode
+                    elif [[ -n ${PXA[p]} ]]; then xpaths $p; run_path p2a_$p "${X1[@]}" $mode; run_path p2b_$p "${X2[@]}" $mode; fi
+                done
+                wait
+                phase_end "$u-odd"
+                column -t < "$PHASE_OUT" | tee -a "$res"
+                errs=$(grep -c ',ERROR' "$PHASE_OUT")
+                (( errs > 0 )) && { log "WARNING: $errs runs in phase $u, odd host, returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
+            done
+        fi
+    fi
+    round_pairs $(( ITER - 1 )); PATHS=$WORK/paths.$ITER
 }
 
 # xg_paths p ra rb [share]: cross-group pair p's two runs over rails ra (its larger-group host) and rb (its

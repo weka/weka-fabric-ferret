@@ -77,7 +77,9 @@ Optional (default)
   FF_ITER          passes of the full test set (every host and client NIC, every phase), to flush out
                    noise and outliers; each pass gets new partners, round robin: no pair repeats, every
                    host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
-                   and server, so every direction on every NIC pair runs after 2(n-1).
+                   and server, so every direction on every NIC pair runs after 2(n-1). With an odd
+                   host count the left-over host runs last in each pass, alone, with a host the pass
+                   already tested, so every pass tests every host.
                    all = 2(n-1) (3)
   FF_STREAMS       iperf3 parallel streams, >=2 (16)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
@@ -918,7 +920,7 @@ main() {
         local gused=$(( FF_ITER < GROUNDS[g] ? FF_ITER : GROUNDS[g] ))
         PAIRS_COVERED=$(( PAIRS_COVERED + gused * GPER[g] ))
         if (( GN[g] == 1 )); then lone+=" ${T_HOST[${GROT[g]}]}"; gdesc+="; ${GKEYS[g]} 1 host, no partner"; continue; fi
-        gdesc+="; ${GKEYS[g]} ${GN[g]} hosts, ${GPER[g]} pair$( (( GPER[g] != 1 )) && echo s)/iteration$( (( GN[g] % 2 )) && echo ", 1 sits out")"
+        gdesc+="; ${GKEYS[g]} ${GN[g]} hosts, ${GPER[g]} pair$( (( GPER[g] != 1 )) && echo s)/iteration$( (( GN[g] % 2 )) && echo ", 1 runs last with a host already tested")"
         # directed NIC paths of the group: per host pair, over the rails both hold (a joined host has fewer)
         local -a gm=(${GROT[g]}); local i j
         for (( i = 0; i < ${#gm[@]}; i++ )); do for (( j = i + 1; j < ${#gm[@]}; j++ )); do
@@ -1023,7 +1025,7 @@ main() {
         fi
         log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs${xdesc:+; cross-rail $xdesc}) ============"
         for sk in $SITOUT; do sits+=" ${T_HOST[$sk]}"; done
-        [[ -n $sits ]] && log "Sits out this iteration (odd host count):$sits"
+        [[ -n $sits ]] && log "Odd host count: runs last this iteration, after the phases below, with a host already tested:$sits"
         for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
         PATHS=$WORK/paths.$ITER; mkdir -p "$PATHS"
         local ra rb
@@ -1063,6 +1065,7 @@ main() {
                 [[ -n ${PXG[p]} ]] && for ra in ${HR[${PC[p]}]}; do for rb in ${HR[${PS[p]}]}; do
                     PHASE=3; xg_paths $p $ra $rb; run_path p3a_${p}_$ra$rb "${X1[@]}" check; run_path p3b_${p}_$ra$rb "${X2[@]}" check; done; done
             done
+            odd_pass       # an odd group's left-over host: its path checks, last
             clients_iter   # client path checks, every iteration
             (( ITER < FF_ITER )) && { echo; continue; }
         fi
@@ -1107,6 +1110,7 @@ main() {
             done
         fi
         [[ $FF_UDP == 1 ]] && udp_phases
+        odd_pass   # an odd group's left-over host runs last, with a host already tested, inside the iteration's counter window
         collect_drops "$DROPS_POST"
         local nr; nr=$(wc -l < "$DROPS_POST" | tr -d ' ')   # "0 drops" only means something if NICs were read
         (( DROP_READS_MIN < 0 || nr < DROP_READS_MIN )) && DROP_READS_MIN=$nr

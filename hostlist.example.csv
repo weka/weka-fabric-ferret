@@ -64,7 +64,9 @@ backend,*,svc-fabric
 #   passes of the full test set (every host and client NIC, every phase), to flush out
 #   noise and outliers; each pass gets new partners, round robin: no pair repeats, every
 #   host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
-#   and server, so every direction on every NIC pair runs after 2(n-1).
+#   and server, so every direction on every NIC pair runs after 2(n-1). With an odd
+#   host count the left-over host runs last in each pass, alone, with a host the pass
+#   already tested, so every pass tests every host.
 #   all = 2(n-1) (3)
 # FF_ITER=3
 #
