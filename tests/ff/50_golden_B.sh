@@ -4,7 +4,7 @@
 # FAKE_FLAP=h2, FAKE_MESHFAIL=198.19.2.3 and 27's host-side set. Every check that only reads a backend run reads this
 # one. Its bundle members are also the stored fixtures the unit groups read (fixtures/golden-B/): each is compared
 # with the fresh one here (FIXTURE_UPDATE=1 rewrites them instead; review the diff before committing to them).
-# checks: 105
+# checks: 106
 # secs: 40
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 FX=$S/fixtures/golden-B
@@ -145,4 +145,13 @@ chk "golden-B: dashboard: IP with only cross-rail runs judged on them, marked (1
 chk "golden-B: dashboard: mesh in card" "grep -q 'did not answer 7 of 7' $W/gb.html && grep -q 'mesh: 7 of 64 pairs unreachable, 0 lossy' $W/gb.html"
 chk "golden-B: no clients: dashboard card has no client count (control)" "grep -qE 'Host-side receive: [0-9]+ of 5 hosts flagged<' $W/gb.html" "$(grep -oE 'Host-side receive: [^<]*' $W/gb.html)"
 chk "golden-B: dashboard: card counts flagged hosts, flags shown" "grep -q 'Host-side receive: 4 of 5 hosts flagged' $W/gb.html && grep -q 'pcieA&lt;max, softnet_drop, tcp_rcv_drop' $W/gb.html"
+# FEC chart (issue 13, the operator 11-19): each NIC's corrected bits during the test (fec_rates.txt, column 6 summed
+# over iter1 and iter2) drawn over its total since the last reset: h3/196 2 x 200000000, h2/5 2 x 40000000, h1/5
+# 2 x 400000; 0 shows no bar (a log axis) and h4/5's FEC off says so in the hover. Rendered from the stored fixture
+# (a fresh run's counts follow its timing)
+mkdir -p $W/fx && cp -R $FX $W/fx/dp_validation_goldenB && tar -czf $W/fx.tgz -C $W/fx dp_validation_goldenB && python3 $P $W/fx.tgz $W/fx.html > $W/fx.pout 2>&1
+fy=$(awk "/^Plotly.newPlot\('fecChart'/,/^}, plotConfig\)/" $W/fx.html | grep -o "y: \[[^]]*\], type: 'bar', name: 'during the test'" | sed 's/^y: \[//; s/\], type.*//')
+fn=$(awk "/^Plotly.newPlot\('fecChart'/,/^}, plotConfig\)/" $W/fx.html | grep -o 'customdata: \[[^]]*\]' | head -n 1)
+chk "golden-B (the stored fixture): FEC chart: the during-the-test bars over the totals (barmode overlay) read null x5, 400000000, 80000000, null, 800000, null (h5/5 .. h1/196, fec_rates.txt summed over 2 iterations); the hover says 'FEC off' for h4/5 and '400,000,000 during the test (4 s)' for h3/196" \
+    "[ '$fy' = 'null, null, null, null, null, 400000000, 80000000, null, 800000, null' ] && grep -q \"barmode: 'overlay'\" $W/fx.html && [[ '$fn' == *'\"0 during the test (4 s)\", \"FEC off\", '* && '$fn' == *'\"400,000,000 during the test (4 s)\"'* ]]" "y '$fy' | $fn"
 finish

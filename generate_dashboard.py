@@ -309,6 +309,23 @@ def generate_html(data, output_path):
     fec_chart_n = min(50, len(fec_data))
     fec_labels = json.dumps([f"{f['host']}/{f['nic'].replace('enp','').replace('s0np0','')}" for f in fec_data[:fec_chart_n]])
     fec_values = json.dumps([f['corrected'] for f in fec_data[:fec_chart_n]])
+    # the same NICs' corrected bits during the test (fec_rates.txt, summed over the iterations), drawn over the totals;
+    # none (a reset counter, FEC off, an older bundle) leaves the total alone and says why in the hover
+    fec_rate_by = {f['nic']: f for f in data.get('fec_rate', [])}
+    fec_during, fec_note = [], []
+    for f in fec_data[:fec_chart_n]:
+        r = fec_rate_by.get(f"{f['host']}_{f['nic']}")
+        if not r:
+            v, why = None, 'not read during the test (older bundle or no FEC counters)'
+        elif r['reset']:
+            v, why = None, 'the counter reset during the test'
+        elif r['bits'] is None:
+            v, why = None, 'FEC off' if r['status'] == 'FEC off' else 'corrected bits not exposed'
+        else:
+            v, why = r['bits'], f"{r['bits']:,} during the test ({r['secs']} s)"
+        fec_during.append(v if v else None)   # a log axis has no 0: a 0 shows as no bar, the hover says 0
+        fec_note.append(why)
+    fec_during, fec_note = json.dumps(fec_during), json.dumps(fec_note)
 
     # Optics data — color intensity reflects deviation from ideal
     # RX power: ideal ~2 dBm, worse as it goes negative; temp: ideal ~40°C, worse as it climbs
@@ -1102,7 +1119,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
     {'<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header text-danger" style="display:flex; justify-content:space-between; align-items:center;">Packet Drops During Testing (' + str(nics_with_drops) + ' NICs affected)<button class="btn btn-sm btn-outline-info" onclick="downloadTableCsv(&#39;dropsTable&#39;,&#39;packet_drops.csv&#39;)">Download CSV</button></div><div class="card-body scroll"><table class="table table-sm table-striped table-hover" id="dropsTable"><thead><tr><th>#</th><th>Host/NIC</th><th>IP</th><th>Rx Dropped<small>ideal 0</small></th><th>Tx Dropped<small>ideal 0</small></th><th>Rx OOB<small>ideal 0</small></th><th>Phases</th></tr></thead><tbody>' + "".join(f"<tr><td></td><td>{d['host_nic']}</td><td>{d['ip']}</td><td>{d['rx_drop']:,}</td><td>{d['tx_drop']:,}</td><td>{d['rx_oob']:,}</td><td>{d['phases']}</td></tr>" for d in drops) + '</tbody></table></div></div></div></div>' if drops else '<div class="row g-3 mt-1"><div class="col-12"><div class="card"><div class="card-header">Packet Drops</div><div class="card-body">' + no_drops_msg + '</div></div></div></div>'}
     <div class="row g-3 mt-1">
         <div class="col-md-6">
-            <div class="card"><div class="card-header">Top 50 FEC Corrected Bits (cumulative since the counters last reset; not a rate)</div>
+            <div class="card"><div class="card-header">Top 50 FEC Corrected Bits: during the test (narrow bar) over the total since the counters last reset (wide bar)</div>
             <div class="card-body"><div id="fecChart" style="height:400px;"></div></div></div>
         </div>
         <div class="col-md-6">
@@ -1433,11 +1450,15 @@ $('a[data-bs-toggle="tab"]').on('shown.bs.tab', function(e) {{
 
 // FEC chart
 Plotly.newPlot('fecChart', [{{
-    x: {fec_labels}, y: {fec_values}, type: 'bar',
-    marker: {{ color: '#e94560' }},
-    hovertemplate: '%{{x}}<br>%{{y:,.0f}} corrected bits<extra></extra>'
+    x: {fec_labels}, y: {fec_values}, type: 'bar', name: 'since the last reset', width: 0.8,
+    marker: {{ color: 'rgba(233,69,96,0.3)', line: {{ color: '#e94560', width: 1 }} }}, customdata: {fec_note},
+    hovertemplate: '%{{x}}<br>%{{y:,.0f}} corrected bits since the counters last reset<br>%{{customdata}}<extra></extra>'
+}}, {{
+    x: {fec_labels}, y: {fec_during}, type: 'bar', name: 'during the test', width: 0.35,
+    marker: {{ color: '#e94560' }}, customdata: {fec_note},
+    hovertemplate: '%{{x}}<br>%{{customdata}}<extra></extra>'
 }}], {{
-    ...plotLayout,
+    ...plotLayout, barmode: 'overlay', showlegend: true, legend: {{ orientation: 'h', y: 1.08, font: {{ color: '#e0e0e0' }} }},
     xaxis: {{ ...plotLayout.xaxis, tickangle: 90, tickfont: {{ size: 8 }} }},
     yaxis: {{ ...plotLayout.yaxis, title: 'Corrected Bits', type: 'log' }},
 }}, plotConfig);
