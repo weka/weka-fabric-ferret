@@ -29,6 +29,27 @@ fec_deltas() {
     return 0
 }
 
+# bond_member_deltas label seconds: each bond member's counter changes over the iteration (the bond's own are empty),
+# appended to bond_members.txt as "label host bond member speed seconds d_corrected_blocks d_uncorrectable_blocks
+# d_corrected_bits d_symbol_errors rx_GB tx_GB rx_share_% tx_share_% d_rx_dropped d_rx_errors d_rx_discards_phy
+# d_carrier_down pre_fec_ber flags" (share = of its bond's bytes; flags: uncorrectable, fec_over_limit, fec_watch,
+# symbol_errors, rx_errors, discards, carrier_down, slow_link = below the bond's fastest member, idle_member = under 5%
+# of a bond that moved 1 GB or more, reset; - = none). A member flagged is named in the log.
+bond_member_deltas() {
+    : > "$WORK/bmem_delta"
+    awk -v t="$1" -v s="$2" -v watch=1e-5 -v limit=2.4e-4 '#@awk ff_bond_members' "$WORK/bmem_pre" "$WORK/bmem_post" > "$WORK/bmem_delta"
+    [[ -s $WORK/bmem_delta ]] || return 0
+    cat "$WORK/bmem_delta" >> "$COLLECT_DIR/bond_members.txt"
+    local nb bad; nb=$(awk '{print $2, $3}' "$WORK/bmem_delta" | sort -u | wc -l | tr -d ' ')
+    log "Bond members over ${2}s: $(wc -l < "$WORK/bmem_delta" | tr -d ' ') members of $nb bonds read (bond_members.txt; a bond's own counters are empty)"
+    bad=$(awk '$20 != "-" {printf "#   %s %s %s: %s (rx %s%% / tx %s%% of the bond; symbol errors %s, uncorrectable %s, pre-FEC BER %s)\n", $2, $3, $4, $20, $13, $14, $10, $8, $19}' "$WORK/bmem_delta")
+    if [[ -n $bad ]]; then
+        log "WARNING: bond members flagged in $1 ($(wc -l <<<"$bad" | tr -d ' ')):"
+        head -n 10 <<<"$bad" >&2
+    fi
+    return 0
+}
+
 collect_drops() {  # outfile [k...]
     local outfile=$1 k; shift
     local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}" "${CLI[@]}")

@@ -979,7 +979,7 @@ main() {
         (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
         dscp_check "${dpl[@]}"
     fi
-    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
+    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
@@ -1070,6 +1070,7 @@ main() {
         collect_drops "$DROPS_PRE"
         collect_counters "$PRIO_SCRIPT" "$WORK/prio_pre"
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
+        collect_counters "$BMEM_SCRIPT" "$WORK/bmem_pre"
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
         collect_temps "iter${ITER}_pre" ipmi   # the BMC (inlet) once per iteration: ipmitool sensor can take tens of seconds
         if (( FF_SKIP_IPERF )); then
@@ -1109,8 +1110,9 @@ main() {
         local nr; nr=$(wc -l < "$DROPS_POST" | tr -d ' ')   # "0 drops" only means something if NICs were read
         (( DROP_READS_MIN < 0 || nr < DROP_READS_MIN )) && DROP_READS_MIN=$nr
         collect_counters "$PRIO_SCRIPT" "$WORK/prio_post"
-        collect_counters "$FEC_SCRIPT" "$WORK/fec_post"
+        collect_counters "$FEC_SCRIPT" "$WORK/fec_post"; collect_counters "$BMEM_SCRIPT" "$WORK/bmem_post"
         fec_deltas "iter$ITER" $(( $(date +%s) - fec_t0 > 0 ? $(date +%s) - fec_t0 : 1 ))
+        bond_member_deltas "iter$ITER" $(( $(date +%s) - fec_t0 > 0 ? $(date +%s) - fec_t0 : 1 ))
         # per-priority / pause / ECN counter increases: "iterN host_nic counter delta"
         awk -v it="iter$ITER" '#@awk ff_main.prio' \
             "$WORK/prio_pre" "$WORK/prio_post" > "$WORK/prio_delta"

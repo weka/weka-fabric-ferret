@@ -939,6 +939,29 @@ for nic in "$@"; do
 done
 EOF
 
+# Bond members of the rail NICs ($@; a NIC that is no bond prints nothing): a bond's own ethtool counters are empty,
+# so each member is read as the FEC script reads a NIC, plus its traffic and error counters, one row per member:
+# "@@BMEM host bond member speed corrected_blocks uncorrectable_blocks corrected_bits symbol_errors rx_bytes tx_bytes
+# rx_dropped rx_errors rx_discards_phy carrier_down" (na = not exposed). FF_SYSFS (default /sys) is a test hook.
+read -r -d '' BMEM_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}
+num() { awk -v k="$1" '$1 == k {for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}'; }
+st() { v=$(cat "$sys/class/net/$1/$2" 2>&1); case $v in ''|*[!0-9]*) echo na ;; *) echo "$v" ;; esac; }
+for nic in "$@"; do
+    [ "$nic" = - ] && continue
+    [ -r "$sys/class/net/$nic/bonding/slaves" ] || continue
+    for m in $(cat "$sys/class/net/$nic/bonding/slaves" 2>&1); do
+        [ -d "$sys/class/net/$m" ] || continue
+        sp=$(ethtool "$m" 2>&1 | awk '/Speed:/ {print $2; exit}')
+        f=$(ethtool -I --show-fec "$m" 2>&1); s=$(ethtool -S "$m" 2>&1)
+        cb=$(echo "$f" | num corrected_blocks:); ub=$(echo "$f" | num uncorrectable_blocks:)
+        bits=$(echo "$s" | num rx_corrected_bits_phy:); sym=$(echo "$s" | num rx_pcs_symbol_err_phy:); disc=$(echo "$s" | num rx_discards_phy:)
+        echo "$f" | grep -q -i -E '^Active FEC encoding: *(off|none)' && { cb=off; ub=off; bits=off; }
+        echo "@@BMEM $h $nic $m ${sp:-unknown} ${cb:-na} ${ub:-na} ${bits:-na} ${sym:-na} $(st "$m" statistics/rx_bytes) $(st "$m" statistics/tx_bytes) $(st "$m" statistics/rx_dropped) $(st "$m" statistics/rx_errors) ${disc:-na} $(st "$m" carrier_down_count)"
+    done
+done
+EOF
+
 # Mesh: src_a src_b count dst... (a source is ip@nic; "none" skips a missing rail). Per pair: when the route to dst
 # from src leaves another NIC than src's own (as the path check judges it), no ping: "MESHROUTE src dst <dev>"; else
 # count pings 0.2 s apart, and when any is lost: "MESHLOSS src dst <lost> <count>". 64 pairs at a time.
@@ -3685,6 +3708,57 @@ fec_deltas() {
     return 0
 }
 
+# bond_member_deltas label seconds: each bond member's counter changes over the iteration (the bond's own are empty),
+# appended to bond_members.txt as "label host bond member speed seconds d_corrected_blocks d_uncorrectable_blocks
+# d_corrected_bits d_symbol_errors rx_GB tx_GB rx_share_% tx_share_% d_rx_dropped d_rx_errors d_rx_discards_phy
+# d_carrier_down pre_fec_ber flags" (share = of its bond's bytes; flags: uncorrectable, fec_over_limit, fec_watch,
+# symbol_errors, rx_errors, discards, carrier_down, slow_link = below the bond's fastest member, idle_member = under 5%
+# of a bond that moved 1 GB or more, reset; - = none). A member flagged is named in the log.
+bond_member_deltas() {
+    : > "$WORK/bmem_delta"
+    awk -v t="$1" -v s="$2" -v watch=1e-5 -v limit=2.4e-4 'function d(a, b) { return (a ~ /^[0-9]+$/ && b ~ /^[0-9]+$/) ? (a + 0 >= b + 0 ? a - b : "reset") : (a == "off" ? "off" : "na") }
+         function bps(x) { return (x ~ /^[0-9]+Mb\/s$/) ? substr(x, 1, length(x) - 4) * 1e6 : 0 }
+         $1 != "@@BMEM" {next}
+         FILENAME == ARGV[1] {for (i = 6; i <= 15; i++) p[$2, $3, $4, i] = $i; next}
+         !(($2, $3, $4, 6) in p) {next}
+         {n++; k[n] = $2 SUBSEP $3; row[n] = $2 " " $3 " " $4 " " $5; sp[n] = bps($5)
+          for (i = 6; i <= 15; i++) v[n, i] = d($i, p[$2, $3, $4, i])
+          if (v[n, 10] ~ /^[0-9]+$/) brx[k[n]] += v[n, 10]
+          if (v[n, 11] ~ /^[0-9]+$/) btx[k[n]] += v[n, 11]
+          if (sp[n] > top[k[n]]) top[k[n]] = sp[n]}
+         END {
+             for (j = 1; j <= n; j++) {
+                 f = ""; ber = "na"
+                 for (i = 6; i <= 15; i++) if (v[j, i] == "reset") f = f ",reset"
+                 if (v[j, 7] ~ /^[0-9]+$/ && v[j, 7] > 0) f = f ",uncorrectable"
+                 if (v[j, 8] ~ /^[0-9]+$/ && sp[j] && s) {ber = sprintf("%.2e", v[j, 8] / (s * sp[j]))
+                     if (ber + 0 >= limit) f = f ",fec_over_limit"; else if (ber + 0 >= watch) f = f ",fec_watch"}
+                 if (v[j, 9] ~ /^[0-9]+$/ && v[j, 9] > 0) f = f ",symbol_errors"
+                 if (v[j, 13] ~ /^[0-9]+$/ && v[j, 13] > 0) f = f ",rx_errors"
+                 if (v[j, 14] ~ /^[0-9]+$/ && v[j, 14] > 0) f = f ",discards"
+                 if (v[j, 15] ~ /^[0-9]+$/ && v[j, 15] > 0) f = f ",carrier_down"
+                 if (sp[j] && sp[j] < top[k[j]]) f = f ",slow_link"
+                 rs = (brx[k[j]] > 0 && v[j, 10] ~ /^[0-9]+$/) ? sprintf("%.0f", 100 * v[j, 10] / brx[k[j]]) : "na"
+                 ts = (btx[k[j]] > 0 && v[j, 11] ~ /^[0-9]+$/) ? sprintf("%.0f", 100 * v[j, 11] / btx[k[j]]) : "na"
+                 tot = brx[k[j]] + btx[k[j]]; mine = (v[j, 10] ~ /^[0-9]+$/ ? v[j, 10] : 0) + (v[j, 11] ~ /^[0-9]+$/ ? v[j, 11] : 0)
+                 if (tot >= 1e9 && mine < 0.05 * tot) f = f ",idle_member"
+                 gb_rx = (v[j, 10] ~ /^[0-9]+$/) ? sprintf("%.1f", v[j, 10] / 1e9) : v[j, 10]
+                 gb_tx = (v[j, 11] ~ /^[0-9]+$/) ? sprintf("%.1f", v[j, 11] / 1e9) : v[j, 11]
+                 printf "%s %s %d %s %s %s %s %s %s %s %s %s %s %s %s %s %s\n", t, row[j], s, v[j, 6], v[j, 7], v[j, 8], v[j, 9], gb_rx, gb_tx, rs, ts, v[j, 12], v[j, 13], v[j, 14], v[j, 15], ber, (f == "" ? "-" : substr(f, 2))
+             }
+         }' "$WORK/bmem_pre" "$WORK/bmem_post" > "$WORK/bmem_delta"
+    [[ -s $WORK/bmem_delta ]] || return 0
+    cat "$WORK/bmem_delta" >> "$COLLECT_DIR/bond_members.txt"
+    local nb bad; nb=$(awk '{print $2, $3}' "$WORK/bmem_delta" | sort -u | wc -l | tr -d ' ')
+    log "Bond members over ${2}s: $(wc -l < "$WORK/bmem_delta" | tr -d ' ') members of $nb bonds read (bond_members.txt; a bond's own counters are empty)"
+    bad=$(awk '$20 != "-" {printf "#   %s %s %s: %s (rx %s%% / tx %s%% of the bond; symbol errors %s, uncorrectable %s, pre-FEC BER %s)\n", $2, $3, $4, $20, $13, $14, $10, $8, $19}' "$WORK/bmem_delta")
+    if [[ -n $bad ]]; then
+        log "WARNING: bond members flagged in $1 ($(wc -l <<<"$bad" | tr -d ' ')):"
+        head -n 10 <<<"$bad" >&2
+    fi
+    return 0
+}
+
 collect_drops() {  # outfile [k...]
     local outfile=$1 k; shift
     local -a ks=("$@"); (( ${#ks[@]} )) || ks=("${ELIG[@]}" "${CLI[@]}")
@@ -4533,7 +4607,7 @@ main() {
         (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
         dscp_check "${dpl[@]}"
     fi
-    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/host_counters.txt"
+    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
@@ -4624,6 +4698,7 @@ main() {
         collect_drops "$DROPS_PRE"
         collect_counters "$PRIO_SCRIPT" "$WORK/prio_pre"
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
+        collect_counters "$BMEM_SCRIPT" "$WORK/bmem_pre"
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
         collect_temps "iter${ITER}_pre" ipmi   # the BMC (inlet) once per iteration: ipmitool sensor can take tens of seconds
         if (( FF_SKIP_IPERF )); then
@@ -4663,8 +4738,9 @@ main() {
         local nr; nr=$(wc -l < "$DROPS_POST" | tr -d ' ')   # "0 drops" only means something if NICs were read
         (( DROP_READS_MIN < 0 || nr < DROP_READS_MIN )) && DROP_READS_MIN=$nr
         collect_counters "$PRIO_SCRIPT" "$WORK/prio_post"
-        collect_counters "$FEC_SCRIPT" "$WORK/fec_post"
+        collect_counters "$FEC_SCRIPT" "$WORK/fec_post"; collect_counters "$BMEM_SCRIPT" "$WORK/bmem_post"
         fec_deltas "iter$ITER" $(( $(date +%s) - fec_t0 > 0 ? $(date +%s) - fec_t0 : 1 ))
+        bond_member_deltas "iter$ITER" $(( $(date +%s) - fec_t0 > 0 ? $(date +%s) - fec_t0 : 1 ))
         # per-priority / pause / ECN counter increases: "iterN host_nic counter delta"
         awk -v it="iter$ITER" 'NR==FNR {pre[$1" "$2]=$3; next}
             ($1" "$2) in pre && $3 > pre[$1" "$2] {print it, $1, $2, $3 - pre[$1" "$2]}' \

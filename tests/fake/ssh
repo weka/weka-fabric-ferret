@@ -388,6 +388,22 @@ case $script in
             elif [[ $d == "$FAKE_MESHLOSSY" ]]; then echo "MESHLOSS $s $d 2 $c"; fi
         done
     done ;;
+*"@@BMEM"*)
+    # bond members: a FAKE_BOND_LLDP host's rail A NIC (members ens1np0 ens3np0) or client's bond0 (ens1f0 ens1f1), 200G
+    # each; every read adds 50 GB each way per member. FAKE_BMEM_BAD=h: its second member carries 1% of that and gains
+    # 100 symbol errors, 3 uncorrectable blocks, 5e8 corrected bits and one carrier drop per read
+    for nic in "$@"; do
+        inlist "$h" "$FAKE_BOND_LLDP" || continue
+        if [[ $kind == c ]]; then [[ $nic == bond0 ]] || continue; ms="ens1f0 ens1f1"
+        else [[ $nic == enp5s0np0 ]] || continue; ms="ens1np0 ens3np0"; fi
+        f=$FSTATE/bmem.$h; c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=0; c=$(( c + 1 )); echo $c > "$f"
+        i=0
+        for m in $ms; do
+            i=$(( i + 1 )); b=$(( c * 50000000000 )); sym=0; ub=0; bits=$(( c * 1000 )); cd=0
+            if [[ $i == 2 ]] && inlist "$h" "$FAKE_BMEM_BAD"; then b=$(( c * 500000000 )); sym=$(( c * 100 )); ub=$(( c * 3 )); bits=$(( c * 500000000 )); cd=$c; fi
+            echo "@@BMEM $h $nic $m 200000Mb/s $(( c * 10 )) $ub $bits $sym $b $b 0 0 0 $cd"
+        done
+    done ;;
 *"show-fec"*)
     # per second since the previous call (the state keeps its epoch; at least 1 s), so the rate the collector
     # computes does not move with the Mac's load: h1 A 5e-7 (ok); h2 A 5e-5 at 400G (watch); h3 B uncorrectable

@@ -298,6 +298,29 @@ for nic in "$@"; do
 done
 EOF
 
+# Bond members of the rail NICs ($@; a NIC that is no bond prints nothing): a bond's own ethtool counters are empty,
+# so each member is read as the FEC script reads a NIC, plus its traffic and error counters, one row per member:
+# "@@BMEM host bond member speed corrected_blocks uncorrectable_blocks corrected_bits symbol_errors rx_bytes tx_bytes
+# rx_dropped rx_errors rx_discards_phy carrier_down" (na = not exposed). FF_SYSFS (default /sys) is a test hook.
+read -r -d '' BMEM_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}
+num() { awk -v k="$1" '$1 == k {for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}}'; }
+st() { v=$(cat "$sys/class/net/$1/$2" 2>&1); case $v in ''|*[!0-9]*) echo na ;; *) echo "$v" ;; esac; }
+for nic in "$@"; do
+    [ "$nic" = - ] && continue
+    [ -r "$sys/class/net/$nic/bonding/slaves" ] || continue
+    for m in $(cat "$sys/class/net/$nic/bonding/slaves" 2>&1); do
+        [ -d "$sys/class/net/$m" ] || continue
+        sp=$(ethtool "$m" 2>&1 | awk '/Speed:/ {print $2; exit}')
+        f=$(ethtool -I --show-fec "$m" 2>&1); s=$(ethtool -S "$m" 2>&1)
+        cb=$(echo "$f" | num corrected_blocks:); ub=$(echo "$f" | num uncorrectable_blocks:)
+        bits=$(echo "$s" | num rx_corrected_bits_phy:); sym=$(echo "$s" | num rx_pcs_symbol_err_phy:); disc=$(echo "$s" | num rx_discards_phy:)
+        echo "$f" | grep -q -i -E '^Active FEC encoding: *(off|none)' && { cb=off; ub=off; bits=off; }
+        echo "@@BMEM $h $nic $m ${sp:-unknown} ${cb:-na} ${ub:-na} ${bits:-na} ${sym:-na} $(st "$m" statistics/rx_bytes) $(st "$m" statistics/tx_bytes) $(st "$m" statistics/rx_dropped) $(st "$m" statistics/rx_errors) ${disc:-na} $(st "$m" carrier_down_count)"
+    done
+done
+EOF
+
 # Mesh: src_a src_b count dst... (a source is ip@nic; "none" skips a missing rail). Per pair: when the route to dst
 # from src leaves another NIC than src's own (as the path check judges it), no ping: "MESHROUTE src dst <dev>"; else
 # count pings 0.2 s apart, and when any is lost: "MESHLOSS src dst <lost> <count>". 64 pairs at a time.
