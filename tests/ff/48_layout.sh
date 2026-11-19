@@ -3,10 +3,11 @@
 # here, so the page's strings are pinned on 14_ub and golden-C: no inline max-height on a card body, the scroll class
 # on every tab card body that holds a table or a list (the banner above the tabs and the map body stay as they are),
 # the LLDP card alone in a col-12 row with its text cells nowrap, and one tab-fitting resize handler (fitTabs). The
-# interface (class "scroll", fitTabs) was agreed with the coder
+# interface (class "scroll", fitTabs) was agreed with the coder. Since issue 13 (the operator 11-19) a box that holds a
+# table grows to the table's rows (10 a page at first) and the page scrolls; a box with only a list still scrolls inside
 # tier: fast
-# checks: 7
-# secs: 12
+# checks: 9
+# secs: 30
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
 python3 $P $S/fixtures/bundles/14_ub.tgz $W/ub.html > $W/ub.pout 2>&1; echo "rc=$?" >> $W/ub.pout
@@ -37,20 +38,33 @@ chk "scope 5: the LLDP Neighbor Table sits in a col-12 of its own on 14_ub and g
 chk "scope 5: the tab-fitting handler: fitTabs defined once, bound to the window's resize once and called at load; the tab-content is a flex column (control: a planted second definition counts 2)" \
     "[ \$(grep -c 'function fitTabs *(' $W/ub.html) = 1 ] && [ \$(grep -c \"on('resize', *fitTabs)\\|addEventListener('resize', *fitTabs)\" $W/ub.html) = 1 ] && [ \$(grep -c 'fitTabs()' $W/ub.html) -ge 1 ] && grep -qE '\\.tab-content *\\{[^}]*display: *flex[^}]*flex-direction: *column' $W/ub.html && [ \$({ cat $W/ub.html; echo 'function fitTabs() {}'; } | grep -c 'function fitTabs *(') = 2 ]" \
     "fitTabs defs $(grep -c 'function fitTabs *(' $W/ub.html) resize binds $(grep -c "on('resize', *fitTabs)\|addEventListener('resize', *fitTabs)" $W/ub.html) calls $(grep -c 'fitTabs()' $W/ub.html); tab-content rule: $(grep -o '\.tab-content *{[^}]*}' $W/ub.html | head -n 1)"
-# sticky headers (issue 12, 2026-11-19): in headless Chrome, each scrolling card box that holds a table is scrolled past
-# the table's top; its header row must sit at the box's top edge, no gap where rows show through (the card body's
-# 8 px top padding made one). Control: the page with the padding-top rule taken out shows the 8 px gap.
+# sticky headers (issues 12 and 13, 2026-11-19): a table's box grows to its rows, so the page scrolls; in headless
+# Chrome each table of 3 or more rows is scrolled 40 px past the window's top and every cell of its header row must
+# stay at the window's top (tests/sticky_probe.js). Controls: without the rule that lets a table's box grow (1 line
+# out) the boxes scroll inside again and the header leaves the window's top; without !important on the sticky position
+# (DataTables sets its sortable headers position: relative) a sortable header scrolls away.
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-probe() { { sed '/<\/body>/,$d' $1; echo '<script>'; cat $S/sticky_probe.js; echo '</script></body></html>'; } > $1.p.html
-    "$CHROME" --headless=new --disable-gpu --no-first-run --user-data-dir=$W/chrome --window-size=1280,800 --virtual-time-budget=8000 --dump-dom "file://$1.p.html" 2> $W/chrome.err | grep -o 'data-probe="[^"]*"' | cut -d'"' -f2; }
+probe() { { sed '/<\/body>/,$d' $1; echo '<script>'; cat $S/$2; echo '</script></body></html>'; } > $1.p.html
+    "$CHROME" --headless=new --disable-gpu --no-first-run --user-data-dir=$W/chrome --window-size=1280,800 --virtual-time-budget=10000 --dump-dom "file://$1.p.html" 2> $W/chrome.err | grep -o 'data-probe="[^"]*"' | cut -d'"' -f2; }
 if [[ -x $CHROME ]]; then
-    pg=$(probe $W/gc.html); grep -v '^\.card-body\.scroll { padding-top: 0; }' $W/gc.html > $W/gcx.html; px=$(probe $W/gcx.html)
-    chk "sticky headers in Chrome: golden-C's scrolling table boxes (4 or more) each hold their header row at the box's top edge, gap 0; control: without the padding-top rule (1 line out) the gap is 8 px" \
-        "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 4 )) && [ \$(diff $W/gc.html $W/gcx.html | grep -cE '^[0-9]+d[0-9]+$') = 1 ] && [[ '$px' =~ maxgap=8\ mingap=8\$ ]]" "fixed '$pg' | control '$px'"
-    # every header cell (issue 13): DataTables' rule makes its sortable headers position: relative, so only the '#'
-    # cell stuck; the probe cuts each box with 3 or more rows to 120 px and measures every cell of the header row
-    sed 's/position: sticky !important; top: 0;/position: sticky; top: 0;/' $W/gc.html > $W/gcy.html; py=$(probe $W/gcy.html)
-    chk "sticky headers in Chrome: every header cell, DataTables' sortable ones too, at the box's top edge in each cut box (7 or more); control: without !important (1 line changed) a sortable header scrolls away (gap below 0)" \
-        "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 7 )) && [ \$(diff $W/gc.html $W/gcy.html | grep -c '^>') = 1 ] && [[ '$py' =~ mingap=-[0-9]+\$ ]]" "fixed '$pg' | control '$py'"
-else bad "sticky headers in Chrome" "Chrome not found at $CHROME: the header gap is untested"; bad "sticky headers in Chrome (every cell)" "Chrome not found"; fi
+    pg=$(probe $W/gc.html sticky_probe.js)
+    grep -v '^\.scroll:has(table) {' $W/gc.html > $W/gcx.html; px=$(probe $W/gcx.html sticky_probe.js)
+    chk "sticky headers in Chrome: golden-C, every table of 3 or more rows (7 or more) scrolled past the window's top keeps every header cell at the window's top (gap 0); control: without the box-grows rule (1 line out) a header leaves the top (gap below 0)" \
+        "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 7 )) && [ \$(diff $W/gc.html $W/gcx.html | grep -cE '^[0-9]+d[0-9]+$') = 1 ] && [[ '$px' =~ mingap=-[0-9]+\$ ]]" "fixed '$pg' | control '$px'"
+    sed 's/position: sticky !important; top: 0;/position: sticky; top: 0;/' $W/gc.html > $W/gcy.html; py=$(probe $W/gcy.html sticky_probe.js)
+    chk "sticky headers in Chrome: DataTables' sortable header cells too; control: without !important (1 line changed) a sortable header scrolls away (gap below 0)" \
+        "[[ '$pg' =~ maxgap=0\ mingap=0\$ ]] && [ \$(diff $W/gc.html $W/gcy.html | grep -c '^>') = 1 ] && [[ '$py' =~ mingap=-[0-9]+\$ ]]" "fixed '$pg' | control '$py'"
+    # table controls (issue 13, the operator 11-19): tests/table_probe.js on 14_where (15 NICs: its driver, LLDP and
+    # optics tables have more than 10 rows, side by side) and golden-C (two plain tables of 76 and 14 rows, the results
+    # table of 76 runs). Control: without the two dtOpts lines (dom, initComplete) DataTables' own search box and length
+    # menu come back and the menus and filters go
+    python3 $P $S/fixtures/bundles/14_where.tgz $W/uw.html > $W/uw.pout 2>&1
+    tu=$(probe $W/uw.html table_probe.js); tg=$(probe $W/gc.html table_probe.js)
+    grep -vE "^ +dom: 'rt<\"dt-foot\"ip>',|^ +initComplete: function\(\) \{ tcDecorate\(this.api\(\)\); \}," $W/uw.html > $W/uwx.html; tx=$(probe $W/uwx.html table_probe.js)
+    kv() { tr ' ' '\n' <<<"$1" | awk -F= -v k=$2 '$1 == k {print $2}'; }
+    chk "table controls in Chrome (14_where): 5 or more tables of more than 10 rows each show 10 rows, a menu 10,25,50,100,250,500,1000,All set to 10 in its card header and a filter under every header cell but '#'; the small DataTables show no menu, filter or paging; 0 search boxes; 0 boxes scrolling inside" \
+        "(( \$(kv '$tu' big) >= 5 )) && [ \$(kv '$tu' bigbad) = 0 ] && (( \$(kv '$tu' small) >= 1 )) && [ \$(kv '$tu' smallbad) = 0 ] && [ \$(kv '$tu' search) = 0 ] && [ \$(kv '$tu' menuhead) = \$(kv '$tu' menus) ] && [ \$(kv '$tu' inner) = 0 ]" "uw '$tu'"
+    chk "table controls in Chrome: side-by-side cards share one height at load (14_where); its first big side-by-side table at 25 shows min(25, 15) = 15 rows and takes its own height, All shows 15, back at 10 it shows 10 and shares the row's height again; its first value-list filter keeps only rows with that value; golden-C's big tables (2 or more) pass too; control: without the dtOpts lines a search box is back and the big tables fail" \
+        "(( \$(kv '$tu' eq) >= 1 )) && [ \$(kv '$tu' eqbad) = 0 ] && [ \"\$(kv '$tu' pick)\" = 15/15/15/1/10/0 ] && [[ \"\$(kv '$tu' filt)\" =~ ^([1-9][0-9]*)/([0-9]+)\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && (( \$(kv '$tg' big) >= 2 )) && [ \$(kv '$tg' bigbad) = 0 ] && [ \$(diff $W/uw.html $W/uwx.html | grep -cE '^< +(dom|initComplete):') = 2 ] && (( \$(kv '$tx' search) > 0 && \$(kv '$tx' bigbad) > 0 ))" "uw '$tu' | gc '$tg' | control '$tx'"
+else for c in "sticky headers" "sticky headers (DataTables)" "table controls" "table controls (sizes)"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
 finish

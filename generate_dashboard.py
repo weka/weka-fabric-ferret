@@ -41,6 +41,80 @@ if os.path.abspath(OUTPUT_FILE) == os.path.abspath(INPUT_FILE):   # never write 
 FEC_LIMIT_BER = 2.4e-4
 FEC_WATCH_BER = 1e-5
 TOPO_DEFAULT_LAYOUT = 'radial'   # the topology map's opening layout: 'radial', 'hierarchical' or 'force' (10-29)
+# Table controls (2026-11-19, the operator): every table in a tab that has more than 10 rows shows 10 rows a page at
+# first, a row-count menu (10 ... All) in its card's header (a bar above it when the card holds more than one table),
+# paging, and a filter under each header cell (a value list for a column with 12 values or fewer, a text box for the
+# rest); the box grows to the rows on the page, so the page scrolls and the header row stays at the window's top.
+# A table of 10 rows or fewer gets none of it. Cards side by side keep one height until a card is set to more than 10.
+TABLE_CTL_JS = r'''
+var ROWS0 = 10, ROWMENU = [10, 25, 50, 100, 250, 500, 1000, -1];
+function tcText(h) { var d = document.createElement('div'); d.innerHTML = String(h); return (d.textContent || '').replace(/\s+/g, ' ').trim(); }
+function tcRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+function tcSort(a, b) { var x = parseFloat(a.replace(/,/g, '')), y = parseFloat(b.replace(/,/g, ''));
+    return (!isNaN(x) && !isNaN(y) && x !== y) ? x - y : a.localeCompare(b, undefined, { numeric: true }); }
+// the row-count menu's place: the card's header when the card holds this one table, else a bar just above the table
+function tcMenu(t, val, onPick) {
+    if (!t.id) t.id = 'tct' + (++tcMenu.n);
+    var old = document.getElementById('tcm-' + t.id); if (old) old.remove();
+    var s = document.createElement('span'); s.id = 'tcm-' + t.id; s.className = 'tc-rows';
+    s.innerHTML = 'Rows <select class="form-select form-select-sm">' + ROWMENU.map(function (v) {
+        return '<option value="' + v + '"' + (v === val ? ' selected' : '') + '>' + (v < 0 ? 'All' : v) + '</option>'; }).join('') + '</select>';
+    var card = t.closest('.card'), hd = card && card.querySelector(':scope > .card-header');
+    if (hd && card.querySelectorAll('table').length === 1) {
+        hd.classList.add('tc-head');
+        var last = hd.lastElementChild;
+        if (last && (last.tagName === 'BUTTON' || last.querySelector('button'))) hd.insertBefore(s, last); else hd.appendChild(s);
+    } else { s.classList.add('tc-bar'); var w = t.closest('.dataTables_wrapper') || t; w.parentNode.insertBefore(s, w); }
+    s.querySelector('select').addEventListener('change', function () { var v = +this.value; onPick(v); tcOwn(t, v); });
+    return s;
+}
+tcMenu.n = 0;
+// a card set to more than 10 rows takes its own height; at 10 it shares its row's height again
+function tcOwn(t, v) { var card = t.closest('.card'), col = card && card.parentElement;
+    if (col && col.parentElement && col.parentElement.classList.contains('row')) col.classList.toggle('tc-own', v !== ROWS0); }
+// a filter under a header cell: get(i) the column's values, apply(value, exact) filters it
+function tcFilter(th, vals, apply) {
+    var old = th.querySelector('.col-filter'); if (old) old.remove();
+    var ks = Object.keys(vals).filter(function (k) { return k !== ''; }).sort(tcSort), box = document.createElement('div'), el;
+    box.className = 'col-filter';
+    if (ks.length > 1 && ks.length <= 12) {
+        el = document.createElement('select');
+        el.innerHTML = '<option value="">all</option>' + ks.map(function (k) { var e = k.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;'); return '<option value="' + e + '">' + e + '</option>'; }).join('');
+        el.addEventListener('change', function () { apply(this.value, true); });
+    } else {
+        el = document.createElement('input'); el.type = 'search'; el.placeholder = 'filter';
+        el.addEventListener('input', function () { apply(this.value, false); });
+    }
+    box.appendChild(el);
+    ['click', 'mousedown', 'keydown', 'keypress', 'keyup'].forEach(function (e) { box.addEventListener(e, function (ev) { ev.stopPropagation(); }); });
+    th.appendChild(box);
+}
+// a DataTable's controls (from its initComplete): 10 rows or fewer, no paging; more, the menu and a filter per column
+function tcDecorate(api) {
+    var t = api.table().node(), n = api.rows().count(), w = $(t).closest('.dataTables_wrapper');
+    $(t).find('.col-filter').remove(); var old = t.id && document.getElementById('tcm-' + t.id); if (old) old.remove();
+    if (n <= ROWS0) { w.find('.dataTables_paginate, .dataTables_info').hide(); return; }
+    w.find('.dataTables_paginate, .dataTables_info').show();
+    tcMenu(t, api.page.len(), function (v) { api.page.len(v).draw(); });
+    api.columns().every(function () {
+        var col = this, th = col.header(); if ($(th).hasClass('dt-row-num')) return;
+        var vals = {}; col.data().each(function (d) { vals[tcText(d)] = 1; });
+        tcFilter(th, vals, function (v, exact) { col.search(exact ? (v ? '^\\s*' + tcRe(v) + '\\s*$' : '') : v, exact, !exact).draw(); });
+    });
+}
+// a plain table in a tab with more than 10 rows (no row or column spans) becomes a DataTable kept in its own order
+function tcAll(dtOpts) {
+    document.querySelectorAll('.tab-pane:not(#tab-topology) table.table').forEach(function (t) {
+        if ($.fn.DataTable.isDataTable(t) || t.id === 'resultsTable' || !t.tHead || t.tHead.rows.length !== 1 || !t.tBodies.length) return;
+        var rows = t.tBodies[0].rows, nc = t.tHead.rows[0].cells.length;
+        if (rows.length <= ROWS0 || t.querySelector('tbody [colspan], tbody [rowspan]')) return;
+        if ([].some.call(rows, function (r) { return r.cells.length !== nc; })) return;
+        var o = dtOpts({ order: [] });
+        if (tcText(t.tHead.rows[0].cells[0].innerHTML) !== '#') { o.columnDefs = []; o.drawCallback = null; }
+        $(t).DataTable(o);
+    });
+}
+'''
 # lldp_reasons.txt: why a port names no LLDP neighbour, shown where a NIC would read "no switch seen"
 LLDP_WHY = {'fw_lldp_on': 'firmware LLDP agent holds the frames (fw_lldp_on)', 'tcpdump_absent': 'no tcpdump on host',
             'timeout_absent': 'no timeout command on host', 'no_lldpcli': 'no lldpcli; FF_LLDP=1 captures',
@@ -897,6 +971,19 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 .tab-pane .row > [class*="col"] > .card {{ height: 100%; }}
 .scroll {{ flex: 1; overflow-y: auto; min-height: 260px; contain: size; }}
 .card-body.scroll {{ padding-top: 0; }}  /* no gap above a sticky header: rows would show through it while the box scrolls */
+/* A box that holds a table grows to the rows on the table's page (10 at first; the row-count menu sets it): the page
+   scrolls, not the box, and the header row stays at the window's top. A box with only a list keeps scrolling inside */
+.scroll:has(table) {{ flex: none; overflow: visible; min-height: 0; contain: none; }}
+.tab-pane > :has(.scroll table) {{ flex: 0 0 auto; }}
+.row > .tc-own {{ align-self: flex-start; }}
+.row > .tc-own > .card {{ height: auto !important; }}
+.tc-head {{ display: flex !important; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }}
+.tc-rows {{ display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #8899aa; margin-left: auto; }}
+.tc-bar {{ display: flex; justify-content: flex-end; margin: 4px 0; }}
+.tc-rows select {{ width: auto; padding: 1px 24px 1px 6px; font-size: 0.8rem; background-color: #1a1a2e; color: #e0e0e0; border-color: #0f3460; }}
+.col-filter {{ margin-top: 3px; font-weight: normal; }}
+.col-filter select, .col-filter input {{ width: 100%; min-width: 56px; font-size: 0.75rem; padding: 1px 4px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 3px; }}
+.dt-foot {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }}
 #lldpTable td {{ white-space: nowrap; }}
 </style>
 </head>
@@ -1065,7 +1152,6 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
             <div class="card-body scroll">
                 <p class="mb-1" style="font-size:0.8rem; color:#8899aa;">Failed runs first, then by share of expected. Expected: a backend run, its path's line rate (the slower rail's); a client run, min(client line, backend rail line / runs sharing that backend NIC). A failed run shows iperf3's reason there.</p>
                 <div style="display:flex; gap:10px; align-items:center; font-size:0.85rem; color:#8899aa; margin-bottom:4px;">
-                    <select class="form-select form-select-sm" style="width:auto;" onchange="resultsSetPageSize(this.value === 'all' ? 'all' : +this.value)"><option value="50" selected>50</option><option value="100">100</option><option value="200">200</option><option value="500">500</option><option value="all">All</option></select> per page
                     <button class="btn btn-sm btn-outline-info" onclick="resultsSetPage(resultsPage - 1)">&lsaquo; prev</button><span id="resultsPager"></span><button class="btn btn-sm btn-outline-info" onclick="resultsSetPage(resultsPage + 1)">next &rsaquo;</button>
                 </div>
                 <table class="table table-striped table-hover table-sm" id="resultsTable">
@@ -1350,6 +1436,7 @@ function fitTabs() {{
 }}
 $(window).on('resize', fitTabs);
 
+{TABLE_CTL_JS}
 // All table init in document.ready so dtOpts is available everywhere
 $(document).ready(function() {{
     fitTabs();
@@ -1417,11 +1504,13 @@ $(document).ready(function() {{
         document.getElementById('rawTitle').textContent = rawIsVerbose ? 'Iperf3 Results' : 'Per NIC summary';
         rawApplyFilter();
     }};
-    var dtMenu = [[25, 50, 100, 250, 500, 1000, -1], [25, 50, 100, 250, 500, 1000, 'All']];
+    var dtMenu = [ROWMENU, ROWMENU.map(function(v) {{ return v < 0 ? 'All' : v; }})];
     // Row numbering via drawCallback — doesn't interfere with sorting
     var dtOpts = function(extra) {{
         return $.extend(true, {{
-            lengthMenu: dtMenu,
+            lengthMenu: dtMenu, pageLength: ROWS0,
+            dom: 'rt<"dt-foot"ip>',   // no search box (a filter per column) and no length menu here (the card header has it)
+            initComplete: function() {{ tcDecorate(this.api()); }},
             columnDefs: [{{ targets: 0, orderable: false, searchable: false, className: 'dt-row-num' }}],
             drawCallback: function(s) {{
                 var api = this.api();
@@ -1436,11 +1525,20 @@ $(document).ready(function() {{
     // Test Distribution's results: rows come failed then worst first from Python ([role, src host, src ip, dst host,
     // dst ip, phase, gbps or ERROR, expected or reason, % or null, retr, gbytes, badge]); filter, then page, as strings
     var testRows = {test_rows_json};
-    var resultsFilter = 'all', resultsSize = 50;
+    var resultsFilter = 'all', resultsSize = ROWS0, resultsColF = {{}};   // resultsColF: column -> [value, exact]
     window.resultsPage = 1;
     var resEsc = function(s) {{ return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }};
+    // a run's cells as shown, Role to GBytes (the column filters match these)
+    var resCells = function(t) {{ return [t[0], t[1], t[2], t[3], t[4], t[5], String(t[6]), String(t[7]), t[8] === null ? '-' : t[8].toFixed(1) + '%', String(t[9]), String(t[10])]; }};
     function resultsRows() {{
-        return testRows.filter(function(t) {{ return resultsFilter === 'all' || t[0] + 's' === resultsFilter; }});
+        return testRows.filter(function(t) {{
+            if (resultsFilter !== 'all' && t[0] + 's' !== resultsFilter) return false;
+            var c = resCells(t);
+            return Object.keys(resultsColF).every(function(k) {{
+                var f = resultsColF[k], v = String(c[k]);
+                return !f[0] || (f[1] ? v === f[0] : v.toLowerCase().indexOf(f[0].toLowerCase()) >= 0);
+            }});
+        }});
     }}
     function resultsDraw() {{
         var rows = resultsRows(), n = rows.length, size = resultsSize === 'all' ? Math.max(n, 1) : resultsSize;
@@ -1476,12 +1574,23 @@ $(document).ready(function() {{
         a.click();
     }};
     resultsDraw();
-    $('#fecTable').DataTable(dtOpts({{ pageLength: 50, order: [[4, 'desc']] }}));
-    $('#lldpTable').DataTable(dtOpts({{ pageLength: 50, order: [[4, 'asc']] }}));
-    $('#driverTable').DataTable(dtOpts({{ pageLength: 50, order: [[1, 'asc']] }}));
-    $('#opticsTable').DataTable(dtOpts({{ pageLength: 50, order: [[8, 'desc']] }}));
-    if (slowData.length) {{ $('#slowIpTable').DataTable(dtOpts({{ pageLength: 50, order: [[3, 'asc']] }})); }}
-    if ($('#dropsTable').length) {{ $('#dropsTable').DataTable(dtOpts({{ pageLength: 50, order: [[3, 'desc']] }})); }}
+    // more than 10 runs: the row-count menu in the card's header and a filter under each header cell (not '#')
+    (function() {{
+        var t = document.getElementById('resultsTable');
+        if (!t || testRows.length <= ROWS0) return;
+        tcMenu(t, ROWS0, function(v) {{ window.resultsSetPageSize(v < 0 ? 'all' : v); }});
+        var ths = t.tHead.rows[0].cells;
+        for (var k = 0; k < 11; k++) (function(k) {{
+            var vals = {{}}; testRows.forEach(function(r) {{ vals[resCells(r)[k]] = 1; }});
+            tcFilter(ths[k + 1], vals, function(v, exact) {{ resultsColF[k] = [v, exact]; window.resultsPage = 1; resultsDraw(); }});
+        }})(k);
+    }})();
+    $('#fecTable').DataTable(dtOpts({{ order: [[4, 'desc']] }}));
+    $('#lldpTable').DataTable(dtOpts({{ order: [[4, 'asc']] }}));
+    $('#driverTable').DataTable(dtOpts({{ order: [[1, 'asc']] }}));
+    $('#opticsTable').DataTable(dtOpts({{ order: [[8, 'desc']] }}));
+    if (slowData.length) {{ $('#slowIpTable').DataTable(dtOpts({{ order: [[3, 'asc']] }})); }}
+    if ($('#dropsTable').length) {{ $('#dropsTable').DataTable(dtOpts({{ order: [[3, 'desc']] }})); }}
 
     // --- Raw Data tab: filters, exclusions, CSV download ---
     var rawDT = null;
@@ -1550,7 +1659,7 @@ $(document).ready(function() {{
             }});
             $('#allResultsTable thead tr').html('<th>#</th><th>{ep[0]}</th><th>{ep[1]}</th><th>{ep[2]}</th><th>{ep[3]}</th><th>{ep[4]}</th><th>{ep[5]}</th><th>Gbps<small>single iperf3 test result</small></th><th>Retrans<small>retransmits for this test</small></th><th>GBytes</th><th>Iter</th><th>Phase</th>');
             $('#allResultsTable tbody').html(tbody);
-            rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [[7, 'asc']] }}));
+            rawDT = $('#allResultsTable').DataTable(dtOpts({{ order: [[7, 'asc']] }}));
         }} else {{
             var total = nicRows.length;
             nicRows.forEach(function(r) {{
@@ -1565,7 +1674,7 @@ $(document).ready(function() {{
             }});
             $('#allResultsTable thead tr').html({json.dumps(nic_head)});
             $('#allResultsTable tbody').html(tbody);
-            rawDT = $('#allResultsTable').DataTable(dtOpts({{ pageLength: 50, order: [] }}));
+            rawDT = $('#allResultsTable').DataTable(dtOpts({{ order: [] }}));
         }}
         document.getElementById('rawFilterCount').textContent =
             (rawExcludedHosts.size > 0 ? rawExcludedHosts.size + ' excluded, ' : '') +
@@ -1578,7 +1687,7 @@ $(document).ready(function() {{
         if (!$.fn.DataTable.isDataTable(tbl)) {{
             // Plain table (no DataTable) — scrape directly
             var headers = [];
-            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small').remove().end().text().trim(); headers.push(t); }});
+            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small, .col-filter').remove().end().text().trim(); headers.push(t); }});
             var skipHash = (headers[0] === '#' || headers[0] === '');
             if (skipHash) headers = headers.slice(1);
             var rows = [headers.join(',')];
@@ -1593,7 +1702,7 @@ $(document).ready(function() {{
         }} else {{
             var dt = tbl.DataTable();
             var headers = [];
-            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small').remove().end().text().trim(); headers.push(t); }});
+            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small, .col-filter').remove().end().text().trim(); headers.push(t); }});
             var skipHash = (headers[0] === '#' || headers[0] === '');
             if (skipHash) headers = headers.slice(1);
             var rows = [headers.join(',')];
@@ -2356,6 +2465,8 @@ $(document).ready(function() {{
         topoUpdateLegend();
         topoToast('Map reset');
     }};
+
+    tcAll(dtOpts);   // the plain tables of more than 10 rows (after every table above is drawn)
 
     // last in this block: the map's tab is open at load, and its first draw calls the window.topo* functions above
     if (document.getElementById('tab-topology').classList.contains('active')) topoShown();
