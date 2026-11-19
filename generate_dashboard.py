@@ -870,7 +870,7 @@ th small {{ display: block; font-weight: 400; color: #8899aa; font-size: 0.7rem;
 .tab-dot {{ display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; vertical-align: middle; }}
 .nav-tabs {{ border-bottom: 1px solid #0f3460; }}
 .table {{ color: #e0e0e0; }}
-.table thead th {{ background: #0f3460; color: #4ecca3; border-bottom: 2px solid #e94560; position: sticky; top: 0; }}
+.table thead th {{ background: #0f3460; color: #4ecca3; border-bottom: 2px solid #e94560; position: sticky; top: 0; box-shadow: inset 0 -2px 0 #e94560; }}
 .table-striped tbody tr:nth-of-type(odd) {{ background: rgba(15,52,96,0.3); }}
 .table-hover tbody tr:hover {{ background: rgba(78,204,163,0.1); }}
 .badge-down {{ background: #e94560; }}
@@ -896,6 +896,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 .tab-pane > :has(.scroll) {{ flex: 1 0 auto; }}
 .tab-pane .row > [class*="col"] > .card {{ height: 100%; }}
 .scroll {{ flex: 1; overflow-y: auto; min-height: 260px; contain: size; }}
+.card-body.scroll {{ padding-top: 0; }}  /* no gap above a sticky header: rows would show through it while the box scrolls */
 #lldpTable td {{ white-space: nowrap; }}
 </style>
 </head>

@@ -5,8 +5,8 @@
 # the LLDP card alone in a col-12 row with its text cells nowrap, and one tab-fitting resize handler (fitTabs). The
 # interface (class "scroll", fitTabs) was agreed with the coder
 # tier: fast
-# checks: 5
-# secs: 6
+# checks: 6
+# secs: 12
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
 python3 $P $S/fixtures/bundles/14_ub.tgz $W/ub.html > $W/ub.pout 2>&1; echo "rc=$?" >> $W/ub.pout
@@ -37,4 +37,15 @@ chk "scope 5: the LLDP Neighbor Table sits in a col-12 of its own on 14_ub and g
 chk "scope 5: the tab-fitting handler: fitTabs defined once, bound to the window's resize once and called at load; the tab-content is a flex column (control: a planted second definition counts 2)" \
     "[ \$(grep -c 'function fitTabs *(' $W/ub.html) = 1 ] && [ \$(grep -c \"on('resize', *fitTabs)\\|addEventListener('resize', *fitTabs)\" $W/ub.html) = 1 ] && [ \$(grep -c 'fitTabs()' $W/ub.html) -ge 1 ] && grep -qE '\\.tab-content *\\{[^}]*display: *flex[^}]*flex-direction: *column' $W/ub.html && [ \$({ cat $W/ub.html; echo 'function fitTabs() {}'; } | grep -c 'function fitTabs *(') = 2 ]" \
     "fitTabs defs $(grep -c 'function fitTabs *(' $W/ub.html) resize binds $(grep -c "on('resize', *fitTabs)\|addEventListener('resize', *fitTabs)" $W/ub.html) calls $(grep -c 'fitTabs()' $W/ub.html); tab-content rule: $(grep -o '\.tab-content *{[^}]*}' $W/ub.html | head -n 1)"
+# sticky headers (issue 12, 2026-11-19): in headless Chrome, each scrolling card box that holds a table is scrolled past
+# the table's top; its header row must sit at the box's top edge, no gap where rows show through (the card body's
+# 8 px top padding made one). Control: the page with the padding-top rule taken out shows the 8 px gap.
+CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+probe() { { sed '/<\/body>/,$d' $1; echo '<script>'; cat $S/sticky_probe.js; echo '</script></body></html>'; } > $1.p.html
+    "$CHROME" --headless=new --disable-gpu --no-first-run --user-data-dir=$W/chrome --window-size=1280,800 --virtual-time-budget=8000 --dump-dom "file://$1.p.html" 2> $W/chrome.err | grep -o 'data-probe="[^"]*"' | cut -d'"' -f2; }
+if [[ -x $CHROME ]]; then
+    pg=$(probe $W/gc.html); grep -v '^\.card-body\.scroll { padding-top: 0; }' $W/gc.html > $W/gcx.html; px=$(probe $W/gcx.html)
+    chk "sticky headers in Chrome: golden-C's scrolling table boxes (4 or more) each hold their header row at the box's top edge, gap 0; control: without the padding-top rule (1 line out) the gap is 8 px" \
+        "[[ '$pg' =~ ^boxes=([0-9]+)\ maxgap=0\ mingap=0\$ ]] && (( \${BASH_REMATCH[1]} >= 4 )) && [ \$(diff $W/gc.html $W/gcx.html | grep -cE '^[0-9]+d[0-9]+$') = 1 ] && [[ '$px' =~ maxgap=8\ mingap=8\$ ]]" "fixed '$pg' | control '$px'"
+else bad "sticky headers in Chrome" "Chrome not found at $CHROME: the header gap is untested"; fi
 finish
