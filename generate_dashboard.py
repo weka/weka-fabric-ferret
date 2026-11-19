@@ -93,7 +93,7 @@ function tcFilter(th, vals, apply) {
 function tcDecorate(api) {
     var t = api.table().node(), n = api.rows().count(), w = $(t).closest('.dataTables_wrapper');
     $(t).find('.col-filter').remove(); var old = t.id && document.getElementById('tcm-' + t.id); if (old) old.remove();
-    if (n <= ROWS0) { w.find('.dataTables_paginate, .dataTables_info').hide(); return; }
+    if (n <= ROWS0) { w.find('.dataTables_paginate, .dataTables_info').hide(); tcCols(t); return; }
     w.find('.dataTables_paginate, .dataTables_info').show();
     tcMenu(t, api.page.len(), function (v) { api.page.len(v).draw(); });
     api.columns().every(function () {
@@ -101,6 +101,7 @@ function tcDecorate(api) {
         var vals = {}; col.data().each(function (d) { vals[tcText(d)] = 1; });
         tcFilter(th, vals, function (v, exact) { col.search(exact ? (v ? '^\\s*' + tcRe(v) + '\\s*$' : '') : v, exact, !exact).draw(); });
     });
+    tcCols(t);
 }
 // a card that shares its row (a column narrower than col-12) gets a button in its header that widens it to the page's
 // width and back; Plotly charts redraw to the new width
@@ -131,6 +132,84 @@ function tcAll(dtOpts) {
         $(t).DataTable(o);
     });
 }
+// Column controls (2026-11-19, the operator): a table in a tab with more than 5 columns (one header row, no row or
+// column spans) gets a Columns menu that shows or hides any column but '#'; each column is as wide as its longest
+// value or its whole header on one line. Each cell carries its first place in the row (_tci, class tccN); the order
+// and the hidden set live in a state kept per table and header, so a table rebuilt with the same header keeps them.
+// Nothing is stored in the browser: a reload starts from the default layout.
+var TCC_MIN = 6, tcStates = {};
+function tcLabel(th) { var c = th.cloneNode(true); c.querySelectorAll('small, .col-filter, .tc-grip').forEach(function (e) { e.remove(); });
+    return (c.textContent || '').replace(/\s+/g, ' ').trim(); }
+function tcEligible(t) {
+    if (!t.tHead || t.tHead.rows.length !== 1 || !t.tBodies.length || !t.closest('.tab-pane') || t.closest('#tab-topology')) return false;
+    if ([].some.call(t.querySelectorAll('[colspan], [rowspan]'), function (c) { return !c.classList.contains('dataTables_empty') && (c.colSpan > 1 || c.rowSpan > 1); })) return false;   // DataTables writes colspan="1" on its header cells
+    return t.tHead.rows[0].cells.length >= TCC_MIN;
+}
+// the columns in their order on the page: '#' first, then the frozen ones, then the rest
+function tcOrder(st) { return (st.hash ? [0] : []).concat(st.frozen, st.rest); }
+// the cell of a row that was column i at first
+function tcCell(r, i) { for (var k = 0; k < r.cells.length; k++) if (r.cells[k]._tci === i) return r.cells[k]; return r.cells[i]; }
+function tcCols(t) {
+    if (!tcEligible(t)) return;
+    var hr = t.tHead.rows[0];
+    if (t._tcs && hr.cells[0]._tci !== undefined) { tcApply(t); return; }   // set up already
+    if (!t.id) t.id = 'tct' + (++tcMenu.n);
+    var ths = [].slice.call(hr.cells), labels = ths.map(tcLabel), key = t.id + '|' + labels.join('|');
+    var st = tcStates[key] || (tcStates[key] = { n: ths.length, hash: labels[0] === '#', labels: labels, frozen: [], rest: [], hidden: {}, narrow: {} });
+    if (!st.rest.length && !st.frozen.length) for (var i = st.hash ? 1 : 0; i < st.n; i++) st.rest.push(i);
+    t._tcs = st; t.classList.add('tc-cols');
+    if (!document.getElementById('tcs-' + t.id)) { var css = document.createElement('style'); css.id = 'tcs-' + t.id; document.head.appendChild(css); }
+    if ($.fn.DataTable.isDataTable(t) && !t._tcHook) { $(t).on('draw.dt', function () { tcApply(t); }); t._tcHook = 1; }
+    tcApply(t); tcColMenu(t);
+}
+// put every row's cells in the state's order and write the table's rules (hidden columns)
+function tcApply(t) {
+    var st = t && t._tcs; if (!st || !Array.isArray(st.rest)) return;
+    var order = tcOrder(st), want = order.join(), rows = [t.tHead.rows[0]].concat([].slice.call(t.tBodies[0].rows));
+    rows.forEach(function (r) {
+        if (r.cells.length !== st.n) return;
+        if (r._tcn !== st.n) { for (var i = 0; i < st.n; i++) { r.cells[i]._tci = i; r.cells[i].classList.add('tcc' + i); } r._tcn = st.n; }
+        if ([].map.call(r.cells, function (c) { return c._tci; }).join() === want) return;
+        var by = []; [].forEach.call(r.cells, function (c) { by[c._tci] = c; });
+        order.forEach(function (i) { r.appendChild(by[i]); });
+    });
+    tcCss(t);
+}
+function tcCss(t) {
+    var st = t._tcs, id = '#' + t.id, s = [];
+    Object.keys(st.hidden).forEach(function (i) { if (st.hidden[i]) s.push(id + ' .tcc' + i + ' { display: none; }'); });
+    document.getElementById('tcs-' + t.id).textContent = s.join('\n');
+}
+// the Columns menu: one checkbox per column but '#', beside the row-count menu (the card's header when the card holds
+// this one table, else a bar above the table)
+function tcColMenu(t) {
+    var st = t._tcs, old = document.getElementById('tcc-' + t.id); if (old) old.remove();
+    var m = document.createElement('span'); m.id = 'tcc-' + t.id; m.className = 'tc-colmenu dropdown';
+    m.innerHTML = '<button type="button" class="btn btn-sm btn-outline-info dropdown-toggle" data-bs-toggle="dropdown" data-bs-auto-close="outside">Columns</button><div class="dropdown-menu dropdown-menu-end tc-collist"></div>';
+    var list = m.querySelector('.tc-collist');
+    st.labels.forEach(function (l, i) {
+        if (st.hash && i === 0) return;
+        var lb = document.createElement('label'), cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.checked = !st.hidden[i]; cb.setAttribute('data-i', i);
+        cb.addEventListener('change', function () { st.hidden[i] = !this.checked; tcCss(t); });
+        lb.appendChild(cb); lb.appendChild(document.createTextNode(' ' + (l || '(column ' + (i + 1) + ')'))); list.appendChild(lb);
+    });
+    ['click', 'mousedown', 'keydown'].forEach(function (e) { m.addEventListener(e, function (ev) { ev.stopPropagation(); }); });
+    var rm = document.getElementById('tcm-' + t.id), card = t.closest('.card'), hd = card && card.querySelector(':scope > .card-header');
+    if (rm) rm.parentNode.insertBefore(m, rm);
+    else if (hd && card.querySelectorAll('table').length === 1) {
+        hd.classList.add('tc-head'); var last = hd.lastElementChild;
+        if (last && (last.tagName === 'BUTTON' || last.querySelector('button'))) hd.insertBefore(m, last); else hd.appendChild(m);
+    } else { m.classList.add('tc-bar'); var w = t.closest('.dataTables_wrapper') || t.closest('.tc-x') || t; w.parentNode.insertBefore(m, w); }
+}
+// the CSV's columns: the visible ones in their order on the page, '#' left out
+function tcCsvIdx(t, n) {
+    var st = t && t._tcs, all = [];
+    if (st && !Array.isArray(st.rest)) st = null;   // not a table this code set up
+    if (!st) { for (var i = 0; i < n; i++) all.push(i); return all; }
+    return tcOrder(st).filter(function (i) { return !(st.hash && i === 0) && !st.hidden[i]; });
+}
+function tcColsAll() { document.querySelectorAll('.tab-pane:not(#tab-topology) table.table').forEach(tcCols); }
 '''
 # lldp_reasons.txt: why a port names no LLDP neighbour, shown where a NIC would read "no switch seen"
 LLDP_WHY = {'fw_lldp_on': 'firmware LLDP agent holds the frames (fw_lldp_on)', 'tcpdump_absent': 'no tcpdump on host',
@@ -1021,6 +1100,18 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 .col-filter {{ margin-top: 3px; font-weight: normal; }}
 .col-filter select, .col-filter input {{ width: 100%; min-width: 56px; font-size: 0.75rem; padding: 1px 4px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #0f3460; border-radius: 3px; }}
 .dt-foot {{ display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 6px; }}
+/* column controls (2026-11-19): a column is as wide as its longest value or its header on one line; the filter box
+   under a header takes no width of its own */
+table.tc-cols {{ width: auto !important; }}
+table.tc-cols th, table.tc-cols td {{ white-space: nowrap; }}
+table.tc-cols td.dt-row-num {{ width: auto; }}
+table.tc-cols .col-filter {{ width: 0; min-width: 100%; }}
+table.tc-cols .col-filter select, table.tc-cols .col-filter input {{ min-width: 0; }}
+.tc-colmenu {{ display: inline-block; margin-left: auto; }}
+.tc-colmenu + .tc-rows {{ margin-left: 0; }}
+.tc-colmenu .dropdown-toggle {{ padding: 0 6px; font-size: 0.8rem; }}
+.tc-collist {{ background: #16213e; border: 1px solid #0f3460; max-height: 60vh; overflow-y: auto; padding: 4px 10px; font-size: 0.8rem; font-weight: normal; }}
+.tc-collist label {{ display: block; white-space: nowrap; color: #e0e0e0; cursor: pointer; }}
 #lldpTable td {{ white-space: nowrap; }}
 </style>
 </head>
@@ -1141,7 +1232,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
                 <table class="table table-sm table-striped table-hover" id="lldpTable">
                 <thead><tr><th>#</th><th>Host</th><th>NIC</th><th>IP</th><th>Switch</th><th>Switch Port</th><th>Port Description</th><th>LLDP Sys</th></tr></thead>
                 <tbody>
-                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l.get('why', l['switch'])}</td><td>{l['port_id']}</td>" + ''.join(f'<td style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:320px;" title="{escape(str(v))}">{v}</td>' for v in (l['port_desc'], l['sys_desc'])) + "</tr>" for l in data['lldp_info'])}
+                {''.join(f"<tr><td></td><td>{l['host']}</td><td>{l['nic']}</td><td>{l['ip']}</td><td>{l.get('why', l['switch'])}</td><td>{l['port_id']}</td>" + ''.join(f'<td style="white-space:nowrap;" title="{escape(str(v))}">{v}</td>' for v in (l['port_desc'], l['sys_desc'])) + "</tr>" for l in data['lldp_info'])}
                 </tbody></table>
             </div></div>
         </div>
@@ -1549,7 +1640,7 @@ $(document).ready(function() {{
     // Row numbering via drawCallback — doesn't interfere with sorting
     var dtOpts = function(extra) {{
         return $.extend(true, {{
-            lengthMenu: dtMenu, pageLength: ROWS0,
+            lengthMenu: dtMenu, pageLength: ROWS0, autoWidth: false,   // no set widths: a column is as wide as its values
             dom: 'rt<"dt-foot"ip>',   // no search box (a filter per column) and no length menu here (the card header has it)
             initComplete: function() {{ tcDecorate(this.api()); }},
             columnDefs: [{{ targets: 0, orderable: false, searchable: false, className: 'dt-row-num' }}],
@@ -1594,6 +1685,7 @@ $(document).ready(function() {{
                 '</td><td>' + (t[9] > 0 ? '<span class="badge-down">' + t[9] + '</span>' : t[9]) + '</td><td>' + t[10] + '</td></tr>';
         }}).join('');
         document.getElementById('resultsPager').innerHTML = 'page ' + window.resultsPage + ' of ' + pages + ', ' + n + ' rows';
+        tcApply(document.getElementById('resultsTable'));   // the column controls' order and rules on the new rows
         document.getElementById('resultsTitle').innerHTML = 'Individual Test Results (' + n + ' runs, worst first)';
         [['all', 'resultsAll'], ['backends', 'resultsBackends'], ['clients', 'resultsClients']].forEach(function(b) {{
             var e = document.getElementById(b[1]); if (e && e.classList) e.classList.toggle('active', b[0] === resultsFilter);
@@ -1604,8 +1696,11 @@ $(document).ready(function() {{
     window.resultsSetPage = function(i) {{ window.resultsPage = i; resultsDraw(); }};
     window.resultsCsvText = function() {{
         var q = function(v) {{ return '"' + String(v === null ? '-' : v).replace(/"/g, '""') + '"'; }};
-        return ['Role,Src host,Src IP,Dst host,Dst IP,Phase,Gbps,Expected,% of expected,Retrans,GBytes'].concat(resultsRows().map(function(t) {{
-            return t.slice(0, 11).map(q).join(',');
+        // the visible columns in their order on the page (header column k + 1 holds field k)
+        var ks = tcCsvIdx(document.getElementById('resultsTable'), 12).filter(function(i) {{ return i > 0; }}).map(function(i) {{ return i - 1; }});
+        var names = ['Role', 'Src host', 'Src IP', 'Dst host', 'Dst IP', 'Phase', 'Gbps', 'Expected', '% of expected', 'Retrans', 'GBytes'];
+        return [ks.map(function(k) {{ return names[k]; }}).join(',')].concat(resultsRows().map(function(t) {{
+            return ks.map(function(k) {{ return q(t[k]); }}).join(',');
         }})).join('\\n');
     }};
     window.resultsCsvDownload = function() {{
@@ -1722,42 +1817,26 @@ $(document).ready(function() {{
             shown + '/' + total + ' shown';
     }}
 
-    // Generic CSV download for any DataTable
-    window.downloadTableCsv = function(tableId, filename) {{
-        var tbl = $('#' + tableId);
+    // Generic CSV for any table: the visible columns in their order on the page, the rows that pass the filters
+    window.tableCsvText = function(tableId) {{
+        var tbl = $('#' + tableId), t = tbl[0], hr = t.tHead.rows[0];
+        var lab = function(c) {{ return $(c).clone().children('small, .col-filter, .tc-grip').remove().end().text().trim(); }};
+        var first = lab(tcCell(hr, 0)), idx = tcCsvIdx(t, hr.cells.length).filter(function(i) {{ return i > 0 || (first !== '#' && first !== ''); }});
+        var q = function(v) {{ return '"' + String(v).replace(/"/g, '""').trim() + '"'; }};
+        var rows = [idx.map(function(i) {{ return lab(tcCell(hr, i)); }}).join(',')];
         if (!$.fn.DataTable.isDataTable(tbl)) {{
             // Plain table (no DataTable) — scrape directly
-            var headers = [];
-            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small, .col-filter').remove().end().text().trim(); headers.push(t); }});
-            var skipHash = (headers[0] === '#' || headers[0] === '');
-            if (skipHash) headers = headers.slice(1);
-            var rows = [headers.join(',')];
-            tbl.find('tbody tr').each(function() {{
-                var clean = [];
-                $(this).find('td').each(function(i) {{
-                    if (skipHash && i === 0) return;
-                    clean.push('"' + $(this).text().replace(/"/g, '""').trim() + '"');
-                }});
-                rows.push(clean.join(','));
-            }});
+            [].forEach.call(t.tBodies[0].rows, function(r) {{ rows.push(idx.map(function(i) {{ return q($(tcCell(r, i)).text()); }}).join(',')); }});
         }} else {{
-            var dt = tbl.DataTable();
-            var headers = [];
-            tbl.find('thead th').each(function() {{ var t = $(this).clone().children('small, .col-filter').remove().end().text().trim(); headers.push(t); }});
-            var skipHash = (headers[0] === '#' || headers[0] === '');
-            if (skipHash) headers = headers.slice(1);
-            var rows = [headers.join(',')];
-            dt.rows({{ search: 'applied' }}).every(function() {{
+            tbl.DataTable().rows({{ search: 'applied' }}).every(function() {{
                 var d = this.data();
-                var clean = [];
-                for (var i = (skipHash ? 1 : 0); i < d.length; i++) {{
-                    var txt = $('<span>').html(d[i]).text();
-                    clean.push('"' + txt.replace(/"/g, '""').trim() + '"');
-                }}
-                rows.push(clean.join(','));
+                rows.push(idx.map(function(i) {{ return q($('<span>').html(d[i]).text()); }}).join(','));
             }});
         }}
-        var blob = new Blob([rows.join('\\n')], {{ type: 'text/csv' }});
+        return rows.join('\\n');
+    }};
+    window.downloadTableCsv = function(tableId, filename) {{
+        var blob = new Blob([window.tableCsvText(tableId)], {{ type: 'text/csv' }});
         var a = document.createElement('a');
         a.href = URL.createObjectURL(blob);
         a.download = filename;
@@ -2509,6 +2588,7 @@ $(document).ready(function() {{
 
     tcAll(dtOpts);   // the plain tables of more than 10 rows (after every table above is drawn)
     tcWide();        // the full-width button on each card that shares its row
+    tcColsAll();     // the column controls on every table of more than 5 columns
 
     // last in this block: the map's tab is open at load, and its first draw calls the window.topo* functions above
     if (document.getElementById('tab-topology').classList.contains('active')) topoShown();
