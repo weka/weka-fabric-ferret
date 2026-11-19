@@ -6,7 +6,7 @@
 # interface (class "scroll", fitTabs) was agreed with the coder. Since issue 13 (the operator 11-19) a box that holds a
 # table grows to the table's rows (10 a page at first) and the page scrolls; a box with only a list still scrolls inside
 # tier: fast
-# checks: 9
+# checks: 10
 # secs: 30
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 mkdir -p $W/gcsrc && cp -R $S/fixtures/golden-C $W/gcsrc/dp_validation_goldenC && tar -czf $W/gc.tgz -C $W/gcsrc dp_validation_goldenC
@@ -66,5 +66,10 @@ if [[ -x $CHROME ]]; then
         "(( \$(kv '$tu' big) >= 5 )) && [ \$(kv '$tu' bigbad) = 0 ] && (( \$(kv '$tu' small) >= 1 )) && [ \$(kv '$tu' smallbad) = 0 ] && [ \$(kv '$tu' search) = 0 ] && [ \$(kv '$tu' menuhead) = \$(kv '$tu' menus) ] && [ \$(kv '$tu' inner) = 0 ]" "uw '$tu'"
     chk "table controls in Chrome: side-by-side cards share one height at load (14_where); its first big side-by-side table at 25 shows min(25, 15) = 15 rows and takes its own height, All shows 15, back at 10 it shows 10 and shares the row's height again; its first value-list filter keeps only rows with that value; golden-C's big tables (2 or more) pass too; control: without the dtOpts lines a search box is back and the big tables fail" \
         "(( \$(kv '$tu' eq) >= 1 )) && [ \$(kv '$tu' eqbad) = 0 ] && [ \"\$(kv '$tu' pick)\" = 15/15/15/1/10/0 ] && [[ \"\$(kv '$tu' filt)\" =~ ^([1-9][0-9]*)/([0-9]+)\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && (( \$(kv '$tg' big) >= 2 )) && [ \$(kv '$tg' bigbad) = 0 ] && [ \$(diff $W/uw.html $W/uwx.html | grep -cE '^< +(dom|initComplete):') = 2 ] && (( \$(kv '$tx' search) > 0 && \$(kv '$tx' bigbad) > 0 ))" "uw '$tu' | gc '$tg' | control '$tx'"
-else for c in "sticky headers" "sticky headers (DataTables)" "table controls" "table controls (sizes)"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
+    # full-width button (issue 13): one in the header of each card that shares its row; a click widens the column to
+    # the row's width, a second puts its class back. Control: without the tcWide() call (1 line out) there is none
+    grep -v '^ *tcWide(); ' $W/uw.html > $W/uwy.html; ty=$(probe $W/uwy.html table_probe.js)
+    chk "full-width button in Chrome (14_where): one per card that shares its row (buttons = those cards, 2 or more); the first widens its column from under 100% to 100% of the row and a second click restores its class; control: without the tcWide() call (1 line out) 0 buttons" \
+        "[[ \"\$(kv '$tu' wide)\" =~ ^([0-9]+)/([0-9]+)\$ ]] && [ \${BASH_REMATCH[1]} = \${BASH_REMATCH[2]} ] && (( \${BASH_REMATCH[1]} >= 2 )) && [[ \"\$(kv '$tu' widet)\" =~ ^([0-9]+)/100/1\$ ]] && (( \${BASH_REMATCH[1]} < 100 )) && [ \$(diff $W/uw.html $W/uwy.html | grep -c '^< *tcWide(); ') = 1 ] && [[ \"\$(kv '$ty' wide)\" =~ ^0/[1-9] ]]" "uw '$tu' | control '$ty'"
+else for c in "sticky headers" "sticky headers (DataTables)" "table controls" "table controls (sizes)" "full-width button"; do bad "$c in Chrome" "Chrome not found at $CHROME: untested"; done; fi
 finish

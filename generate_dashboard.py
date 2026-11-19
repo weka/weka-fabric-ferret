@@ -102,6 +102,23 @@ function tcDecorate(api) {
         tcFilter(th, vals, function (v, exact) { col.search(exact ? (v ? '^\\s*' + tcRe(v) + '\\s*$' : '') : v, exact, !exact).draw(); });
     });
 }
+// a card that shares its row (a column narrower than col-12) gets a button in its header that widens it to the page's
+// width and back; Plotly charts redraw to the new width
+function tcWide() {
+    document.querySelectorAll('.tab-pane .row > [class*="col"]:not(.col-12) > .card > .card-header').forEach(function (hd) {
+        var col = hd.parentElement.parentElement, b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn btn-sm btn-outline-info tc-wide'; b.title = 'Fill the page width';
+        b.innerHTML = '&#x2194;'; col.setAttribute('data-tc-col', col.className);
+        b.addEventListener('click', function (ev) {
+            ev.stopPropagation();
+            var wide = col.classList.contains('tc-wide-on');
+            col.className = wide ? col.getAttribute('data-tc-col') + (col.classList.contains('tc-own') ? ' tc-own' : '') : 'col-12 tc-wide-on' + (col.classList.contains('tc-own') ? ' tc-own' : '');
+            b.title = wide ? 'Fill the page width' : 'Back to its own width';
+            window.dispatchEvent(new Event('resize'));
+        });
+        hd.classList.add('tc-head'); hd.appendChild(b);
+    });
+}
 // a plain table in a tab with more than 10 rows (no row or column spans) becomes a DataTable kept in its own order
 function tcAll(dtOpts) {
     document.querySelectorAll('.tab-pane:not(#tab-topology) table.table').forEach(function (t) {
@@ -979,6 +996,7 @@ td.dt-row-num {{ color: #556; font-size: 0.8em; text-align: right; width: 30px; 
 .row > .tc-own > .card {{ height: auto !important; }}
 .tc-head {{ display: flex !important; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; }}
 .tc-rows {{ display: inline-flex; align-items: center; gap: 4px; font-size: 0.8rem; color: #8899aa; margin-left: auto; }}
+.tc-wide {{ padding: 0 6px; line-height: 1.3; }}
 .tc-bar {{ display: flex; justify-content: flex-end; margin: 4px 0; }}
 .tc-rows select {{ width: auto; padding: 1px 24px 1px 6px; font-size: 0.8rem; background-color: #1a1a2e; color: #e0e0e0; border-color: #0f3460; }}
 .col-filter {{ margin-top: 3px; font-weight: normal; }}
@@ -2467,6 +2485,7 @@ $(document).ready(function() {{
     }};
 
     tcAll(dtOpts);   // the plain tables of more than 10 rows (after every table above is drawn)
+    tcWide();        // the full-width button on each card that shares its row
 
     // last in this block: the map's tab is open at load, and its first draw calls the window.topo* functions above
     if (document.getElementById('tab-topology').classList.contains('active')) topoShown();

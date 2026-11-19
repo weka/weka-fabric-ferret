@@ -10,6 +10,7 @@
 //   eq / eqbad       rows of side-by-side cards at load / those whose cards differ in height
 //   pick=<rows at 25>/<rows at All>/<total>/<own at 25>/<rows back at 10>/<own at 10>  the first big DataTable in a
 //                    side-by-side row, driven through its menu (own = its column took its own height)
+//   wide=<buttons>/<cards sharing a row>  widet=<width % of the row before>/<after a click>/<class back after a second click>
 //   filt=<shown>/<matching>  the first value-list filter on that table set to its first value: rows shown, and rows
 //                    whose cell reads that value (equal = the filter works)
 window.addEventListener('load', function () { setTimeout(probe, 1500); });
@@ -61,6 +62,16 @@ function probe() {
             r.filt = rows.length + '/' + m;
             f.value = ''; f.dispatchEvent(new Event('change')); set('10');
         }
+    }
+    // the full-width button: one per card that shares its row; the first one widens its column to the row and back
+    var hds = document.querySelectorAll('.tab-pane .row > [class*="col"]:not(.col-12) > .card > .card-header');
+    r.wide = document.querySelectorAll('.tc-wide').length + '/' + hds.length; r.widet = '-';
+    var wb = document.querySelector('.tc-wide');
+    if (wb) {
+        var wc = wb.closest('.card').parentElement, cls = wc.className; show(wc.closest('.tab-pane'));
+        var rw = wc.parentElement.getBoundingClientRect().width, w0 = wc.getBoundingClientRect().width;
+        wb.click(); var w1 = wc.getBoundingClientRect().width; wb.click();
+        r.widet = Math.round(100 * w0 / rw) + '/' + Math.round(100 * w1 / rw) + '/' + (wc.className === cls ? 1 : 0);
     }
     document.body.setAttribute('data-probe', Object.keys(r).map(function (k) { return k + '=' + r[k]; }).join(' '));
 }
