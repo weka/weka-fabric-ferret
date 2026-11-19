@@ -76,12 +76,12 @@ Clients (optional): tested against every backend rail, both ways
 Optional (default)
   FF_DURATION      iperf3 seconds per run (120; 1 with FF_SKIP_IPERF=1; $1 also sets it)
   FF_ITER          passes of the full test set (every host and client NIC, every phase), to flush out
-                   noise and outliers; each pass gets new partners, round robin: no pair repeats, every
-                   host pair is tested after n-1 passes (n if n is odd); the next n-1 swap client
-                   and server, so every direction on every NIC pair runs after 2(n-1). With an odd
-                   host count the left-over host runs last in each pass, alone, with a host the pass
-                   already tested, so every pass tests every host.
-                   all = 2(n-1) (3)
+                   noise and outliers. The hosts of a rail group form a ring: in each pass every host
+                   sends to one host and receives from another on each rail, odd or even host counts
+                   alike; each pass steps the ring's stride, so no directed pair repeats, every host
+                   pair is tested after n/2 passes and every direction on every NIC pair after n-1.
+                   all = n-1 (3)
+  FF_SHUFFLE=0     keep the hosts in the order given for the ring (default: shuffled once per run)
   FF_STREAMS       iperf3 parallel streams, >=2 (16)
   FF_TOS           IP TOS byte for the test traffic, 0-255 (iperf3 -S), e.g. 106 = DSCP 26
                    + ECT(0); TCP keeps the DSCP, the kernel sets the ECN bits (unset: 0)
@@ -342,7 +342,7 @@ expand_targets() {
 # Every FF_* setting each tool reads (shared here so each can name the other's). Any other FF_* in the environment
 # is a typo that would be silently ignored (a dropped letter, say), so fabric_ferret.sh stops the run on one
 # (check_settings); both tools stop on one in a -t file's settings lines. A regress test keeps FF_KNOWN complete.
-FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_CONFIRM FF_UDP_CONFIRM_PCT FF_UDP_DURATION FF_PW_PROMPT"
+FF_KNOWN="FF_BUSY_CHECK FF_BUSY_OK FF_CLIENT_GBPS FF_CLIENT_NETS FF_CLIENT_NICS FF_CLIENT_RATIO FF_CLIENT_SPINE_GBPS FF_CLIENT_SPINE_LINKS FF_CLIENTS FF_CROSS_MAX FF_CROSS_RAIL FF_DURATION FF_EXPECT_CLIENTS FF_EXPECT_HOSTS FF_FERRET FF_HOSTS FF_IGNORE_LOCK FF_ITER FF_LABEL FF_LINE_GBPS FF_LLDP FF_LOCK_FILE FF_MAX_TARGETS FF_MESH FF_NICS FF_OK_PCT FF_OUT_DIR FF_PORT FF_RAILS FF_RDMA FF_RETR_PCT FF_RUNLOG FF_SKIP_IPERF FF_SLOW_PCT FF_SPINE_GBPS FF_SPINE_LINKS FF_SPINES FF_SSH_PARALLEL FF_SSH_RETRY_PARALLEL FF_SHUFFLE FF_SSH_USER FF_STREAMS FF_SYSFS FF_PROCFS FF_PROCNET FF_VIEWER FF_SYSINFO_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_TEMPS FF_THERMALS_ONLY FF_IPMI FF_IPMI_TIMEOUT FF_TOS FF_UDP FF_UDP_CONFIRM FF_UDP_CONFIRM_PCT FF_UDP_DURATION FF_PW_PROMPT"
 TC_KNOWN="FF_HOSTS FF_SSH_USER FF_SSH_PARALLEL FF_MAX_TARGETS FF_IPMI FF_IPMI_TIMEOUT FF_TEMP_MARGIN FF_TEMP_RISE FF_LABEL FF_OUT_DIR FF_SYSFS FF_PROCFS FF_FERRET FF_VIEWER FF_PW_PROMPT"
 
 # load_settings_lines file: a -t file's "FF_<setting>=value" lines (whole line, value verbatim), run once, first, by
@@ -2474,9 +2474,9 @@ rail_has() { case ${RSTATE[$1,$2]} in "no NIC "*|"no IPv4 on "*|"no address in "
 # rail_groups: the eligible hosts (ORDER) grouped by the rails they hold (HR[k], rail indices), in ORDER's
 # order. A rail set held by one host joins the largest group whose rails include it (its pairs plan only the
 # rails it holds: JOINED notes "host: rail B not addressed, tested on A only"); a lone host no group contains
-# has no partner. Per group g: GKEYS[g] its rail letters, GN[g] hosts, GROT[g] its round-robin circle (a bye
-# "-" when odd, none for a lone host), GRAILS[g] rail indices, GROUNDS[g] rounds to meet every pair,
-# GPER[g] pairs per iteration, GUPAIRS[g] rail pairs for phase 2 ("0 1;0 2;1 2"), GNUP[g] their count
+# has no partner. Per group g: GKEYS[g] its rail letters, GN[g] hosts, GROT[g] its ring order, GRAILS[g] rail
+# indices, GROUNDS[g] iterations to run every directed pair, GMEET[g] to meet every host pair, GPER[g] host pairs
+# per iteration, GUPAIRS[g] rail pairs for phase 2 ("0 1;0 2;1 2"), GNUP[g] their count
 # (1 with no cross phase), GPPP[g] paths per pair per iteration (a pair with a joined host has fewer).
 rail_groups() {
     local k r key g h best
@@ -2503,14 +2503,19 @@ rail_groups() {
         JOINED+="${JOINED:+; }${T_HOST[$k]}: rail $lack not addressed, tested on $held only"
         rot[best]+=" $k"; n[best]=$(( n[best] + 1 )); n[g]=0
     done
-    GKEYS=(); GN=(); GROT=(); GRAILS=(); GROUNDS=(); GPER=(); GUPAIRS=(); GNUP=(); GPPP=(); GDPER=()
+    GKEYS=(); GN=(); GROT=(); GRAILS=(); GROUNDS=(); GPER=(); GMEET=(); GUPAIRS=(); GNUP=(); GPPP=(); GDPER=()
     for (( h = 0; h < ${#keys[@]}; h++ )); do
         (( n[h] > 0 )) || continue
         g=${#GKEYS[@]}; GKEYS+=("${keys[h]}"); GN+=("${n[h]}"); GROT+=("${rot[h]}"); GRAILS+=("${rails[h]}")
-        local nn=${GN[g]} nr=0 up="" ua ub m
-        (( nn > 1 && nn % 2 )) && GROT[g]+=" -"
-        m=$(( nn > 1 ? nn + nn % 2 : 1 ))
-        GROUNDS[g]=$(( m > 1 ? m - 1 : 0 )); GPER[g]=$(( nn / 2 ))
+        local nn=${GN[g]} nr=0 up="" ua ub
+        if (( nn > 2 )) && [[ $FF_SHUFFLE != 0 ]]; then   # the ring's order, shuffled once per run (Fisher-Yates)
+            local -a sh=(${GROT[g]}); local si sj st
+            for (( si = ${#sh[@]} - 1; si > 0; si-- )); do sj=$(( RANDOM % (si + 1) )); st=${sh[si]}; sh[si]=${sh[sj]}; sh[sj]=$st; done
+            GROT[g]=${sh[*]}
+        fi
+        # a ring of nn hosts: iteration t runs host i -> host i+k (k = 1 + t mod (nn-1)), nn links; every directed host
+        # pair after nn-1 iterations (GROUNDS), every host pair after nn/2 (GMEET)
+        GROUNDS[g]=$(( nn > 1 ? nn - 1 : 0 )); GPER[g]=$(( nn > 2 ? nn : nn / 2 )); GMEET[g]=$(( nn / 2 ))
         for r in ${GRAILS[g]}; do nr=$(( nr + 1 )); done
         if [[ $CROSS == on ]] && (( nr > 1 )); then
             for ua in ${GRAILS[g]}; do for ub in ${GRAILS[g]}; do (( ub > ua )) && up+="${up:+;}$ua $ub"; done; done
@@ -2539,16 +2544,16 @@ pair_rails() {
     for r in ${HR[$1]}; do [[ " ${HR[$2]} " == *" $r "* ]] && { PRL+="${PRL:+ }$r"; PRN=$(( PRN + 1 )); }; done
 }
 
-# round_pairs t: iteration t (from 0) of every rail group's circle method over GROT[g] (even length, "-" =
-# bye). Slot 0 stays put and the rest rotate one place per round, so no pair repeats until every pair has
-# met (GROUNDS[g] rounds); the next cycle repeats the pairings with client and server swapped, and each
-# further pair of cycles takes the group's next rail pair for phase 2. Sets, per pair p: PC/PS (client/
-# server), PI (pair slot), PR (the round), PG (group), PRAILS (the rails both hosts hold), PXA/PXB (phase 2
-# rail pair when both hold it, else empty), PPATHS (its paths this iteration); SITOUT the hosts (one per odd
-# group) left without a partner, SITG their groups (odd_pass runs them last); GXA/GXB per group for the log.
+# round_pairs t: iteration t (from 0) of every rail group's ring over GROT[g] (its hosts in ring order, shuffled
+# once per run unless FF_SHUFFLE=0): link i runs host i -> host i+k, k = 1 + t mod (m-1), so every host sends one flow
+# and receives one on each rail, odd or even host counts alike, and every directed host pair runs once in m-1
+# iterations (GROUNDS[g]); each further cycle takes the group's next rail pair for phase 2. Sets, per link p: PC/PS
+# (sender on even rails / receiver), PI (1: phase 2's orientation), PR (the stride index), PG (group), PRAILS (the
+# rails both hosts hold), PXA/PXB (phase 2 rail pair when both hold it, else empty), PPATHS (its paths this
+# iteration); GXA/GXB per group for the log.
 round_pairs() {
     local t=$1 g m i a b rr cyc
-    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=(); GXA=(); GXB=(); SITOUT=""; SITG=""; XA=; XB=
+    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=(); GXA=(); GXB=(); XA=; XB=
     for (( g = 0; g < ${#GKEYS[@]}; g++ )); do
         local -a rot=(${GROT[g]}) up=()
         m=${#rot[@]}; (( m > 1 )) || continue
@@ -2556,24 +2561,19 @@ round_pairs() {
         local xa="" xb=""
         if [[ -n ${GUPAIRS[g]} ]]; then
             IFS=';' read -r -a up <<<"${GUPAIRS[g]}"
-            read -r xa xb <<<"${up[$(( cyc / 2 % ${#up[@]} ))]}"
+            read -r xa xb <<<"${up[$(( cyc % ${#up[@]} ))]}"
             [[ -n $XA ]] || { XA=$xa; XB=$xb; }
         fi
         GXA[g]=$xa; GXB[g]=$xb
-        local -a arr=("${rot[0]}")
-        for (( i = 0; i < m - 1; i++ )); do arr+=("${rot[1 + (i + rr) % (m - 1)]}"); done
-        for (( i = 0; i < m / 2; i++ )); do
-            a=${arr[i]}; b=${arr[m - 1 - i]}
-            (( cyc % 2 )) && { local tmp=$a; a=$b; b=$tmp; }
-            if [[ $a == - ]]; then SITOUT+=" $b"; SITG+=" $g"
-            elif [[ $b == - ]]; then SITOUT+=" $a"; SITG+=" $g"
-            else
-                pair_rails $a $b
-                local pxa=$xa pxb=$xb
-                [[ -n $xa && " $PRL " == *" $xa "* && " $PRL " == *" $xb "* ]] || { pxa=""; pxb=""; }
-                PC+=("$a"); PS+=("$b"); PI+=("$i"); PR+=("$rr"); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb"); PXG+=(""); PSHARE+=(1)
-                local np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np")
-            fi
+        # the ring: host i -> host i+k, k = 1 + t mod (m-1); PI 1 fixes phase 2's orientation (X1 c:a->s:b, X2 s:b->c:a),
+        # so with the same-rail rule (even rail c->s, odd rail s->c) every NIC sends one flow and receives one
+        for (( i = 0; i < m; i++ )); do
+            a=${rot[i]}; b=${rot[(i + 1 + rr) % m]}
+            pair_rails $a $b
+            local pxa=$xa pxb=$xb
+            [[ -n $xa && " $PRL " == *" $xa "* && " $PRL " == *" $xb "* ]] || { pxa=""; pxb=""; }
+            PC+=("$a"); PS+=("$b"); PI+=(1); PR+=("$rr"); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb"); PXG+=(""); PSHARE+=(1)
+            local np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np")
         done
     done
     # cross-group pairs (phase 3): host j of the larger group with host (j + t) mod |S| of the smaller; a smaller-group
@@ -2594,69 +2594,6 @@ round_pairs() {
     done
 }
 
-# odd_pass: an odd group's left-over host (SITOUT and SITG, from round_pairs) runs last in the iteration, after its
-# phases, alone on the fabric, with the group's first host (already tested in this iteration): the iteration's phases
-# again for that pair only (1; 2 when cross-rail is on; U1 and U2 with FF_UDP; path checks only with FF_SKIP_IPERF).
-# Its marker lines carry "wave:odd", so no total adds its runs to the main ones; phase_times.txt names its phases
-# 1-odd, U1-odd and so on. Its UDP runs count in the per-host UDP table, with no counter breakdown or paced confirm
-# of their own. The iteration's own pairs are set again at the end.
-odd_pass() {
-    local -a sks=($SITOUT) sgs=($SITG)
-    (( ${#sks[@]} )) || return 0
-    local i ck sk g a m p r u desc="" bad nchk errs np pxa pxb
-    PC=(); PS=(); PI=(); PR=(); PG=(); PRAILS=(); PPATHS=(); PXA=(); PXB=(); PXG=(); PSHARE=()
-    for (( i = 0; i < ${#sks[@]}; i++ )); do
-        sk=${sks[i]}; g=${sgs[i]}; a=""
-        for m in ${GROT[g]}; do [[ $m != - && $m != "$sk" ]] && { a=$m; break; }; done
-        [[ -n $a ]] || continue
-        pair_rails $a $sk
-        pxa=${GXA[g]}; pxb=${GXB[g]}
-        [[ -n $pxa && " $PRL " == *" $pxa "* && " $PRL " == *" $pxb "* ]] || { pxa=""; pxb=""; }
-        PC+=("$a"); PS+=("$sk"); PI+=(0); PR+=(0); PG+=("$g"); PRAILS+=("$PRL"); PXA+=("$pxa"); PXB+=("$pxb"); PXG+=(""); PSHARE+=(1)
-        np=$PRN; [[ -n $pxa ]] && np=$(( np + 2 )); PPATHS+=("$np"); PATHS_PLANNED=$(( PATHS_PLANNED + np ))
-        desc+="${desc:+; }${T_HOST[$sk]} with ${T_HOST[$a]}"
-    done
-    if (( ${#PC[@]} )); then
-        log "Odd host count: the left-over host runs last, alone, with a host this iteration already tested: $desc"
-        for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
-        PATHS=$WORK/paths.$ITER.odd; mkdir -p "$PATHS"
-        for (( p = 0; p < ${#PC[@]}; p++ )); do
-            ck=${PC[p]}; sk=${PS[p]}
-            p1_paths $p check
-            [[ -n ${PXA[p]} ]] && { xpaths $p; check_path p2a_$p "${X1[@]}"; check_path p2b_$p "${X2[@]}"; DIRECTED["${X1[*]}"]=1; DIRECTED["${X2[*]}"]=1; }
-            for r in ${PRAILS[p]}; do if (( r % 2 )); then DIRECTED["$sk $r $ck $r"]=1; else DIRECTED["$ck $r $sk $r"]=1; fi; done
-        done
-        wait
-        bad=$(grep -Lx OK "$PATHS"/* | wc -l | tr -d ' '); nchk=$(ls "$PATHS" | wc -l | tr -d ' ')
-        log "Path checks, odd host (egress route, ping, MTU no-fragment): $(( nchk - bad )) OK, $bad excluded"
-        if (( FF_SKIP_IPERF )); then
-            for (( p = 0; p < ${#PC[@]}; p++ )); do
-                PHASE=1; p1_paths $p run check
-                [[ -n ${PXA[p]} ]] && { PHASE=2; xpaths $p; run_path p2a_$p "${X1[@]}" check; run_path p2b_$p "${X2[@]}" check; }
-            done
-        else
-            for u in 1 2 U1 U2; do
-                [[ $u == U* && $FF_UDP != 1 ]] && continue
-                [[ $u == *2 ]] && { [[ $CROSS == on && -n ${PXA[*]// /} ]] || continue; }
-                PHASE=$u; PHASE_OUT=$WORK/phase.$ITER.$u.odd; : > "$PHASE_OUT"
-                phase_start
-                log "Phase $u, odd host: $( [[ $u == U* ]] && echo "UDP ")$( [[ $u == *1 ]] && same_desc || cross_desc )$( [[ $u == U* ]] && echo " (-b 0)"), start $PT0"
-                local res=$RESULTS mode=; [[ $u == U* ]] && { res=$UDP_RESULTS; mode=udp; }
-                echo "### iteration:${ITER} phase:${u} wave:odd" >> "$res"
-                for (( p = 0; p < ${#PC[@]}; p++ )); do
-                    if [[ $u == *1 ]]; then p1_paths $p run $mode
-                    elif [[ -n ${PXA[p]} ]]; then xpaths $p; run_path p2a_$p "${X1[@]}" $mode; run_path p2b_$p "${X2[@]}" $mode; fi
-                done
-                wait
-                phase_end "$u-odd"
-                column -t < "$PHASE_OUT" | tee -a "$res"
-                errs=$(grep -c ',ERROR' "$PHASE_OUT")
-                (( errs > 0 )) && { log "WARNING: $errs runs in phase $u, odd host, returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
-            done
-        fi
-    fi
-    round_pairs $(( ITER - 1 )); PATHS=$WORK/paths.$ITER
-}
 
 # xg_paths p ra rb [share]: cross-group pair p's two runs over rails ra (its larger-group host) and rb (its
 # smaller-group host), one each way, in X1/X2, and their expected rate in XEXP: the slower of the sender's rail and
@@ -4122,7 +4059,7 @@ main() {
     (( FF_THERMALS_ONLY )) && thermals_only
     [[ -n $dur ]] && FF_DURATION=$dur   # the argument beats a -t file's FF_DURATION line (exported before main)
     local rdma_set=${FF_RDMA-}   # an explicit FF_RDMA=0 with FF_TOS is a contradiction; unset is not
-    : "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}" "${FF_RDMA:=0}"
+    : "${FF_SHUFFLE:=1}" "${FF_MESH:=1}" "${FF_SKIP_IPERF:=0}" "${FF_LLDP:=0}" "${FF_RDMA:=0}"
     [[ -n $FF_DURATION ]] || { [[ $FF_SKIP_IPERF == 1 ]] && FF_DURATION=1 || FF_DURATION=120; }   # no load: a 1 s counter window
     # -t FILE (the format thermals_capture.sh reads): backend and client rows, each with its own credentials (TL login,
     # TPW password: memory only), keyed by target; credential rows (* and globs) as hostfile.sh resolves them
@@ -4158,6 +4095,7 @@ main() {
     [[ $FF_UDP == 1 ]] || FF_UDP_CONFIRM=0   # nothing to confirm without the UDP pass
     UDP_CONFIRM_SECS=5   # a paced confirm run (udp_confirm)
     [[ $FF_MESH == 0 || $FF_MESH == 1 ]] || die "FF_MESH must be 0 or 1, got '$FF_MESH'"
+    [[ $FF_SHUFFLE == 0 || $FF_SHUFFLE == 1 ]] || die "FF_SHUFFLE must be 0 or 1, got '$FF_SHUFFLE'"
     [[ $FF_SKIP_IPERF == 0 || $FF_SKIP_IPERF == 1 ]] || die "FF_SKIP_IPERF must be 0 or 1, got '$FF_SKIP_IPERF'"
     [[ $FF_LLDP == 0 || $FF_LLDP == 1 ]] || die "FF_LLDP must be 0 or 1, got '$FF_LLDP'"
     [[ $FF_RDMA == 0 || $FF_RDMA == 1 ]] || die "FF_RDMA must be 0 or 1, got '$FF_RDMA'"
@@ -4667,14 +4605,14 @@ main() {
     # Rail groups: a host is paired only with hosts that hold the same rails. A rail a host lacks or does not
     # address is a host property (a 10-27 field run: 24 storage hosts on A,B and 215 GPU hosts on C drew each
     # other in 24 of 119 pairs, every path in those pairs skipped, phase 2 ran nothing); a DOWN rail keeps its
-    # host in the group and its paths log a skip. Per group g: GROT[g] its round-robin circle ("-" = bye),
+    # host in the group and its paths log a skip. Per group g: GROT[g] its ring order (shuffled once per run),
     # GRAILS[g] its rail indices, GUPAIRS[g] its rail pairs for phase 2 ("0 1;0 2;..."), GROUNDS/GPER/GPPP/GNUP.
     rail_groups
     local g rounds=0 per=0 total=0 NUP=1 cyc=0 ng=${#GKEYS[@]}
     for (( g = 0; g < ng; g++ )); do
-        (( GROUNDS[g] > rounds )) && rounds=${GROUNDS[g]}
+        (( GMEET[g] > rounds )) && rounds=${GMEET[g]}
         (( GNUP[g] > NUP )) && NUP=${GNUP[g]}
-        (( 2 * GROUNDS[g] * GNUP[g] > cyc )) && cyc=$(( 2 * GROUNDS[g] * GNUP[g] ))
+        (( GROUNDS[g] * GNUP[g] > cyc )) && cyc=$(( GROUNDS[g] * GNUP[g] ))
         per=$(( per + GPER[g] )); total=$(( total + GN[g] * (GN[g] - 1) / 2 ))
     done
     (( rounds > 0 )) || rounds=1; (( cyc > 0 )) || cyc=1
@@ -4682,10 +4620,12 @@ main() {
     PAIRS_COVERED=0; PAIRS_TOTAL=$total; DIRECTED_TOTAL=0; local planned=0 gdesc="" lone="" t
     local -A DIRECTED=()
     for (( g = 0; g < ng; g++ )); do
-        local gused=$(( FF_ITER < GROUNDS[g] ? FF_ITER : GROUNDS[g] ))
-        PAIRS_COVERED=$(( PAIRS_COVERED + gused * GPER[g] ))
+        # host pairs the ring meets: stride k and n-k meet the same pairs; k = n/2 meets n/2 of them, any other k n
+        local gused=$(( FF_ITER < GROUNDS[g] ? FF_ITER : GROUNDS[g] )) gn=${GN[g]} kk dd; local -A dseen=()
+        for (( kk = 1; kk <= gused; kk++ )); do dd=$(( kk < gn - kk ? kk : gn - kk )); [[ -n ${dseen[$dd]} ]] && continue; dseen[$dd]=1
+            PAIRS_COVERED=$(( PAIRS_COVERED + (2 * dd == gn ? gn / 2 : gn) )); done
         if (( GN[g] == 1 )); then lone+=" ${T_HOST[${GROT[g]}]}"; gdesc+="; ${GKEYS[g]} 1 host, no partner"; continue; fi
-        gdesc+="; ${GKEYS[g]} ${GN[g]} hosts, ${GPER[g]} pair$( (( GPER[g] != 1 )) && echo s)/iteration$( (( GN[g] % 2 )) && echo ", 1 runs last with a host already tested")"
+        gdesc+="; ${GKEYS[g]} ${GN[g]} hosts, $( (( GN[g] == 2 )) && echo "both ways each iteration" || echo "${GN[g]} links/iteration")"
         # directed NIC paths of the group: per host pair, over the rails both hold (a joined host has fewer)
         local -a gm=(${GROT[g]}); local i j
         for (( i = 0; i < ${#gm[@]}; i++ )); do for (( j = i + 1; j < ${#gm[@]}; j++ )); do
@@ -4721,7 +4661,7 @@ main() {
     planned=${#pl[@]}
     [[ -n $xgdesc ]] && log "Cross-group: $xgdesc (phase 3: the groups share no rail, so the runs are routed; judged at the slower rail, shared NICs divided by their flows)"
     PATHS_PLANNED=0; DROP_READS_MIN=-1
-    log "Pairing: round-robin within $ng rail group$( (( ng > 1 )) && echo s): ${gdesc#; }; $FF_ITER iteration$( (( FF_ITER != 1 )) && echo s) cover$( (( FF_ITER == 1 )) && echo s) $PAIRS_COVERED of $PAIRS_TOTAL host pairs$( (( FF_ITER < rounds || FF_ITER < xgr )) && echo " (all pairs need FF_ITER=$(( rounds > xgr ? rounds : xgr )))")"
+    log "Pairing: a ring within each of $ng rail group$( (( ng > 1 )) && echo s): ${gdesc#; }; $FF_ITER iteration$( (( FF_ITER != 1 )) && echo s) cover$( (( FF_ITER == 1 )) && echo s) $PAIRS_COVERED of $PAIRS_TOTAL host pairs$( (( FF_ITER < rounds || FF_ITER < xgr )) && echo " (all pairs need FF_ITER=$(( rounds > xgr ? rounds : xgr )))")"
     if [[ -n $JOINED ]]; then
         local nj; nj=$(awk -F'; ' '{print NF}' <<<"$JOINED")
         log "$nj host$( (( nj > 1 )) && echo "s lack" || echo " lacks") a rail and pair$( (( nj == 1 )) && echo s) within the hosts holding the rails $( (( nj > 1 )) && echo they have || echo it has): $(awk -F'; ' '{for (i = 1; i <= NF && i <= 8; i++) printf "%s%s", (i > 1 ? "; " : ""), $i; if (NF > 8) printf "; and %d more", NF - 8}' <<<"$JOINED")"
@@ -4735,8 +4675,8 @@ main() {
         { [[ -n $JOINED ]] && awk -F'; ' '{for (i = 1; i <= NF; i++) { h = $i; sub(/:.*/, "", h); w = $i; sub(/^[^:]*: /, "", w); printf "%s\t%s\n", h, w }}' <<<"$JOINED"
           for sk in $lone; do printf '%s\tno partner sharing its rails\n' "$sk"; done; } > "$COLLECT_DIR/pairing.txt"
     fi
-    # a pair's directed NIC paths (8 with two rails): cycle 1 runs half, cycle 2 (same pairings, client and server
-    # swapped) the other half; with more rails, each further pair of cycles covers one more rail pair
+    # a host pair's directed NIC paths (8 with two rails): the ring runs them over its strides, each once per cycle of
+    # m-1 iterations; with more rails, each further cycle covers one more rail pair
     log "Directed NIC paths: $planned of $DIRECTED_TOTAL planned$( (( FF_ITER < cyc )) && echo " (every direction on every NIC pair needs FF_ITER=$cyc, or FF_ITER=all)")"
     (( FF_ITER > rounds && FF_ITER <= 2 * rounds )) && log "Iterations $(( rounds + 1 ))-$FF_ITER repeat the pairings with client and server swapped$( (( ng > 1 )) && echo " (largest group; a smaller group swaps sooner)")"
     (( NUP > 1 && FF_ITER > 2 * rounds )) && log "Iterations past $(( 2 * rounds )) repeat the pairings with the next rail pair for the cross-rail phase ($NUP rail pairs)"
@@ -4783,14 +4723,12 @@ main() {
     for (( ITER = 1; ITER <= FF_ITER; ITER++ )); do
         round_pairs $(( ITER - 1 ))   # every group's pairs for this iteration (swap cycle and rail pair per group)
         lock_all touch
-        local xdesc="" sits=""
+        local xdesc=""
         for (( p = 0; p < ${#PC[@]}; p++ )); do PATHS_PLANNED=$(( PATHS_PLANNED + PPATHS[p] )); done
         if (( NR > 2 )) && [[ $CROSS == on ]]; then
             for (( g = 0; g < ng; g++ )); do [[ -n ${GXA[g]} ]] && xdesc+="${xdesc:+, }${GKEYS[g]}: $(rail_letter ${GXA[g]})<->$(rail_letter ${GXB[g]})"; done
         fi
         log "============ Iteration $ITER of $FF_ITER (${#PC[@]} pairs${xdesc:+; cross-rail $xdesc}) ============"
-        for sk in $SITOUT; do sits+=" ${T_HOST[$sk]}"; done
-        [[ -n $sits ]] && log "Odd host count: runs last this iteration, after the phases below, with a host already tested:$sits"
         for (( p = 0; p < ${#PC[@]}; p++ )); do echo "$ITER ${T_HOST[${PC[p]}]} ${T_HOST[${PS[p]}]}"; done >> "$COLLECT_DIR/pairs.txt"
         PATHS=$WORK/paths.$ITER; mkdir -p "$PATHS"
         local ra rb
@@ -4830,7 +4768,6 @@ main() {
                 [[ -n ${PXG[p]} ]] && for ra in ${HR[${PC[p]}]}; do for rb in ${HR[${PS[p]}]}; do
                     PHASE=3; xg_paths $p $ra $rb; run_path p3a_${p}_$ra$rb "${X1[@]}" check; run_path p3b_${p}_$ra$rb "${X2[@]}" check; done; done
             done
-            odd_pass       # an odd group's left-over host: its path checks, last
             clients_iter   # client path checks, every iteration
             (( ITER < FF_ITER )) && { echo; continue; }
         fi
@@ -4876,7 +4813,6 @@ main() {
             done
         fi
         [[ $FF_UDP == 1 ]] && udp_phases
-        odd_pass   # an odd group's left-over host runs last, with a host already tested, inside the iteration's counter window
         collect_drops "$DROPS_POST"
         local nr; nr=$(wc -l < "$DROPS_POST" | tr -d ' ')   # "0 drops" only means something if NICs were read
         (( DROP_READS_MIN < 0 || nr < DROP_READS_MIN )) && DROP_READS_MIN=$nr
