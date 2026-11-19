@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/bash
 # unknown FF_* settings stop the run; the known list covers every FF_ the collector reads
 # tier: fast
-# checks: 20
+# checks: 22
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 
 out=$(FF_STREAM=4 FF_HOSTS=198.18.0.21 $B $C --list 2>&1); chk "typo FF_STREAM stops with a hint" "grep -q 'unknown setting FF_STREAM; did you mean FF_STREAMS?' <<<\"\$out\""
@@ -60,4 +60,13 @@ chk "viewer dies: line 3 on the terminal is the fallback line" "[ \"\$(sed -n 3p
 chk "viewer dies: the terminal minus the fallback line is run.log (every later line arrived)" "[ \$(wc -l < $W/fv.runlog) -gt 40 ] && cmp -s <(sed '3d' $W/fv.err | head -n \$(wc -l < $W/fv.runlog)) $W/fv.runlog" "$(diff <(sed '3d' $W/fv.err | head -n $(wc -l < $W/fv.runlog)) $W/fv.runlog | head -n 6)"
 chk "viewer dies: run.log is the plain run's, clock times, temp paths and line order aside" "cmp -s <(nrl $W/fv.runlog | sort) <(nrl $W/fp.runlog | sort)" "$(diff <(nrl $W/fv.runlog | sort) <(nrl $W/fp.runlog | sort) | head -n 6)"
 chk "control: the plain run's terminal has no fallback line, and the two run.logs differ before normalizing" "! grep -q 'the ferret viewer stopped' $W/fp.err && ! cmp -s $W/fv.runlog $W/fp.runlog" "$(grep -c 'viewer stopped' $W/fp.err)"
+# the ferret on by default (2026-11-19): FF_FERRET unset starts the viewer (here the dying stub, through the FF_VIEWER
+# test hook); FF_FERRET=0 does not; unset with no python3 on PATH is the plain run without a word (set to 1 it says so)
+env -u FF_FERRET FF_VIEWER=$S/fixtures/units/stub_viewer.sh FF_HOSTS=198.18.0.21,198.18.0.22 $B $C --list > $W/fd.out 2> $W/fd.err
+FF_FERRET=0 FF_VIEWER=$S/fixtures/units/stub_viewer.sh FF_HOSTS=198.18.0.21,198.18.0.22 $B $C --list > $W/f0v.out 2> $W/f0v.err
+chk "default on: FF_FERRET unset starts the viewer (the stub's fallback line); FF_FERRET=0 with the same viewer does not" \
+    "grep -q '# FF_FERRET: the ferret viewer stopped (rc 3)' $W/fd.err && ! grep -q 'viewer stopped' $W/f0v.err" "unset: $(grep -c 'viewer stopped' $W/fd.err) zero: $(grep -c 'viewer stopped' $W/f0v.err)"
+env -u FF_FERRET PATH=$W/nopy FF_HOSTS=198.18.0.21,198.18.0.22 $B $C --list > $W/fd.nopy.out 2> $W/fd.nopy.err; drc=$?
+chk "default on, no python3 on PATH: no line about it; stdout, stderr and rc the FF_FERRET=0 run's" \
+    "! grep -q 'FF_FERRET' $W/fd.nopy.err && cmp -s $W/fd.nopy.err $W/fer.0.err && cmp -s $W/fd.nopy.out $W/fer.0.out && [ $drc = \$(cat $W/fer.0.rc) ]" "rc $drc; $(diff $W/fd.nopy.err $W/fer.0.err | head -n 3)"
 finish

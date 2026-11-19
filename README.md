@@ -162,7 +162,7 @@ Clients get the same reports as backends: drop, host receive, priority/ECN and F
 |---|---|
 | `FF_LABEL` (first tested hostname) | name in the report and the bundle file name |
 | `FF_OUT_DIR` (.) | where the `.tgz` bundle and its `.html` dashboard go |
-| `FF_FERRET` (0) | `1` = on a terminal, a ferret roams over the log while the run goes (see below). Needs `python3` only when set |
+| `FF_FERRET` (1) | On a terminal, a ferret roams over the log while the run goes (see below); `0` = off. Without `python3` or `ferret_view.py`, the plain run |
 
 ## How a run works
 
@@ -176,7 +176,7 @@ A host's status is the worst of its rail columns, Cross and XGrp. `SLOW(cross)` 
 
 With clients set, each iteration ends with a client phase: C1 clients→backends and C2 backends→clients in waves, then (with `full`) F1 and F2 with every client at once.
 
-**The ferret (off by default):** `FF_FERRET=1` on a terminal draws a ferret roaming over the log while the run goes, in either tool (`ferret_view.py`, kept beside the tool; `python3`, no packages). Keys: `r` rolls it, `q` hides it; nothing else, the run is never touched. When the run ends the complete log is written plainly, so the scrollback reads as it would without the ferret. Without a terminal, or with `FF_FERRET` unset or `0`, the output is exactly the plain run's. `FF_FERRET=blocks` draws it in half-block characters instead, for a terminal font without braille; that cannot be detected, so it is never chosen by itself.
+**The ferret (on by default):** on a terminal, a ferret roams over the log while the run goes, in either tool (`ferret_view.py`, kept beside the tool; `python3`, no packages). Keys: `r` rolls it, `q` hides it; nothing else, the run is never touched. When the run ends the complete log is written plainly, so the scrollback reads as it would without the ferret. Without a terminal, or with `FF_FERRET=0`, the output is exactly the plain run's. With `FF_FERRET` unset, a missing `python3` or `ferret_view.py` (a script fed over `ssh ... bash -s`, for one) gives the plain run without a word; set to `1` or `blocks`, the missing part is said once. `FF_FERRET=blocks` draws it in half-block characters instead, for a terminal font without braille; that cannot be detected, so it is never chosen by itself.
 
 ## Results
 
@@ -251,7 +251,7 @@ FF_HOSTS=10.1.0.0/24 FF_CLIENTS=10.30.0.0/23 ./fabric_ferret.sh --thermals-only 
 - What runs on a host for the BMC reading: as root, `ipmitool sensor`. For any other login without a row password, the script first finds a passwordless escalator by running `<escalator> true` for `dzdo -n`, `pbrun`, `sesu`, `pmrun`, `doas -n`, `ksu -e` and `sudo -n`, in that order (each only if installed), each under a 5 s timeout, once per host per run; the first that works runs `ipmitool sensor`. If none works, the host's BMC reading is reported as no data with that reason; its hwmon readings still count. A login with a row password skips the probe and uses `sudo -S`.
 - On a `-t` host line with a non-root login and a password, ipmitool runs with `sudo -S` and that password. The password is sent over the ssh session's input stream and kept in an unexported shell variable on the host, never on a command line or in an environment.
 - `FF_IPMI=0` turns off in-band ipmitool only; `bmc` lines are always read.
-- `FF_FERRET=1` on a terminal draws the ferret over the log, as in fabric_ferret.sh (see The ferret above). This tool keeps no run log, so when the viewer dies the lines it had taken are not replayed; the files hold every reading.
+- On a terminal the ferret roams over the log by default (`FF_FERRET=0` turns it off), as in fabric_ferret.sh (see The ferret above). This tool keeps no run log, so when the viewer dies the lines it had taken are not replayed; the files hold every reading.
 
 ```text
 # type,host,login,pw

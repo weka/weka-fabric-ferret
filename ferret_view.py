@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ferret_view.py: a ferret roams over the log of fabric_ferret.sh or thermals_capture.sh, full-screen; at the end,
 or on error, every line goes plainly to stderr. Keys: r rolls it, q hides it. No terminal: plain copy.
-FF_FERRET=1 turns it on; FF_FERRET=blocks uses half blocks (a font without braille)."""
+On by default (FF_FERRET=0 in the tool turns it off); FF_FERRET=blocks uses half blocks (a font without braille)."""
 import math
 import os
 import random

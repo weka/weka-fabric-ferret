@@ -79,8 +79,9 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
   FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
-  FF_FERRET (0)    1 = on a terminal a ferret roams over the log (ferret_view.py beside it, python3; r rolls it,
-                   q hides it; blocks = half blocks for a font without braille). A dead viewer: said once, the
+  FF_FERRET (1)    on a terminal a ferret roams over the log (ferret_view.py beside it, python3; r rolls it,
+                   q hides it; blocks = half blocks for a font without braille); 0 = off. Unset: no terminal,
+                   python3 or ferret_view.py means the plain run, without a word. A dead viewer: said once, the
                    run goes on, its lines not replayed (the files hold the data)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
@@ -1321,8 +1322,8 @@ main() {
 }
 
 # run when executed or fed on stdin (ssh jump 'bash -s' < script: BASH_SOURCE is empty); not when sourced
-# FF_FERRET: on a terminal the log goes through ferret_view.py (beside this script) to stderr. Missing python3
-# or file: said once, then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
+# FF_FERRET (default on, 2026-11-19): on a terminal the log goes through ferret_view.py (beside this script) to
+# stderr. Missing python3 or file: said once when FF_FERRET was set (unset: no word), then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
 # line, the rest copied. FF_VIEWER (its command): a test hook.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
@@ -1347,11 +1348,11 @@ if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
     [[ ${FF_PW_PROMPT:-0} == [01] ]] || die "FF_PW_PROMPT must be 0 or 1, got '$FF_PW_PROMPT'"
     [[ $FF_PW_PROMPT == 1 ]] && pre_all=1
     pw_prompts "$pre_t" "$pre_all"
-    view=()
-    if [[ -n $FF_FERRET && $FF_FERRET != 0 ]]; then
+    view=(); local_fer=${FF_FERRET-}; : "${FF_FERRET:=1}"
+    if [[ $FF_FERRET != 0 ]]; then
         if [[ -n $FF_VIEWER ]]; then view=("$FF_VIEWER")
-        elif ! py=$(command -v python3); then echo "# FF_FERRET: python3 not found, running without the ferret" >&2
-        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" >&2
+        elif ! py=$(command -v python3); then [[ -n $local_fer ]] && echo "# FF_FERRET: python3 not found, running without the ferret" >&2
+        elif [[ ! -f $(dirname "$0")/ferret_view.py ]]; then [[ -n $local_fer ]] && echo "# FF_FERRET: ferret_view.py not found beside $0, running without the ferret" >&2
         elif [[ -t 2 ]]; then view=("$py" "$(dirname "$0")/ferret_view.py"); fi
     fi
     if (( ${#view[@]} )); then

@@ -173,9 +173,10 @@ backend,*,svc-fabric
 #   where the .tgz bundle and its .html dashboard go (.)
 # FF_OUT_DIR=.
 #
-#   draws the ferret over the log on a terminal (r rolls it, q hides it); blocks = half-block cells
-#   for a font without braille; default 0
-# FF_FERRET=0
+#   on a terminal the ferret roams over the log (r rolls it, q hides it); blocks = half-block cells
+#   for a font without braille; 0 = off. Unset: no terminal, python3 or ferret_view.py means the
+#   plain run, without a word; set to 1 or blocks, a missing part is said once
+# FF_FERRET=1
 #
 #   link speed for OK/SLOW cut-offs: N for every rail, or one per rail (A,B,...) when
 #   the rails differ by design (e.g. 100,50). Default: the fastest rail's most common

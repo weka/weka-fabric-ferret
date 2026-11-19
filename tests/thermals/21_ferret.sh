@@ -3,7 +3,7 @@
 # and stderr captured apart); python3 missing is said once, then the plain run; a viewer that dies after two lines
 # (FF_VIEWER names harness_ferret's stub) keeps the rc, the rows and the files, and the fallback line names no run log.
 # tier: fast
-# checks: 13
+# checks: 15
 # secs: 20
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh" "$@"
 STUB=$H/../fixtures/units/stub_viewer.sh
@@ -52,4 +52,13 @@ chk "env beats file: FF_SSH_USER=u2 exported with the file's u1: the stand-in pr
 tfx=$(mkf f_tfx 'backend,198.19.104.1' 'FF_FOO=1' 'FF_FERRET=1' "FF_VIEWER=$EV"); cap tfx env -u FF_HOSTS -u FF_SSH_USER $B $TC --list -t "$tfx"; xrc=$?
 chk "a bad settings line dies in the pre-pass, before the viewer: unknown FF_FOO on line 2, rc 2, the ERROR names file and line, 0 'viewer sees' lines, 0 escape bytes" \
     "[ $xrc = 2 ] && grep -q \"^ERROR: -t $tfx line 2: unknown setting FF_FOO;\" $W/tfx.err && [ \$(grep -c 'viewer sees' $W/tfx.err) = 0 ] && [ \$(cat $W/tfx.out $W/tfx.err | LC_ALL=C tr -cd '\033' | wc -c) = 0 ]" "rc $xrc; $(cat $W/tfx.err | head -n 3)"
+# the ferret on by default (2026-11-19): FF_FERRET unset starts the viewer (the dying stub, FF_VIEWER hook); FF_FERRET=0
+# does not; unset with no python3 on PATH: the plain run without a word
+cap dv env -u FF_FERRET FF_VIEWER=$STUB FF_HOSTS=198.19.104.1,198.19.104.2 $B $TC --list
+cap d0 env FF_FERRET=0 FF_VIEWER=$STUB FF_HOSTS=198.19.104.1,198.19.104.2 $B $TC --list
+chk "default on: FF_FERRET unset starts the viewer (its fallback line); FF_FERRET=0 with the same viewer does not" \
+    "grep -q '# FF_FERRET: the ferret viewer stopped (rc 3)' $W/dv.err && ! grep -q 'viewer stopped' $W/d0.err" "unset: $(grep -c 'viewer stopped' $W/dv.err) zero: $(grep -c 'viewer stopped' $W/d0.err)"
+cap dn env -u FF_FERRET PATH=$W/nopy FF_HOSTS=198.19.104.1,198.19.104.2 $B $TC --list; dnrc=$?
+chk "default on, no python3 on PATH: no line about it; stdout, stderr and rc the FF_FERRET=0 run's" \
+    "! grep -q 'FF_FERRET' $W/dn.err && cmp -s $W/dn.err $W/l0.err && cmp -s $W/dn.out $W/l0.out && [ $dnrc = \$(cat $W/l0.rc) ]" "rc $dnrc; $(diff $W/dn.err $W/l0.err | head -n 3)"
 finish
