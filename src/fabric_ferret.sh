@@ -982,7 +982,7 @@ main() {
         (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
         dscp_check "${dpl[@]}"
     fi
-    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/host_counters.txt"
+    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/card_load.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
@@ -1076,6 +1076,7 @@ main() {
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
         collect_counters "$BMEM_SCRIPT" "$WORK/bmem_pre"
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
+        card_sample   # NIC card load: the first read of the iteration
         collect_temps "iter${ITER}_pre" ipmi   # the BMC (inlet) once per iteration: ipmitool sensor can take tens of seconds
         if (( FF_SKIP_IPERF )); then
             phase_start
@@ -1101,7 +1102,7 @@ main() {
                     column -t < "$PHASE_OUT" | tee -a "$RESULTS"
                 elif [[ $PHASE == 2 ]]; then xwaves "$RESULTS"
                 else xg_waves "$RESULTS"; fi
-                phase_end $PHASE
+                phase_end $PHASE; card_sample "iter$ITER $PHASE"
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
                 [[ $errs -gt 0 ]] && { log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
                 collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.$PHASE"; hostctr_delta "iter${ITER}_p$PHASE" "$hc_prev" "$WORK/hc.$PHASE"; hc_prev=$WORK/hc.$PHASE

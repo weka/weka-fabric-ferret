@@ -48,7 +48,7 @@ udp_phases() {
             wait
         elif [[ $u == 2 ]]; then xwaves "$UDP_RESULTS" udp
         else xg_waves "$UDP_RESULTS" udp; fi
-        phase_end $PHASE
+        phase_end $PHASE; card_sample "iter$ITER $PHASE"
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local errs b=$WORK/udp.$u; errs=$(grep -c ',ERROR' "$PHASE_OUT")
         (( errs > 0 )) && { log "WARNING: $errs UDP runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }

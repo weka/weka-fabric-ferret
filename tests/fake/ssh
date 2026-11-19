@@ -156,6 +156,24 @@ if [[ $script == "IFS= read -r TC_PW"$'\n'* ]]; then
     if [[ -r $FSTATE/pw.$target && $pwl == "$(< "$FSTATE/pw.$target")" ]]; then tcpw=ok; else tcpw=bad; fi
 fi
 case $script in
+*"@@CARD"*)
+    # NIC card ports (first: the script names DROPS' and PRIO's counters too). Rails A and B share card 0000:05:00 (functions
+    # 0 and 1), rail C is card 0000:41:00; a FAKE_BOND_LLDP host's rail A bond reads its members ens1np0 (05:00.0) and
+    # ens3np0 (06:00.0). Gen4 x16 links. Each read adds 1 MB each way per port; FAKE_CARD_HOT=h: h's card 0000:05:00
+    # adds 1 TB each way per port per read and its discards and pause counters rise; FAKE_CARD_SLOW=h: h's links run at
+    # 8.0 GT/s x8 (below their 16.0 x16 maximum)
+    for nic in "$@"; do
+        [[ $nic == - ]] && continue
+        ps="$nic"; inlist "$h" "$FAKE_BOND_LLDP" && [[ $nic == enp5s0np0 || $nic == bond0 ]] && { [[ $kind == c ]] && ps="ens1f0 ens1f1" || ps="ens1np0 ens3np0"; }
+        for p in $ps; do
+            case $p in enp5s0np0|ens1np0|ens1f0) bus=0000:05:00.0 ;; enp196s0np0|ens1f1) bus=0000:05:00.1 ;; ens3np0) bus=0000:06:00.0 ;; *) bus=0000:41:00.0 ;; esac
+            f=$FSTATE/card.$h.$p; c=$(cat "$f" 2>&1); [[ $c =~ ^[0-9]+$ ]] || c=0; c=$(( c + 1 )); echo $c > "$f"
+            b=$(( c * 1000000 )); bp=0
+            if inlist "$h" "$FAKE_CARD_HOT" && [[ $bus == 0000:05:00.* ]]; then b=$(( c * 1000000000000 )); bp=$(( c * 50 )); fi
+            ls=16.0; lw=16; inlist "$h" "$FAKE_CARD_SLOW" && { ls=8.0; lw=8; }
+            echo "@@CARD $h $p $bus $ls $lw 16.0 16 $b $b $bp 0 0 $bp 0 0 na na"
+        done
+    done ;;
 # the DSCP probe (FF_RDMA=1, 11-03): RX on dst (args src dst nic port probe), TX on src (src dst port tos probe); first.
 # Receivers see FAKE_DSCP_TOS, else the run's FF_TOS, else 96; FAKE_DSCP_REWRITE=ip:tos,.. (dst IP sees tos),
 # FAKE_DSCP_REWRITE_FROM=ip:tos,.. (what src IP sends arrives as tos), FAKE_DSCP_IPERF_FAIL=h,.. (iperf3 probes from h

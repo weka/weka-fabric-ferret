@@ -569,6 +569,29 @@ for nic in "$@"; do
 done
 EOF
 
+# NIC card load (issue 9): every port of the rail NICs ($@; a bond's members instead of the bond), read at each phase
+# boundary, so a card (the ports sharing one PCIe device, bus address minus its function) can be judged against its
+# slot: "@@CARD host port bus cur_GTs cur_width max_GTs max_width rx_bytes tx_bytes rx_discards_phy rx_out_of_buffer
+# rx_buffer_passed_thres_phy tx_pause_ctrl_phy rx_pci_signal_integrity tx_pci_signal_integrity outbound_pci_stalled_rd
+# outbound_pci_stalled_wr" (na = not exposed). FF_SYSFS (default /sys) is a test hook.
+read -r -d '' CARD_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}
+num() { awk -v k="$1" '$1 == k {for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}} END {}'; }
+rd() { v=$(cat "$1" 2>&1); v=${v%% *}; case $v in ''|*[!0-9.]*) echo na ;; *) echo "$v" ;; esac; }
+for nic in "$@"; do
+    [ "$nic" = - ] && continue
+    ports=$nic; [ -r "$sys/class/net/$nic/bonding/slaves" ] && ports=$(cat "$sys/class/net/$nic/bonding/slaves" 2>&1)
+    for p in $ports; do
+        [ -d "$sys/class/net/$p" ] || continue
+        dev=$(readlink -f "$sys/class/net/$p/device" 2>&1); bus=${dev##*/}; [ -n "$bus" ] && [ -e "$dev" ] || bus=na
+        s=$(ethtool -S "$p" 2>&1)
+        o=""; for k in rx_discards_phy rx_out_of_buffer rx_buffer_passed_thres_phy tx_pause_ctrl_phy rx_pci_signal_integrity tx_pci_signal_integrity outbound_pci_stalled_rd outbound_pci_stalled_wr; do
+            v=$(echo "$s" | num "$k:"); o="$o ${v:-na}"; done
+        echo "@@CARD $h $p $bus $(rd "$dev/current_link_speed") $(rd "$dev/current_link_width") $(rd "$dev/max_link_speed") $(rd "$dev/max_link_width") $(rd "$sys/class/net/$p/statistics/rx_bytes") $(rd "$sys/class/net/$p/statistics/tx_bytes")$o"
+    done
+done
+EOF
+
 # Receive-side host counters, read at each TCP phase boundary: "host key value". TCP from /proc/net/snmp and
 # netstat, softnet_stat summed over CPUs (hex), NET_RX softirqs, PCIe AER totals per rail NIC ($@).
 read -r -d '' HOSTCTR_SCRIPT <<'EOF'

@@ -1213,6 +1213,29 @@ for nic in "$@"; do
 done
 EOF
 
+# NIC card load (issue 9): every port of the rail NICs ($@; a bond's members instead of the bond), read at each phase
+# boundary, so a card (the ports sharing one PCIe device, bus address minus its function) can be judged against its
+# slot: "@@CARD host port bus cur_GTs cur_width max_GTs max_width rx_bytes tx_bytes rx_discards_phy rx_out_of_buffer
+# rx_buffer_passed_thres_phy tx_pause_ctrl_phy rx_pci_signal_integrity tx_pci_signal_integrity outbound_pci_stalled_rd
+# outbound_pci_stalled_wr" (na = not exposed). FF_SYSFS (default /sys) is a test hook.
+read -r -d '' CARD_SCRIPT <<'EOF'
+h=$(hostname -s); sys=${FF_SYSFS:-/sys}
+num() { awk -v k="$1" '$1 == k {for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) {print $i; exit}} END {}'; }
+rd() { v=$(cat "$1" 2>&1); v=${v%% *}; case $v in ''|*[!0-9.]*) echo na ;; *) echo "$v" ;; esac; }
+for nic in "$@"; do
+    [ "$nic" = - ] && continue
+    ports=$nic; [ -r "$sys/class/net/$nic/bonding/slaves" ] && ports=$(cat "$sys/class/net/$nic/bonding/slaves" 2>&1)
+    for p in $ports; do
+        [ -d "$sys/class/net/$p" ] || continue
+        dev=$(readlink -f "$sys/class/net/$p/device" 2>&1); bus=${dev##*/}; [ -n "$bus" ] && [ -e "$dev" ] || bus=na
+        s=$(ethtool -S "$p" 2>&1)
+        o=""; for k in rx_discards_phy rx_out_of_buffer rx_buffer_passed_thres_phy tx_pause_ctrl_phy rx_pci_signal_integrity tx_pci_signal_integrity outbound_pci_stalled_rd outbound_pci_stalled_wr; do
+            v=$(echo "$s" | num "$k:"); o="$o ${v:-na}"; done
+        echo "@@CARD $h $p $bus $(rd "$dev/current_link_speed") $(rd "$dev/current_link_width") $(rd "$dev/max_link_speed") $(rd "$dev/max_link_width") $(rd "$sys/class/net/$p/statistics/rx_bytes") $(rd "$sys/class/net/$p/statistics/tx_bytes")$o"
+    done
+done
+EOF
+
 # Receive-side host counters, read at each TCP phase boundary: "host key value". TCP from /proc/net/snmp and
 # netstat, softnet_stat summed over CPUs (hex), NET_RX softirqs, PCIe AER totals per rail NIC ($@).
 read -r -d '' HOSTCTR_SCRIPT <<'EOF'
@@ -3349,7 +3372,7 @@ udp_phases() {
             wait
         elif [[ $u == 2 ]]; then xwaves "$UDP_RESULTS" udp
         else xg_waves "$UDP_RESULTS" udp; fi
-        phase_end $PHASE
+        phase_end $PHASE; card_sample "iter$ITER $PHASE"
         column -t < "$PHASE_OUT" | tee -a "$UDP_RESULTS"
         local errs b=$WORK/udp.$u; errs=$(grep -c ',ERROR' "$PHASE_OUT")
         (( errs > 0 )) && { log "WARNING: $errs UDP runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
@@ -3823,6 +3846,56 @@ bond_member_deltas() {
         log "WARNING: bond members flagged in $1 ($(wc -l <<<"$bad" | tr -d ' ')):"
         head -n 10 <<<"$bad" >&2
     fi
+    return 0
+}
+
+# card_sample [iterN phase]: every NIC card's ports read now (CARD_SCRIPT); with a label and an earlier read, the change
+# since that read appended to card_load.txt as "iterN phase host card ports tx_Gbps rx_Gbps slot_Gbps
+# link(cur_GTsxW/max_GTsxW) d_rx_discards_phy d_rx_out_of_buffer d_rx_buffer_passed_thres_phy d_tx_pause_ctrl_phy
+# d_pcie_errors flags" (a card = the ports on one PCIe device; Gb/s over the time between the reads; slot = the link's
+# raw rate after line encoding; flags: near_slot = tx or rx at 80% or more of it, backpressure = the NIC's discard,
+# out-of-buffer, buffer-threshold or pause counters rose, pcie_degraded = link below its maximum speed or width,
+# pcie_errors = signal-integrity or stall counters rose; - = none). The phase's busiest card is logged, and every
+# flagged one.
+card_sample() {
+    local now; collect_counters "$CARD_SCRIPT" "$WORK/card.cur"; now=$(date +%s)
+    if [[ -n $1 && -s $WORK/card.prev ]]; then
+        local it=${1%% *} ph=${1#* }
+        awk -v it="$it" -v ph="$ph" -v s=$(( now - CARD_T > 0 ? now - CARD_T : 1 )) -v near=80 'function d(a, b) { return (a ~ /^[0-9]+$/ && b ~ /^[0-9]+$/ && a + 0 >= b + 0) ? a - b : -1 }
+             $1 != "@@CARD" {next}
+             FILENAME == ARGV[1] {for (i = 9; i <= 18; i++) p[$2, $3, i] = $i; next}
+             !(($2, $3, 9) in p) {next}
+             {c = $4; sub(/\.[0-9]+$/, "", c); k = $2 SUBSEP c
+              if (!(k in seen)) {seen[k] = 1; ord[++n] = k; host[k] = $2; card[k] = c}
+              ports[k] = ports[k] (ports[k] == "" ? "" : ",") $3
+              x = d($9, p[$2, $3, 9]); if (x >= 0) rx[k] += x
+              x = d($10, p[$2, $3, 10]); if (x >= 0) tx[k] += x
+              for (i = 11; i <= 14; i++) {x = d($i, p[$2, $3, i]); if (x > 0) bp[k, i] += x}
+              for (i = 15; i <= 18; i++) {x = d($i, p[$2, $3, i]); if (x > 0) pe[k] += x}
+              if ($5 ~ /^[0-9.]+$/ && $6 ~ /^[0-9]+$/) {gt[k] = $5; w[k] = $6}
+              lk[k] = $5 "x" $6 "/" $7 "x" $8
+              if (($5 ~ /^[0-9.]+$/ && $7 ~ /^[0-9.]+$/ && $5 + 0 < $7 + 0) || ($6 ~ /^[0-9]+$/ && $8 ~ /^[0-9]+$/ && $6 + 0 < $8 + 0)) dg[k] = 1}
+             END {
+                 for (j = 1; j <= n; j++) {k = ord[j]
+                     tg = s > 0 ? tx[k] * 8 / s / 1e9 : 0; rg = s > 0 ? rx[k] * 8 / s / 1e9 : 0
+                     sl = (k in gt) ? gt[k] * w[k] * (gt[k] + 0 < 8 ? 0.8 : 128 / 130) : 0
+                     f = ""; top = tg > rg ? tg : rg
+                     if (sl > 0 && top >= near / 100 * sl) f = f ",near_slot"
+                     b = bp[k, 11] + bp[k, 12] + bp[k, 13] + bp[k, 14]; if (b > 0) f = f ",backpressure"
+                     if (dg[k]) f = f ",pcie_degraded"
+                     if (pe[k] > 0) f = f ",pcie_errors"
+                     printf "%s %s %s %s %s %.1f %.1f %.0f %s %d %d %d %d %d %s\n", it, ph, host[k], card[k], ports[k], tg, rg, sl, lk[k], bp[k, 11], bp[k, 12], bp[k, 13], bp[k, 14], pe[k], (f == "" ? "-" : substr(f, 2))
+                 }
+             }' \
+            "$WORK/card.prev" "$WORK/card.cur" > "$WORK/card.delta"
+        if [[ -s $WORK/card.delta ]]; then
+            cat "$WORK/card.delta" >> "$COLLECT_DIR/card_load.txt"
+            log "  NIC cards in phase $ph ($(wc -l < "$WORK/card.delta" | tr -d ' '); card_load.txt): busiest $(awk '{t = $6 > $7 ? $6 : $7; if (t >= m) {m = t; r = $3 " " $4 " (" $5 "): tx " $6 " / rx " $7 " Gb/s of a " $8 " Gb/s slot"}} END {print r}' "$WORK/card.delta")"
+            local bad; bad=$(awk '$15 != "-" {printf "#   %s %s (%s): %s (tx %s / rx %s Gb/s of %s; link %s; discards %s, out-of-buffer %s, buffer threshold %s, pause sent %s, PCIe errors %s)\n", $3, $4, $5, $15, $6, $7, $8, $9, $10, $11, $12, $13, $14}' "$WORK/card.delta")
+            [[ -n $bad ]] && { log "  WARNING: NIC cards flagged in phase $ph ($(wc -l <<<"$bad" | tr -d ' ')):"; head -n 10 <<<"$bad" >&2; }
+        fi
+    fi
+    mv "$WORK/card.cur" "$WORK/card.prev"; CARD_T=$now
     return 0
 }
 
@@ -4674,7 +4747,7 @@ main() {
         (( ${#CLI[@]} )) && mapfile -t -O ${#dpl[@]} dpl < <(dscp_client_paths | sort -u)
         dscp_check "${dpl[@]}"
     fi
-    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/host_counters.txt"
+    : > "$COLLECT_DIR/pairs.txt"; : > "$COLLECT_DIR/prio_counters.txt"; : > "$COLLECT_DIR/fec_rates.txt"; : > "$COLLECT_DIR/bond_members.txt"; : > "$COLLECT_DIR/card_load.txt"; : > "$COLLECT_DIR/host_counters.txt"
     echo "Iter Phase Start_UTC End_UTC" > "$COLLECT_DIR/phase_times.txt"
     (( FF_TEMPS )) && echo "Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status" > "$COLLECT_DIR/temps.txt"
     : > "$WORK/hc_reads"; HC_READS=0; : > "$WORK/paths_ok"
@@ -4768,6 +4841,7 @@ main() {
         collect_counters "$FEC_SCRIPT" "$WORK/fec_pre"; local fec_t0; fec_t0=$(date +%s)
         collect_counters "$BMEM_SCRIPT" "$WORK/bmem_pre"
         collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.pre"; local hc_prev=$WORK/hc.pre
+        card_sample   # NIC card load: the first read of the iteration
         collect_temps "iter${ITER}_pre" ipmi   # the BMC (inlet) once per iteration: ipmitool sensor can take tens of seconds
         if (( FF_SKIP_IPERF )); then
             phase_start
@@ -4793,7 +4867,7 @@ main() {
                     column -t < "$PHASE_OUT" | tee -a "$RESULTS"
                 elif [[ $PHASE == 2 ]]; then xwaves "$RESULTS"
                 else xg_waves "$RESULTS"; fi
-                phase_end $PHASE
+                phase_end $PHASE; card_sample "iter$ITER $PHASE"
                 local errs; errs=$(grep -c ',ERROR' "$PHASE_OUT")
                 [[ $errs -gt 0 ]] && { log "WARNING: $errs runs in phase $PHASE returned no result (lines with ERROR above):"; log_hist "$PHASE_OUT"; }
                 collect_counters "$HOSTCTR_SCRIPT" "$WORK/hc.$PHASE"; hostctr_delta "iter${ITER}_p$PHASE" "$hc_prev" "$WORK/hc.$PHASE"; hc_prev=$WORK/hc.$PHASE
