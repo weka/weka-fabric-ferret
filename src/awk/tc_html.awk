@@ -37,7 +37,7 @@ END {
             print s "<td>" e(q[9]) "</td></tr>" }
         print "</tbody></table></div>" }
     if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
-    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
+    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples and also near, high or crit, or with no thresholds" : "") ".</p></section>"
     for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
         printf "<section class=\"panel\" id=\"p-%s\"><h2>%s</h2><p class=\"mut\">The OS table (hwmon, nvidia-smi) and the BMC / IPMI table. One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", ty, tname[ty], (nsamp > 1 ? "highest reading" : "reading")
         for (g = 1; g <= 2; g++) { p = (g == 1 ? "os" : "bmc") "-" ty; if (!(p in pc)) continue

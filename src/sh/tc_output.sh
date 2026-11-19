@@ -16,7 +16,7 @@ print_summary() {
     local ts=$WORK/temps_summary.txt
     echo ""
     local fk=10 mk=7; (( NSAMP > 1 )) && { fk=13; mk=9; }   # flag and max columns of the view
-    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples")):"
+    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples and also near, high or crit, or with no thresholds")):"
     awk '#@awk tc_print_summary' "$ts"
     if awk 'NR > 1 && $NF != "-" {f = 1} END {exit !f}' "$WORK/view"; then
         echo "  Flagged sensors:"

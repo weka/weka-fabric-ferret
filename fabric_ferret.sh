@@ -163,7 +163,8 @@ Optional (default)
                    hwmon and nvidia-smi as the login), and a -t file's bmc lines out of band from here. 0 = off
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
-  FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
+  FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10) when it is
+                   also near, high or crit, or has no high or crit threshold
   FF_THERMALS_ONLY (0)  1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture
                    instead, the same files (thermcap_<UTC>.jsonl, and .html/.md with -o) in FF_OUT_DIR and the same
                    RESULT line. Targets: FF_HOSTS as backends and FF_CLIENTS as clients (as -t backend and client
@@ -1413,7 +1414,8 @@ END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C
         if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
         else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
         else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
-        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
+        # a climb is a flag only next to a threshold flag, or on a sensor with no threshold to judge it by
+        if (mx[k] - fi[k] > rise && (f != "-" || !((k in hi) || (k in cr)))) f = (f == "-" ? "" : f "+") "rise"
         printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
                ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
     for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }'
@@ -1611,7 +1613,7 @@ print_summary() {
     local ts=$WORK/temps_summary.txt
     echo ""
     local fk=10 mk=7; (( NSAMP > 1 )) && { fk=13; mk=9; }   # flag and max columns of the view
-    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples")):"
+    echo "Temperatures, $( (( NSAMP > 1 )) && echo "$NSAMP samples" || echo "one reading") (hwmon, GPUs via nvidia-smi$( (( FF_IPMI )) && echo ", BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high$( (( NSAMP > 1 )) && echo ", rise = up more than ${FF_TEMP_RISE}C over the samples and also near, high or crit, or with no thresholds")):"
     awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
          END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
     if awk 'NR > 1 && $NF != "-" {f = 1} END {exit !f}' "$WORK/view"; then
@@ -1854,7 +1856,7 @@ END {
             print s "<td>" e(q[9]) "</td></tr>" }
         print "</tbody></table></div>" }
     if (nf) { print "<h3>Flagged sensors</h3><div class=\"wrap\"><table class=\"sortable\">" hdr "<tbody>"; for (i = 1; i <= nf; i++) print row(fr[i]); print "</tbody></table></div>" }
-    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples" : "") ".</p></section>"
+    print "<p class=\"mut\">Flags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "&deg;C of high" (nsamp > 1 ? "; rise = up more than " rise "&deg;C over the samples and also near, high or crit, or with no thresholds" : "") ".</p></section>"
     for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
         printf "<section class=\"panel\" id=\"p-%s\"><h2>%s</h2><p class=\"mut\">The OS table (hwmon, nvidia-smi) and the BMC / IPMI table. One row per host; each cell is the %s in &deg;C, with the crit threshold under the sensor name (in the cell when hosts differ); flagged readings are shaded. Click a sensor to sort.</p>\n", ty, tname[ty], (nsamp > 1 ? "highest reading" : "reading")
         for (g = 1; g <= 2; g++) { p = (g == 1 ? "os" : "bmc") "-" ty; if (!(p in pc)) continue
@@ -1920,7 +1922,7 @@ END {
     if (nh) { print "\n### Hottest reading per host and type (°C)\n\n| Host | Inlet | CPU | GPU | Mem | NVMe | NIC | Other | Flags |\n|---|--:|--:|--:|--:|--:|--:|--:|---|"
         for (i = 1; i <= nh; i++) { split(hm[i], q, " "); s = "| " q[1] " |"; for (j = 2; j <= 8; j++) s = s " " q[j] " |"; print s " " (q[9] == "-" ? "-" : "**" q[9] "**") " |" } }
     if (nf) { print "\n### Flagged sensors\n\n" hdr; for (i = 1; i <= nf; i++) print row(fr[i]) }
-    print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high" (nsamp > 1 ? "; rise = up more than " rise "°C over the samples" : "") "."
+    print "\nFlags: crit = at or above crit (or BMC cr/nr); high = at or above high (or BMC nc); near = within " margin "°C of high" (nsamp > 1 ? "; rise = up more than " rise "°C over the samples and also near, high or crit, or with no thresholds" : "") "."
     for (t = 1; t <= 7; t++) { ty = tyo[t]; if (!((("os-" ty) in pc) || (("bmc-" ty) in pc))) continue
         print "\n## " tname[ty]
         for (gi = 1; gi <= 2; gi++) { g = (gi == 1 ? "os" : "bmc"); p = g "-" ty; if (!(p in pc)) continue
@@ -4900,7 +4902,7 @@ main() {
         # heat before fabric: a hot host can cap throughput, resend and flap links on its own
         if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
             local ts=$COLLECT_DIR/temps_summary.txt
-            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
+            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run and also near, high or crit, or with no thresholds):"
             awk 'NR > 1 && $6 != "none" {n++; if (!($1 in h)) {h[$1] = 1; nh++}; if ($12 != "-") {f++; if (!($1 in fh)) {fh[$1] = 1; nf++}}}
                  END {printf "  %d sensors on %d hosts; %d flagged on %d hosts\n", n, nh, f, nf}' "$ts"
             # per host the hottest reading of each type, the row thermals_capture.sh prints (SRC_AWK, tc_summary.sh)

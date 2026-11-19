@@ -215,7 +215,8 @@ backend,*,svc-fabric
 #   a sensor within this many °C of its high threshold is flagged near (5)
 # FF_TEMP_MARGIN=5
 #
-#   a sensor that climbs more than this many °C over the run is flagged rise (10)
+#   a sensor that climbs more than this many °C over the run is flagged rise (10) when it is
+#   also near, high or crit, or has no high or crit threshold
 # FF_TEMP_RISE=10
 #
 #   1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture

@@ -10,7 +10,8 @@ END { print "Host Source Type Chip Dev Sensor First_C Max_C Last_C High_C Crit_C
         if (bc[k] == 2 || ((k in cr) && mx[k] >= cr[k])) f = "crit"
         else if (bc[k] == 1 || ((k in hi) && mx[k] >= hi[k])) f = "high"
         else if ((k in hi) && mx[k] >= hi[k] - margin) f = "near"
-        if (mx[k] - fi[k] > rise) f = (f == "-" ? "" : f "+") "rise"
+        # a climb is a flag only next to a threshold flag, or on a sensor with no threshold to judge it by
+        if (mx[k] - fi[k] > rise && (f != "-" || !((k in hi) || (k in cr)))) f = (f == "-" ? "" : f "+") "rise"
         printf "%s %s %s %s %s %s %.1f %.1f %.1f %s %s %s\n", p[1], p[2], ty(p[2], p[3], p[4]), p[3], p[4], p[5], fi[k], mx[k], la[k],
                ((k in hi) ? hi[k] : "-"), ((k in cr) ? cr[k] : "-"), f }
     for (x in nd) if (!(x in got)) { split(x, p, SUBSEP); print p[1], p[2], "-", "-", "-", "none", "-", "-", "-", "-", "-", "nodata:" nd[x] } }

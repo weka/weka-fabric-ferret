@@ -76,6 +76,7 @@ Settings (the same names as fabric_ferret.sh; default)
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60); a whole host read is cut off 30 s after it
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
   FF_TEMP_RISE     a sensor whose highest sample is more than this many °C above its first is flagged rise (10)
+                   when it is also near, high or crit, or has no high or crit threshold
   FF_LABEL         name in the report title inside the files (the first host with readings)
   FF_OUT_DIR       where the output goes (.)
   FF_FERRET (1)    on a terminal a ferret roams over the log (ferret_view.py beside it, python3; r rolls it,
@@ -84,7 +85,7 @@ Settings (the same names as fabric_ferret.sh; default)
                    run goes on, its lines not replayed (the files hold the data)
 
 Flags per sensor, worst first: crit (at or above crit, or BMC status cr/nr), high (at or above high, or BMC
-nc), near (within FF_TEMP_MARGIN of high), then +rise. A threshold of 0 counts as unset. A sensor with a crit
+nc), near (within FF_TEMP_MARGIN of high), then +rise (only with one of those, or on a sensor with no threshold). A threshold of 0 counts as unset. A sensor with a crit
 but no high gets high = 95% of crit. A host or source that
 connected but gave no reading (auth refused, cut off, no hwmon, no ipmitool, sudo refused, ipmitool timed out) gets a nodata record
 with the reason: no data is never shown as cool.

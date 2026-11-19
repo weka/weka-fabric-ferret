@@ -5,7 +5,7 @@
 # Fixtures: fixtures/units/ (hand-written, small; FF's own work files never reach a bundle, so their format is guarded
 # by the golden groups' end-to-end checks) and fixtures/golden-B|C/ (bundle members, compared fresh in 50 and 52).
 # tier: fast
-# checks: 77
+# checks: 79
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh" "$@"
 A=$(cd "$(dirname "$C")" && pwd)/src/awk; U=$S/fixtures/units; AWKBIN=$S/awkbin
 # uf <name> <program file> awk-options... -- files...: runs it under the three awks and prints bsd's output; an awk
@@ -204,5 +204,15 @@ o=$(uf "lldp_rail_check bond" $A/ff_lldp_rail_check.awk -- $U/railmap_bond.txt $
 chk "lldp_rail_check unit: a bond member on the other rail's leaf is named under the bond's rail; one finding" \
     "[ \"\$o\" = 'h1 lldp_wrong_rail rail B NIC m2 is cabled to leaf1, which 3 other NICs reach on rail A' ]" "$o"
 awkagree "lldp_rail_check bond"
+
+# temp_summary (issue 12, 2026-11-19): rise is a flag only when the sensor is also near, high or crit, or has no high or
+# crit threshold to judge it by; a core that climbs 40 -> 54 under load with high 79 / crit 87 is not flagged.
+# call site src/sh/tc_summary.sh: awk -v margin="$FF_TEMP_MARGIN" -v rise="$FF_TEMP_RISE" "$TEMP_SUM_AWK"
+o=$(uf temp_rise $A/temp_summary.awk -v margin=5 -v rise=10 -- $U/temps_rise.txt | awk 'NR > 1 {print $6, $12}' | tr '\n' '|')
+perl -pe 's/^(\s*if \(mx\[k\] - fi\[k\] > rise)\s*&&.*?\) f =/$1) f =/' $A/temp_summary.awk > $W/temp_rise.bug.awk
+ob=$(awk -v margin=5 -v rise=10 -f $W/temp_rise.bug.awk $U/temps_rise.txt | awk 'NR > 1 {print $6, $12}' | tr '\n' '|')
+chk "temp_summary rise: Core_0 40->54 (high 79) no flag; Core_1 62->76 near+rise; package 70->88 high+rise; NVMe 50->52 none; BMC VR_P2 49->60 with no thresholds rise; control: the rule without its threshold test flags Core_0 rise" \
+    "[ '$o' = 'Core_0 -|Core_1 near+rise|Package_id_0 high+rise|Composite -|VR_P2 rise|' ] && [ \$(diff $A/temp_summary.awk $W/temp_rise.bug.awk | grep -c '^>') = 1 ] && [ '${ob%%|*}' = 'Core_0 rise' ]" "new '$o' | control '$ob'"
+awkagree "temp_rise"
 
 finish

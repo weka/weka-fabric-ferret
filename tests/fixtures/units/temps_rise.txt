@@ -1,0 +1,11 @@
+Label Host Source Chip Dev Sensor Temp_C High_C Crit_C Status
+iter1_pre h1 hwmon coretemp coretemp.0 Core_0 40.000 79.000 87.000 -
+iter1_pre h1 hwmon coretemp coretemp.0 Core_1 62.000 79.000 87.000 -
+iter1_pre h1 hwmon coretemp coretemp.0 Package_id_0 70.000 80.000 100.000 -
+iter1_pre h1 hwmon nvme nvme0 Composite 50.000 80.000 85.000 -
+iter1_pre h1 ipmi bmc - VR_P2 49.000 - - ok
+end h1 hwmon coretemp coretemp.0 Core_0 54.000 79.000 87.000 -
+end h1 hwmon coretemp coretemp.0 Core_1 76.000 79.000 87.000 -
+end h1 hwmon coretemp coretemp.0 Package_id_0 88.000 80.000 100.000 -
+end h1 hwmon nvme nvme0 Composite 52.000 80.000 85.000 -
+end h1 ipmi bmc - VR_P2 60.000 - - ok

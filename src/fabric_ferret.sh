@@ -162,7 +162,8 @@ Optional (default)
                    hwmon and nvidia-smi as the login), and a -t file's bmc lines out of band from here. 0 = off
   FF_IPMI_TIMEOUT  seconds per ipmitool read (60)
   FF_TEMP_MARGIN   a sensor within this many °C of its high threshold is flagged near (5)
-  FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10)
+  FF_TEMP_RISE     a sensor that climbs more than this many °C over the run is flagged rise (10) when it is
+                   also near, high or crit, or has no high or crit threshold
   FF_THERMALS_ONLY (0)  1 = --thermals-only: no rails, no network test, no bundle; thermals_capture.sh's capture
                    instead, the same files (thermcap_<UTC>.jsonl, and .html/.md with -o) in FF_OUT_DIR and the same
                    RESULT line. Targets: FF_HOSTS as backends and FF_CLIENTS as clients (as -t backend and client
@@ -1173,7 +1174,7 @@ main() {
         # heat before fabric: a hot host can cap throughput, resend and flap links on its own
         if (( FF_TEMPS )) && [[ -s $COLLECT_DIR/temps_summary.txt ]]; then
             local ts=$COLLECT_DIR/temps_summary.txt
-            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run):"
+            echo "Temperatures (temps_summary.txt; hwmon, nvidia-smi$( (( FF_IPMI )) && echo " and BMC via ipmitool"); flags: crit, high, near = within ${FF_TEMP_MARGIN}C of high, rise = up more than ${FF_TEMP_RISE}C over the run and also near, high or crit, or with no thresholds):"
             awk '#@awk ff_main.temp_counts' "$ts"
             # per host the hottest reading of each type, the row thermals_capture.sh prints (SRC_AWK, tc_summary.sh)
             awk "$SRC_AWK" "$ts" | { read -r hdr; echo "$hdr"; sort -k1,1 -k2,2; } | column -t | sed 's/^/  /'
