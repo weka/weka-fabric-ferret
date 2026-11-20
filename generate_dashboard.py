@@ -183,13 +183,15 @@ function tcCss(t) {
     var st = t._tcs, id = '#' + t.id, s = [];
     Object.keys(st.hidden).forEach(function (i) { if (st.hidden[i]) s.push(id + ' .tcc' + i + ' { display: none; }'); });
     Object.keys(st.narrow).forEach(function (i) { s.push(id + ' .tcc' + i + ' { box-sizing: border-box; max-width: ' + st.narrow[i] + 'px; overflow: hidden; text-overflow: ellipsis; }'); });
-    // "#" and the frozen columns stay put while the slider moves the rest: they move back by the slider's offset, over the rest; they keep the table's own cell colours and stripes
+    // "#" and the frozen columns stay put while the slider moves the rest: they move back by the slider's offset, over the rest
     var pin = (st.hash ? [0] : []).concat(st.frozen);
     pin.forEach(function (i) {
         s.push(id + " .tcc" + i + " { transform: translateX(var(--tcx, 0px)); }");
         s.push(id + " td.tcc" + i + " { position: relative; z-index: 1; }");
         s.push(id + " th.tcc" + i + " { z-index: 3; }");
     });
+    // the frozen body cells get a pale blue tint laid over their own colour (stripes and status colours stay)
+    st.frozen.forEach(function (i) { s.push(id + " td.tcc" + i + " { background-image: linear-gradient(rgba(13,110,253,0.12), rgba(13,110,253,0.12)); }"); });
     if (pin.length) { var e = pin[pin.length - 1];
         s.push(id + ".tc-need td.tcc" + e + " { box-shadow: inset -2px 0 0 #0f3460, inset 0 0 0 9999px var(--bs-table-bg-state, var(--bs-table-bg-type, var(--bs-table-accent-bg))); }", id + ".tc-need th.tcc" + e + " { box-shadow: inset 0 -2px 0 #e94560, inset -2px 0 0 #4ecca3; }"); }
     document.getElementById('tcs-' + t.id).textContent = s.join('\n');

@@ -162,12 +162,13 @@ function tcpFreeze(r, vis, lab, fin) {
         dbl(cell(B)); o.f2 = st.frozen.join() === A + ',' + B && order(hr).split(',').slice(1, 3).join() === A + ',' + B ? 1 : 0;
         o.rows = rowsOk();
         // colour: in the first two body rows each frozen cell has the background (opaque), text colour and stripe of
-        // a rest cell in its row; the last frozen one adds its edge in front of that stripe
-        var cs = function (e) { return getComputedStyle(e); };
+        // a rest cell in its row with a pale blue tint over it (no tint on the rest cell or '#'); the last frozen one adds
+        // its edge in front of that stripe
+        var cs = function (e) { return getComputedStyle(e); }, tint = /rgba\(13, 110, 253, 0\.12\)/;
         o.color = [0, 1].every(function (k) { var w = t.tBodies[0].rows[k]; if (!w) return true;
             var R = cs(tcCell(w, st.rest[0])), a = cs(tcCell(w, A)), b = cs(tcCell(w, B));
             return /^rgb\(/.test(R.backgroundColor) && a.backgroundColor === R.backgroundColor && b.backgroundColor === R.backgroundColor
-                && a.color === R.color && b.color === R.color && a.backgroundImage === 'none' && b.backgroundImage === 'none'
+                && a.color === R.color && b.color === R.color && tint.test(a.backgroundImage) && tint.test(b.backgroundImage) && R.backgroundImage === 'none' && (!st.hash || cs(tcCell(w, 0)).backgroundImage === 'none')
                 && a.boxShadow === R.boxShadow && b.boxShadow.indexOf(R.boxShadow) > 0; }) ? 1 : 0;
         var s = t.parentElement.nextElementSibling, d = t.tBodies[0].rows[0], before = [L(cell(A)), L(cell(B)), L(tcCell(d, A)), L(tcCell(d, B))];
         s.scrollLeft = 80; s.dispatchEvent(new Event('scroll'));
