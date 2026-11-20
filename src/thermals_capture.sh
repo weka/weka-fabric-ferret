@@ -58,6 +58,7 @@ Options
   --pw-prompt      ask on the terminal, at the start, for one password for every ssh target that has none of
                    its own (as FF_PW_PROMPT=1; see -t for a pw of ?)
   -h, --help       this text
+  --version        print the version and exit
 
 Settings (the same names as fabric_ferret.sh; default)
   FF_HOSTS         ssh targets, backends (key ssh as FF_SSH_USER), comma or space separated, any mix of: 10.1.0.5,node07 | 10.1.0.0/24 |
@@ -183,6 +184,7 @@ main() {
 # stderr. Missing python3 or file: said once when FF_FERRET was set (unset: no word), then the plain run; no terminal: the plain run. A dead viewer: the terminal restored, a
 # line, the rest copied. FF_VIEWER (its command): a test hook.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    [[ $1 == --version ]] && { echo "thermals_capture.sh $THERMALS_VERSION"; exit 0; }   # before anything else: no -t file, no prompt
     # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
     # the file works as the command line does. -t found as main's getopts finds it; a bad line dies here, rc 2.
     HF_PRELOG=(); HF_KNOWN=$TC_KNOWN; HF_OTHER=$FF_KNOWN; HF_OTHER_NAME=fabric_ferret.sh

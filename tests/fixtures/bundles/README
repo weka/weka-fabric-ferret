@@ -7,7 +7,8 @@ Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the f
 11-14 on them, then swap them in and update the commit below.
 
 11_routed32.tgz, 11_xcrit.tgz, 12_slowcross.tgz, 12_bslow.tgz, 14_ua.tgz, 14_ub.tgz, 14_un.tgz, 14_ul.tgz, 14_ux.tgz
-    made by tools/mkbundles.sh; on 11-19 07:10Z card_load.txt (from a 494cafe run of the same mkbundles line) was added to
+    made by tools/mkbundles.sh; on 11-20 04:59Z metadata.txt gained tool_version=1.0.0 (the line added after tool=, the runs
+    inside kept, as with card_load.txt); on 11-19 07:10Z card_load.txt (from a 494cafe run of the same mkbundles line) was added to
     these and the two 14_ archives below, and the runs inside were kept: the ring (f7ed481) changes which NICs run each phase, and 11, 12 and 14 test
     edges the pairs gave (two NICs slow on cross only, the leaf loads). Before that, at the issue 7 bond member commit (its tree, before the commit; parent
     a1fbe00), 11-19 05:09Z (bond_members.txt joined the bundle, empty here: no run here has a bond); before that at the
@@ -24,7 +25,7 @@ Drift check (50, --full): every .tgz here (not 12_old_v2) is compared with the f
     Remake them (into a new directory, then swap) when the bundle format changes; update this commit.
 14_where.tgz, 14_clean.tgz
     14's "Where to look" edges (10-29): a hot host with CRITICAL B NICs on five hosts and four slow clients, h4 without
-    LLDP (14_where); two hosts with nothing wrong (14_clean). Made with the nine above (card_load.txt added 11-19, as above).
+    LLDP (14_where); two hosts with nothing wrong (14_clean). Made with the nine above (card_load.txt added 11-19, tool_version 11-20, as above).
 14_ub_oldtypes.tar.gz
     the 14_ub.tgz made at c3a2aa6's format (above), kept as it was before the 10-29 regeneration: a 12-column
     temps_summary.txt with BMC rows typed bmc, the shape every bundle before 83d55e4 has. 14 renders it for the

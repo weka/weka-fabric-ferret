@@ -802,6 +802,7 @@ def generate_html(data, output_path):
     total_hosts = meta.get('total_hosts', len(data["raw_hosts"]))
     timestamp = meta.get('timestamp', '')
     end_timestamp = meta.get('end_timestamp', '')
+    tool_version = escape(meta.get('tool_version', '')) or 'version unknown'   # metadata.txt tool_version (1.0.0 on); older bundles have none
 
     # Connection-level stats: how many unique IPs, how many healthy
     total_ips = len(ip_avgs)
@@ -1260,7 +1261,7 @@ table.tc-cols .col-filter select, table.tc-cols .col-filter input {{ min-width: 
 <!-- Header — single compact line -->
 <div style="background:#0f3460; padding:10px 20px; margin-bottom:12px; border-radius:6px; border:1px solid #0f3460; display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 20px;">
     <span style="color:#4ecca3; font-size:1.1rem; font-weight:700;">{label} Data Plane Validation</span>
-    <span style="color:#8899aa; font-size:0.85rem;">{timestamp} | line rate {L}G ({data['line_rate_src']}){rail_note}</span>
+    <span style="color:#8899aa; font-size:0.85rem;">{timestamp} | fabric_ferret.sh {tool_version} | line rate {L}G ({data['line_rate_src']}){rail_note}</span>
     <span style="color:#e0e0e0; font-size:0.85rem;">
         <b class="stat-info">{total_ips}</b> connections |
         <b class="stat-good">{healthy_ips}</b> healthy (&ge;{G}G) |

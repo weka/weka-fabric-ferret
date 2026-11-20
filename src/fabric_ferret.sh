@@ -6,12 +6,15 @@
 [ "${BASH_VERSINFO[0]}" -gt 4 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; } || {
     echo "fabric_ferret.sh: needs bash 4.3+ (this is bash $BASH_VERSION)" >&2; echo "RESULT coverage=STOPPED (needs bash 4.3+)" >&2; exit 2; }
 
+FERRET_VERSION=1.0.0   # fabric_ferret.sh --version; written to the bundle's metadata.txt as tool_version
+
 usage() {
     cat <<'EOF'
 Usage: FF_HOSTS=<targets> FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh [duration_s]
        FF_RAILS='<cidr,...>;<cidr,...>' ./fabric_ferret.sh -t FILE [duration_s]   (targets from a file instead)
        FF_HOSTS=<targets> ./fabric_ferret.sh --list   (print expanded targets, no ssh; -t FILE works too)
        ./fabric_ferret.sh --pw-prompt [-t FILE] [...]   (ask on the terminal for the ssh password; see -t)
+       ./fabric_ferret.sh --version   (print the version and exit)
        FF_HOSTS=<targets> [FF_CLIENTS=<targets>] ./fabric_ferret.sh --thermals-only [-o jsonl,html,md] [-d s [-i s]] [-v]
        ./fabric_ferret.sh --thermals-only -t FILE [options]   (temperatures only, as thermals_capture.sh)
 From a jump host (settings ride in the remote command; nothing to edit or copy first):
@@ -1389,6 +1392,7 @@ main() {
         echo "mesh_client_lossy=${MESH_CLOSSY:-}"
         echo "mesh_unrouted=${MESH_UNROUTED:-}"
         echo "tool=fabric_ferret"
+        echo "tool_version=$FERRET_VERSION"
     } > "$COLLECT_DIR/metadata.txt"
     for k in "${ELIG[@]}"; do
         local hl="${T_HOST[$k]} ${T_TARGET[$k]}"; for r in "${RAILS[@]}"; do hl+=" ${RIP[$k,$r]}"; done; for r in "${RAILS[@]}"; do hl+=" ${RNIC[$k,$r]}"; done
@@ -1442,6 +1446,7 @@ START_TS=$(date -u +%Y%m%dT%H%M%SZ)
 # bare `wait` also waits for a process substitution, which never exits while main runs.
 # tee ignores INT/TERM/HUP (Ctrl-C, group kill, dropped session) so cleanup can still write.
 if [[ ${#BASH_SOURCE[@]} -eq 0 || ${BASH_SOURCE[0]} == "$0" ]]; then
+    [[ $1 == --version ]] && { echo "fabric_ferret.sh $FERRET_VERSION"; exit 0; }   # before anything else: no -t file, no prompt, no log
     # A -t file's settings lines first, exported, before anything reads a setting (FF_FERRET, FF_VIEWER included):
     # the file works as the command line does. -t FILE / -tFILE found as main finds them; a bad line dies here, rc 2.
     HF_PRELOG=(); HF_KNOWN=$FF_KNOWN; HF_OTHER=$TC_KNOWN; HF_OTHER_NAME=thermals_capture.sh

@@ -1,7 +1,7 @@
 # ---------- a temperature capture after the targets are loaded (both tools: thermals_capture.sh, and
 # fabric_ferret.sh --thermals-only) ----------
 
-THERMALS_VERSION=1.0
+THERMALS_VERSION=1.0.0   # thermals_capture.sh --version and the capture's outputs
 
 # tc_cleanup: the EXIT trap of a capture: close the ssh masters, remove SOCKET_DIR and WORK, keep the exit code
 tc_cleanup() {
