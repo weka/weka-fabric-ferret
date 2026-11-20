@@ -133,7 +133,8 @@ function tcpLater(r, show, vis, lab) {
 //   rest, the other stays frozen; sort1 a single click sorts (a moment later); drag a drag puts the 4th rest column
 //   first among the rest; grp a rest column dragged left of the frozen ones stays first among the rest; fdrag a frozen
 //   column dragged left of the other frozen one goes first; csv the CSV's first columns are the frozen ones in order;
-//   page on page 2 the rows follow the header too (1 when one page); nofreeze a double-click on a table that needs no slider freezes nothing
+//   page on page 2 the rows follow the header too (1 when one page); nofreeze a double-click on a table that needs no slider freezes nothing; color the frozen cells keep
+//   the colours of the rest (see below)
 function tcpFreeze(r, vis, lab, fin) {
     r.frz = '-';
     var t = null, calm = null;
@@ -160,6 +161,14 @@ function tcpFreeze(r, vis, lab, fin) {
         dbl(cell(A)); o.f1 = st.frozen.join() === String(A) && order(hr).split(',')[1] === String(A) ? 1 : 0;
         dbl(cell(B)); o.f2 = st.frozen.join() === A + ',' + B && order(hr).split(',').slice(1, 3).join() === A + ',' + B ? 1 : 0;
         o.rows = rowsOk();
+        // colour: in the first two body rows each frozen cell has the background (opaque), text colour and stripe of
+        // a rest cell in its row; the last frozen one adds its edge in front of that stripe
+        var cs = function (e) { return getComputedStyle(e); };
+        o.color = [0, 1].every(function (k) { var w = t.tBodies[0].rows[k]; if (!w) return true;
+            var R = cs(tcCell(w, st.rest[0])), a = cs(tcCell(w, A)), b = cs(tcCell(w, B));
+            return /^rgb\(/.test(R.backgroundColor) && a.backgroundColor === R.backgroundColor && b.backgroundColor === R.backgroundColor
+                && a.color === R.color && b.color === R.color && a.backgroundImage === 'none' && b.backgroundImage === 'none'
+                && a.boxShadow === R.boxShadow && b.boxShadow.indexOf(R.boxShadow) > 0; }) ? 1 : 0;
         var s = t.parentElement.nextElementSibling, d = t.tBodies[0].rows[0], before = [L(cell(A)), L(cell(B)), L(tcCell(d, A)), L(tcCell(d, B))];
         s.scrollLeft = 80; s.dispatchEvent(new Event('scroll'));
         var after = [L(cell(A)), L(cell(B)), L(tcCell(d, A)), L(tcCell(d, B))];
@@ -185,7 +194,7 @@ function tcpFreeze(r, vis, lab, fin) {
                 o.page = 1; if (dt.page.info().pages > 1) { dt.page(1).draw('page'); o.page = rowsOk() && t.tBodies[0].rows.length > 0 ? 1 : 0; dt.page(0).draw('page'); }
                 o.nofreeze = 1;
                 if (calm) { var c0 = calm._tcs.rest[1]; dbl(tcCell(calm.tHead.rows[0], c0)); o.nofreeze = calm._tcs.frozen.length === 0 ? 1 : 0; }
-                r.frz = ['f1', 'f2', 'rows', 'pin', 'nosort', 'back', 'sort1', 'drag', 'grp', 'fdrag', 'csv', 'page', 'nofreeze'].map(function (k) { return o[k]; }).join('');
+                r.frz = ['f1', 'f2', 'rows', 'pin', 'nosort', 'back', 'sort1', 'drag', 'grp', 'fdrag', 'csv', 'page', 'nofreeze', 'color'].map(function (k) { return o[k]; }).join('');
                 fin();
             }, 500);
         }, 500);
